@@ -48,6 +48,37 @@ Use **Settings → Integrations → Test connection** to verify each MCP server.
 you actually hit — wrong token, wrong port, unreachable host, or a live server exposing the wrong
 tools — rather than a generic error.
 
+### Configuring per-user accounts
+
+`MMN_MCP_PROFILE` / `MMN_MCP_CALENDAR_TOKEN` / `MMN_MCP_EMAIL_TOKEN` set the **shared** account —
+what everyone searches by default. That's the right setup for a single-household deployment where
+one set of real accounts sits behind many app logins.
+
+If different app users have their own calendar/email accounts (e.g. each person runs their own
+profile on the calendarmcp / email-triage servers), each of them can point their own meetings at
+their own account instead:
+
+1. Sign in as that user and go to **Settings → Integrations**.
+2. Under **Your account**, click **Use my own account** next to Calendar or Email.
+3. Enter the **profile name** your MCP administrator assigned you (e.g. your username on the
+   calendarmcp/email-triage server).
+4. If your profile also has its own bearer token (a separate `CALENDAR_PROFILE_TOKEN` /
+   `X-Profile-Token` from the shared one), paste it too. Leave it blank to authenticate with the
+   shared server token and only switch which account is searched.
+5. Click **Test** to confirm before saving.
+
+With no override, a user's meetings search the shared account. Clicking **Use shared account
+instead** removes the override entirely.
+
+An admin can also set this up on a user's behalf — useful since the profile/token usually has to be
+provisioned first by whoever administers the calendarmcp/email-triage servers:
+
+```bash
+curl -X PUT http://localhost:4020/api/users/<user_id>/mcp-profiles/calendar \
+  -H 'Content-Type: application/json' -H "Cookie: mmn_session=<admin session cookie>" \
+  -d '{"profile": "jenny", "auth_token": "jenny-profile-token-or-omit-for-shared"}'
+```
+
 ## Development
 
 The app is built and run in Docker, but the fast loop runs the frontend on the host:

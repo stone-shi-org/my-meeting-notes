@@ -13,6 +13,8 @@ from app.db import utcnow
 from app.deps import CurrentUser, active_user, get_db, require_admin
 from app.errors import NotFoundError, ValidationError
 from app.logging_config import get_logger
+from app.services import diarize as diarize_svc
+from app.services import llm as llm_svc
 from app.services import mcpclient as mcp_svc
 from app.services import prompts as prompts_svc
 
@@ -54,6 +56,23 @@ class MCPServerUpdate(BaseModel):
 class MCPCallRequest(BaseModel):
     tool: str
     arguments: dict = Field(default_factory=dict)
+
+
+class LLMTestRequest(BaseModel):
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+
+
+class DiarizationTestRequest(BaseModel):
+    url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+
+
+# A cheap connectivity probe (GET /v1/models) doesn't need the multi-minute
+# timeout the real diarization POST is configured with.
+DIARIZATION_TEST_TIMEOUT_SEC = 15
 
 
 # --------------------------------------------------------------------------- #
@@ -117,6 +136,67 @@ def update_settings(
 
     log.info("admin %s updated settings: %s", admin.username, sorted(updated))
     return {"ok": True, "updated": updated}
+
+
+# --------------------------------------------------------------------------- #
+# Test connection: LLM and diarization
+#
+# Same shape and admin gate as the MCP test below: accepts an optional body so
+# the Settings form can try unsaved edits before Save, and stays admin-only
+# because that body can point the server at an arbitrary host.
+# --------------------------------------------------------------------------- #
+
+
+@router.post("/llm/test")
+def test_llm(
+    payload: LLMTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    config = llm_svc.LLMConfig.from_db(conn)
+
+    if payload is not None:
+        if payload.base_url:
+            config.base_url = payload.base_url.rstrip("/")
+        if payload.model:
+            config.model = payload.model
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            config.api_key = payload.api_key
+
+    result = llm_svc.test_connection(config)
+    log.info(
+        "admin %s tested the LLM (%s): ok=%s %sms",
+        admin.username, config.model, result["ok"], result["latency_ms"],
+    )
+    return result
+
+
+@router.post("/diarization/test")
+def test_diarization(
+    payload: DiarizationTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    url = effective(conn, "diarization_url")
+    model = effective(conn, "diarization_model")
+    api_key = effective(conn, "diarization_api_key")
+
+    if payload is not None:
+        if payload.url:
+            url = payload.url
+        if payload.model:
+            model = payload.model
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            api_key = payload.api_key
+
+    result = diarize_svc.test_connection(
+        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC
+    )
+    log.info(
+        "admin %s tested diarization (%s): ok=%s %sms",
+        admin.username, model, result["ok"], result["latency_ms"],
+    )
+    return result
 
 
 # --------------------------------------------------------------------------- #

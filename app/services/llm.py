@@ -227,6 +227,42 @@ def chat_json(
     return parsed, usage, content
 
 
+def test_connection(config: LLMConfig) -> dict:
+    """A real, minimal completion -- the Settings 'Test' button.
+
+    Deliberately exercises the actual code path (stream=false,
+    include_reasoning=false, JSON-object parsing where relevant) rather than
+    just checking the endpoint answers, since a reachable server with a
+    misconfigured model still breaks the pipeline.
+    """
+    started = time.monotonic()
+    try:
+        content, usage = chat(
+            config,
+            build_payload(
+                config.model,
+                "Reply with exactly one word.",
+                "Reply with the single word: ok",
+                temperature=0,
+                max_tokens=5,
+            ),
+        )
+    except LLMError as exc:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": exc.message,
+            "response": None,
+        }
+
+    return {
+        "ok": True,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "error": None,
+        "response": content.strip()[:200],
+    }
+
+
 def list_models(base_url: str, api_key: str, ssl_verify: bool = True,
                 timeout: int = 20) -> list[dict]:
     url = f"{base_url.rstrip('/')}/models"

@@ -74,6 +74,15 @@ Handshake, if you need to reproduce it by hand: `GET {base}/sse` → first event
 `event: endpoint` / `data: /messages/?session_id=…`; POST JSON-RPC there; replies come back on the
 SSE stream, not the POST response.
 
+### Per-user profiles
+
+`mcp_servers` is shared config — how the app *reaches* a server. `user_mcp_profiles` is per-user —
+*whose* calendar/inbox on that server a given app user searches. Resolution is
+`mcpclient.resolve_effective_config(conn, server_name, user_id)`: no row means everyone shares
+`mcp_servers.default_profile`/`auth_token`; a row overrides the profile and, if it carries its own
+token, the token too — a profile-only row still authenticates with the shared token. See "Configuring
+per-user accounts" in README.md.
+
 ## Jobs
 
 In-process `asyncio.Queue` plus N workers, started in the FastAPI lifespan. No broker: Redis would

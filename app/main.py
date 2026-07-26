@@ -19,6 +19,7 @@ from app.routers import (
     auth,
     jobs,
     matching,
+    me,
     meetings,
     settings_api,
     summaries,
@@ -119,6 +120,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(auth.router)
     app.include_router(users.router)
+    app.include_router(me.router)
     app.include_router(threads.router)
     app.include_router(meetings.router)
     app.include_router(transcripts.router)

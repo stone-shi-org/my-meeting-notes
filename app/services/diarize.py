@@ -173,6 +173,44 @@ async def diarize_file(
     return payload, elapsed_ms
 
 
+def test_connection(
+    base_url: str, model: str, api_key: str | None = None, timeout: int = 15
+) -> dict:
+    """Check the service is reachable and the configured model exists.
+
+    Doesn't run a real diarization -- that takes minutes on real audio and
+    would make "Test" a multi-minute button. This is the same tradeoff as the
+    model dropdown: cheap enough to click freely, honest about what it did and
+    didn't verify.
+    """
+    started = time.monotonic()
+    try:
+        models = list_models(base_url, api_key, timeout=timeout)
+    except DiarizationError as exc:
+        return {
+            "ok": False,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": exc.message,
+            "models_count": 0,
+            "model_found": False,
+        }
+
+    ids = {m.get("id") for m in models}
+    found = model in ids
+    return {
+        "ok": found,
+        "latency_ms": int((time.monotonic() - started) * 1000),
+        "error": (
+            None
+            if found
+            else f"Reached the service, but {model!r} is not loaded. "
+            f"Available: {', '.join(sorted(i for i in ids if i)[:8])}"
+        ),
+        "models_count": len(models),
+        "model_found": found,
+    }
+
+
 def list_models(base_url: str, api_key: str | None = None, timeout: int = 15) -> list[dict]:
     """Populate the model dropdown from the service's own /v1/models."""
     root = base_url.split("/v1/")[0].rstrip("/")

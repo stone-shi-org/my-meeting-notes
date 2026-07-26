@@ -175,3 +175,32 @@ class TimelineItem(BaseModel):
     at: str | None
     id: int
     payload: dict
+
+
+# --------------------------------------------------------------------------- #
+# Per-user MCP profiles
+# --------------------------------------------------------------------------- #
+
+
+class UserMcpProfileOut(BaseModel):
+    server_name: str
+    kind: str
+    enabled: bool
+    tool_name: str
+    shared_profile: str | None
+    """The account everyone uses when they have no personal override."""
+    profile: str | None
+    """The account this user actually searches -- their own if set, else shared_profile."""
+    has_override: bool
+    has_personal_token: bool
+    auth_token: str | None
+    """Masked; only present when has_personal_token is true."""
+    last_test: dict | None = None
+
+
+class SetUserMcpProfileRequest(BaseModel):
+    profile: str = Field(min_length=1, max_length=100)
+    auth_token: str | None = Field(default=None, max_length=500)
+    """None leaves an existing personal token untouched; "" clears it (revert
+    to the shared token); a masked value echoed back is also treated as
+    unchanged."""

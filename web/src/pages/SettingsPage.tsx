@@ -23,6 +23,7 @@ import type {
   PromptSummary,
   SettingEntry,
   User,
+  UserMcpProfile,
 } from '@/types/api';
 
 const TABS = [
@@ -84,23 +85,40 @@ function useSettings() {
   });
 }
 
+interface TestResult {
+  ok: boolean;
+  error: string | null;
+  latency_ms: number;
+  response?: string | null;
+  models_count?: number;
+}
+
 function SettingsForm({
   title,
   description,
   keys,
   modelsPath,
   modelKey,
+  testPath,
+  testKeyMap,
 }: {
   title: string;
   description: string;
   keys: { key: string; label: string; hint?: string; type?: string }[];
   modelsPath?: string;
   modelKey?: string;
+  /** Endpoint that tests the connection this form configures. */
+  testPath?: string;
+  /** Maps a settings key (e.g. "llm_base_url") to the short field name the
+   * test endpoint expects (e.g. "base_url"), so Test always exercises
+   * whatever is currently in the form -- saved or not. */
+  testKeyMap?: Record<string, string>;
 }) {
   const { isAdmin } = useAuth();
   const queryClient = useQueryClient();
   const settings = useSettings();
   const [draft, setDraft] = useState<Record<string, string>>({});
+  const [testResult, setTestResult] = useState<TestResult | null>(null);
 
   const models = useQuery({
     queryKey: ['models', modelsPath],
@@ -110,6 +128,8 @@ function SettingsForm({
     staleTime: 300_000,
   });
 
+  const entries = settings.data?.settings ?? {};
+
   const save = useMutation({
     mutationFn: () => api.put('/settings', { values: draft }),
     onSuccess: () => {
@@ -118,10 +138,26 @@ function SettingsForm({
     },
   });
 
+  const test = useMutation({
+    mutationFn: () => {
+      const body: Record<string, unknown> = {};
+      for (const [settingKey, shortKey] of Object.entries(testKeyMap ?? {})) {
+        const entry = entries[settingKey];
+        const value = draft[settingKey] ?? entry?.value;
+        // A masked secret that wasn't edited: omit it and let the backend
+        // fall back to the stored value, same convention as Save.
+        if (typeof value === 'string' && value.startsWith('••••')) continue;
+        if (value === undefined || value === '') continue;
+        body[shortKey] = value;
+      }
+      return api.post<TestResult>(testPath!, body);
+    },
+    onSuccess: setTestResult,
+  });
+
   if (settings.isLoading) return <Skeleton className="h-64 w-full" />;
   if (settings.isError) return <ErrorState error={settings.error} />;
 
-  const entries = settings.data!.settings;
   const dirty = Object.keys(draft).length > 0;
 
   return (
@@ -146,7 +182,10 @@ function SettingsForm({
                     id={key}
                     value={String(value)}
                     disabled={!isAdmin}
-                    onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                    onChange={(e) => {
+                      setDraft((d) => ({ ...d, [key]: e.target.value }));
+                      setTestResult(null);
+                    }}
                   >
                     {!models.data.models.some((m) => m.id === value) && (
                       <option value={String(value)}>{String(value)} (current)</option>
@@ -166,7 +205,10 @@ function SettingsForm({
                   value={String(value)}
                   disabled={!isAdmin}
                   placeholder={entry.is_secret ? 'unchanged' : undefined}
-                  onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                  onChange={(e) => {
+                    setDraft((d) => ({ ...d, [key]: e.target.value }));
+                    setTestResult(null);
+                  }}
                 />
               )}
 
@@ -188,8 +230,37 @@ function SettingsForm({
         <p className="mt-3 text-sm text-danger-ink">{(save.error as Error).message}</p>
       )}
 
+      {testResult && (
+        <div
+          className={cn(
+            'mt-3 rounded border p-3 text-sm',
+            testResult.ok
+              ? 'border-success/30 bg-success-soft/40 text-success-ink'
+              : 'border-danger/30 bg-danger-soft/40 text-danger-ink',
+          )}
+        >
+          {testResult.ok ? (
+            <p>
+              Connected in {testResult.latency_ms}ms
+              {testResult.response && <> · replied &ldquo;{testResult.response}&rdquo;</>}
+              {testResult.models_count !== undefined && (
+                <> · model found among {testResult.models_count} available</>
+              )}
+            </p>
+          ) : (
+            <p>{testResult.error}</p>
+          )}
+        </div>
+      )}
+
       {isAdmin && (
-        <div className="mt-5 flex items-center gap-3 border-t border-border pt-4">
+        <div className="mt-5 flex flex-wrap items-center gap-3 border-t border-border pt-4">
+          {testPath && (
+            <Button variant="secondary" onClick={() => test.mutate()} loading={test.isPending}>
+              <PlugZap />
+              Test connection
+            </Button>
+          )}
           <Button
             variant="primary"
             disabled={!dirty}
@@ -224,6 +295,12 @@ export function LlmSettingsPage() {
       description="Used to write summaries, detect action items and rank calendar and email matches."
       modelsPath="/llm/models"
       modelKey="llm_model"
+      testPath="/llm/test"
+      testKeyMap={{
+        llm_base_url: 'base_url',
+        llm_api_key: 'api_key',
+        llm_model: 'model',
+      }}
       keys={[
         { key: 'llm_base_url', label: 'Base URL', hint: 'OpenAI-compatible, ending in /v1' },
         { key: 'llm_api_key', label: 'API key' },
@@ -242,6 +319,12 @@ export function DiarizationSettingsPage() {
       description="The speech-to-text service that splits a recording into speakers and turns."
       modelsPath="/diarization/models"
       modelKey="diarization_model"
+      testPath="/diarization/test"
+      testKeyMap={{
+        diarization_url: 'url',
+        diarization_api_key: 'api_key',
+        diarization_model: 'model',
+      }}
       keys={[
         {
           key: 'diarization_url',
@@ -460,20 +543,220 @@ function McpServerCard({ server }: { server: McpServer }) {
   );
 }
 
+function MyMcpProfileCard({ profile }: { profile: UserMcpProfile }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [profileDraft, setProfileDraft] = useState(profile.profile ?? '');
+  const [tokenDraft, setTokenDraft] = useState('');
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    error: string | null;
+    tools: string[];
+    latency_ms: number;
+  } | null>(null);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: ['my-mcp-profiles'] });
+  };
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.put<UserMcpProfile>(`/me/mcp-profiles/${profile.server_name}`, {
+        profile: profileDraft,
+        auth_token: tokenDraft || null,
+      }),
+    onSuccess: () => {
+      invalidate();
+      setEditing(false);
+      setTokenDraft('');
+    },
+  });
+
+  const clear = useMutation({
+    mutationFn: () => api.del(`/me/mcp-profiles/${profile.server_name}`),
+    onSuccess: () => {
+      invalidate();
+      setEditing(false);
+    },
+  });
+
+  const test = useMutation({
+    mutationFn: () =>
+      api.post<typeof testResult>(`/me/mcp-profiles/${profile.server_name}/test`, {
+        profile: profileDraft,
+        auth_token: tokenDraft || null,
+      }),
+    onSuccess: setTestResult,
+  });
+
+  function startEditing() {
+    setProfileDraft(profile.profile ?? '');
+    setTokenDraft('');
+    setTestResult(null);
+    setEditing(true);
+  }
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="font-medium capitalize">{profile.server_name}</p>
+          {profile.has_override ? (
+            <p className="text-sm text-fg-subtle">
+              You search as <span className="font-medium text-fg">{profile.profile}</span>
+              {profile.has_personal_token && ' · using your own token'}
+            </p>
+          ) : (
+            <p className="text-sm text-fg-subtle">
+              Using the shared account (<span className="font-medium">{profile.shared_profile}</span>)
+            </p>
+          )}
+        </div>
+        {!editing && (
+          <Button size="sm" variant="ghost" onClick={startEditing}>
+            {profile.has_override ? 'Change' : 'Use my own account'}
+          </Button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-3 space-y-3 border-t border-border pt-3">
+          <div>
+            <Label htmlFor={`my-${profile.server_name}-profile`}>Profile name</Label>
+            <Input
+              id={`my-${profile.server_name}-profile`}
+              className="mt-1.5"
+              value={profileDraft}
+              onChange={(e) => setProfileDraft(e.target.value)}
+              placeholder={profile.shared_profile ?? 'default'}
+            />
+            <p className="mt-1 text-xs text-fg-subtle">
+              The account name your calendar/email administrator gave you (e.g. your username).
+            </p>
+          </div>
+          <div>
+            <Label htmlFor={`my-${profile.server_name}-token`}>Personal token (optional)</Label>
+            <Input
+              id={`my-${profile.server_name}-token`}
+              className="mt-1.5"
+              type="password"
+              value={tokenDraft}
+              onChange={(e) => setTokenDraft(e.target.value)}
+              placeholder={
+                profile.has_personal_token ? 'unchanged' : 'leave blank to use the shared token'
+              }
+            />
+          </div>
+
+          {testResult && (
+            <div
+              className={cn(
+                'rounded border p-2 text-sm',
+                testResult.ok
+                  ? 'border-success/30 bg-success-soft/40 text-success-ink'
+                  : 'border-danger/30 bg-danger-soft/40 text-danger-ink',
+              )}
+            >
+              {testResult.ok
+                ? `Connected in ${testResult.latency_ms}ms · ${testResult.tools.length} tools`
+                : testResult.error}
+            </div>
+          )}
+          {save.error && (
+            <p className="text-sm text-danger-ink">{(save.error as Error).message}</p>
+          )}
+
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              size="sm"
+              variant="secondary"
+              onClick={() => test.mutate()}
+              loading={test.isPending}
+              disabled={!profileDraft}
+            >
+              <PlugZap />
+              Test
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => save.mutate()}
+              loading={save.isPending}
+              disabled={!profileDraft}
+            >
+              Save
+            </Button>
+            {profile.has_override && (
+              <Button size="sm" variant="ghost" onClick={() => clear.mutate()} loading={clear.isPending}>
+                Use shared account instead
+              </Button>
+            )}
+            <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function MyMcpProfilesSection() {
+  const profiles = useQuery({
+    queryKey: ['my-mcp-profiles'],
+    queryFn: () => api.get<UserMcpProfile[]>('/me/mcp-profiles'),
+  });
+
+  if (profiles.isLoading) return <Skeleton className="h-32 w-full" />;
+  if (profiles.isError) return <ErrorState error={profiles.error} />;
+
+  return (
+    <Card className="p-5">
+      <h2 className="font-display text-lg font-semibold">Your account</h2>
+      <p className="mt-1 text-sm text-fg-subtle">
+        By default everyone searches the same shared calendar and inbox below. If you have your
+        own account on these servers, point your meetings at it here.
+      </p>
+      <div className="mt-4 space-y-3">
+        {profiles.data!.map((p) => (
+          <MyMcpProfileCard key={p.server_name} profile={p} />
+        ))}
+      </div>
+    </Card>
+  );
+}
+
 export function McpSettingsPage() {
+  const { isAdmin } = useAuth();
   const servers = useQuery({
     queryKey: ['mcp-servers'],
     queryFn: () => api.get<McpServer[]>('/mcp/servers'),
   });
 
-  if (servers.isLoading) return <Skeleton className="h-64 w-full" />;
-  if (servers.isError) return <ErrorState error={servers.error} />;
-
   return (
     <div className="space-y-4">
-      {servers.data!.map((server) => (
-        <McpServerCard key={server.name} server={server} />
-      ))}
+      <MyMcpProfilesSection />
+
+      <div>
+        <h2 className="mb-1 font-display text-lg font-semibold">
+          {isAdmin ? 'Shared server configuration' : 'Shared servers'}
+        </h2>
+        <p className="mb-3 text-sm text-fg-subtle">
+          {isAdmin
+            ? 'How the app reaches each MCP server. This is the account everyone uses unless they set up their own above.'
+            : 'How the app reaches each MCP server. Only administrators can change this.'}
+        </p>
+
+        {servers.isLoading && <Skeleton className="h-64 w-full" />}
+        {servers.isError && <ErrorState error={servers.error} />}
+        {servers.data && (
+          <div className="space-y-4">
+            {servers.data.map((server) => (
+              <McpServerCard key={server.name} server={server} />
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

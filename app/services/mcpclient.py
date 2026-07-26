@@ -17,7 +17,7 @@ import os
 import sqlite3
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, AsyncIterator
 
 from app.db import utcnow
@@ -76,6 +76,137 @@ def load_config(conn: sqlite3.Connection, name: str) -> MCPServerConfig:
 def list_configs(conn: sqlite3.Connection) -> list[MCPServerConfig]:
     rows = conn.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
     return [MCPServerConfig.from_row(r) for r in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Per-user account overrides
+#
+# A shared mcp_servers row describes how to *reach* a server (transport, URL,
+# tool name). A user_mcp_profiles row says *which account on that server*
+# this particular app user should be searched against -- e.g. so Jenny's
+# meetings search her calendar/inbox rather than the admin's.
+# --------------------------------------------------------------------------- #
+
+
+def get_user_override(
+    conn: sqlite3.Connection, user_id: int, server_name: str
+) -> sqlite3.Row | None:
+    return conn.execute(
+        "SELECT * FROM user_mcp_profiles WHERE user_id = ? AND server_name = ?",
+        (user_id, server_name),
+    ).fetchone()
+
+
+def set_user_override(
+    conn: sqlite3.Connection,
+    user_id: int,
+    server_name: str,
+    *,
+    profile: str,
+    auth_token: str | None = None,
+    clear_token: bool = False,
+) -> None:
+    """Set or update a user's profile for a server.
+
+    ``auth_token=None`` leaves an existing personal token untouched (so saving
+    just a profile change doesn't blank out a token set earlier);
+    ``clear_token=True`` explicitly reverts to the server's shared token.
+    """
+    load_config(conn, server_name)  # 404s if the server doesn't exist
+    existing = get_user_override(conn, user_id, server_name)
+    now = utcnow()
+
+    token = None if clear_token else auth_token
+    if not clear_token and auth_token is None and existing is not None:
+        token = existing["auth_token"]
+
+    conn.execute(
+        """
+        INSERT INTO user_mcp_profiles (user_id, server_name, profile, auth_token, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(user_id, server_name) DO UPDATE SET
+            profile = excluded.profile, auth_token = excluded.auth_token,
+            updated_at = excluded.updated_at
+        """,
+        (user_id, server_name, profile, token, now),
+    )
+
+
+def resolve_token_update(auth_token: str | None) -> tuple[str | None, bool]:
+    """Interpret the tri-state token field shared by the self-service and
+    admin endpoints: unset (leave alone), cleared (empty string), a masked
+    echo of what was displayed (leave alone), or a genuinely new value.
+
+    Returns ``(auth_token, clear_token)`` ready for :func:`set_user_override`.
+    """
+    if auth_token == "":
+        return None, True
+    if auth_token is not None and auth_token.startswith("••••"):
+        return None, False
+    return auth_token, False
+
+
+def delete_user_override(conn: sqlite3.Connection, user_id: int, server_name: str) -> bool:
+    """Remove the override entirely, reverting both profile and token to shared."""
+    cur = conn.execute(
+        "DELETE FROM user_mcp_profiles WHERE user_id = ? AND server_name = ?",
+        (user_id, server_name),
+    )
+    return cur.rowcount > 0
+
+
+def resolve_effective_config(
+    conn: sqlite3.Connection, server_name: str, user_id: int | None
+) -> MCPServerConfig:
+    """The config to actually connect with: shared server settings, with this
+    user's profile/token overlaid if they have one.
+
+    ``user_id=None`` (e.g. an admin testing the shared config) returns the
+    shared config unchanged.
+    """
+    base = load_config(conn, server_name)
+    if user_id is None:
+        return base
+
+    override = get_user_override(conn, user_id, server_name)
+    if override is None:
+        return base
+
+    return replace(
+        base,
+        default_profile=override["profile"],
+        auth_token=override["auth_token"] or base.auth_token,
+    )
+
+
+def _mask(value: str | None) -> str | None:
+    if not value:
+        return None
+    return f"••••{value[-4:]}" if len(value) > 4 else "••••"
+
+
+def describe_user_profile(conn: sqlite3.Connection, user_id: int, server_name: str) -> dict:
+    """Shape consumed by ``UserMcpProfileOut`` -- the resolved account plus
+    enough of the shared config to explain where a fallback would come from."""
+    base = load_config(conn, server_name)
+    override = get_user_override(conn, user_id, server_name)
+
+    return {
+        "server_name": base.name,
+        "kind": base.kind,
+        "enabled": base.enabled,
+        "tool_name": base.tool_name,
+        "shared_profile": base.default_profile,
+        "profile": (override["profile"] if override is not None else base.default_profile),
+        "has_override": override is not None,
+        "has_personal_token": bool(override is not None and override["auth_token"]),
+        "auth_token": (
+            _mask(override["auth_token"])
+            if override is not None and override["auth_token"]
+            else None
+        ),
+        "last_test": None,
+    }
 
 
 def parse_tool_result(result: Any) -> list[dict]:

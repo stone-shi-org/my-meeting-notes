@@ -161,15 +161,22 @@ async def gather_candidates(
     start: datetime,
     end: datetime,
     max_candidates: int,
+    user_id: int | None = None,
 ) -> dict:
-    """Query both MCP servers concurrently. One being down is not fatal."""
+    """Query both MCP servers concurrently. One being down is not fatal.
+
+    ``user_id`` selects that user's own profile/token if they have one
+    configured (Settings -> Integrations -> your account), so Jenny's meetings
+    search her calendar and inbox rather than whoever owns the shared server
+    config. With no override, everyone shares the server's default account.
+    """
     with conn_factory() as conn:
         try:
-            calendar_cfg = mcp_svc.load_config(conn, "calendar")
+            calendar_cfg = mcp_svc.resolve_effective_config(conn, "calendar", user_id)
         except NotFoundError:
             calendar_cfg = None
         try:
-            email_cfg = mcp_svc.load_config(conn, "email")
+            email_cfg = mcp_svc.resolve_effective_config(conn, "email", user_id)
         except NotFoundError:
             email_cfg = None
 
@@ -649,6 +656,7 @@ async def run_match(ctx) -> dict:
         start=start,
         end=end,
         max_candidates=max_candidates,
+        user_id=user_id,
     )
 
     if gathered["calendar_error"]:

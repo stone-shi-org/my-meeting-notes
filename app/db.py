@@ -365,6 +365,22 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT
     )
     """,
+    # ---------------------------------------------------- user_mcp_profiles
+    # Per-user override of *which account* a shared MCP server searches.
+    # profile/auth_token here take precedence over mcp_servers.default_profile
+    # /auth_token for that one user; absent a row, everyone shares the server's
+    # default account, matching single-household deployments where the app has
+    # many logins but one calendar/email behind it.
+    """
+    CREATE TABLE IF NOT EXISTS user_mcp_profiles (
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        server_name TEXT NOT NULL REFERENCES mcp_servers(name) ON DELETE CASCADE,
+        profile     TEXT NOT NULL,
+        auth_token  TEXT,
+        updated_at  TEXT NOT NULL,
+        PRIMARY KEY (user_id, server_name)
+    )
+    """,
 )
 
 # Columns added after the initial release go here as (table, column, ddl_fragment).

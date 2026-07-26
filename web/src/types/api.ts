@@ -316,6 +316,19 @@ export interface McpServer {
   };
 }
 
+export interface UserMcpProfile {
+  server_name: string;
+  kind: string;
+  enabled: boolean;
+  tool_name: string;
+  shared_profile: string | null;
+  profile: string | null;
+  has_override: boolean;
+  has_personal_token: boolean;
+  auth_token: string | null;
+  last_test: { at: string | null; ok: boolean | null; error: string | null; tools: string[] } | null;
+}
+
 export interface SettingEntry {
   value: string | number | boolean | null;
   type: string;
