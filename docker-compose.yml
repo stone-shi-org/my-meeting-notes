@@ -1,0 +1,22 @@
+services:
+  my-meeting-notes:
+    image: registry.example.com/homestack/my-meeting-notes:latest
+    build:
+      context: .
+      target: runtime
+    container_name: my-meeting-notes
+    env_file:
+      - .env
+    ports:
+      - "4020:8000"
+    volumes:
+      # Bind mount rather than a named volume: the SQLite file and the audio
+      # archive should be trivially backup-able from the host.
+      - ./data:/app/data
+    restart: unless-stopped
+    networks:
+      - home-net
+
+networks:
+  home-net:
+    external: true

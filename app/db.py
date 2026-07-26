@@ -1,0 +1,443 @@
+"""SQLite access and schema.
+
+The whole schema lives in :func:`init_db` as idempotent ``CREATE TABLE IF NOT EXISTS``
+statements plus best-effort ``ALTER TABLE`` for columns added later — the same
+append-only pattern as ~/src/email-triage/db.py. There is no migration tool.
+
+Connections are short-lived: open one, do the work, close it. Never hold a
+transaction across an ``await`` or an HTTP call.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator
+
+from app.config import get_settings
+
+
+def utcnow() -> str:
+    """ISO-8601 UTC timestamp. The only way timestamps are produced in this app."""
+    return datetime.now(timezone.utc).isoformat()
+
+
+def connect(db_path: Path | str | None = None) -> sqlite3.Connection:
+    if db_path is None:
+        db_path = get_settings().db_path
+    db_path = Path(db_path)
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    conn = sqlite3.connect(str(db_path), timeout=30.0, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("PRAGMA busy_timeout=30000")
+    return conn
+
+
+@contextmanager
+def get_conn(db_path: Path | str | None = None) -> Iterator[sqlite3.Connection]:
+    conn = connect(db_path)
+    try:
+        yield conn
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+SCHEMA: tuple[str, ...] = (
+    # ---------------------------------------------------------------- users
+    """
+    CREATE TABLE IF NOT EXISTS users (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        username              TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        display_name          TEXT,
+        password_hash         TEXT NOT NULL,
+        password_salt         TEXT NOT NULL,
+        password_algo         TEXT NOT NULL DEFAULT 'scrypt',
+        password_params       TEXT NOT NULL DEFAULT 'n=16384,r=8,p=1,dklen=32',
+        is_admin              INTEGER NOT NULL DEFAULT 0,
+        is_active             INTEGER NOT NULL DEFAULT 1,
+        must_change_password  INTEGER NOT NULL DEFAULT 0,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL,
+        last_login_at         TEXT
+    )
+    """,
+    # ------------------------------------------------------------- sessions
+    """
+    CREATE TABLE IF NOT EXISTS sessions (
+        id            TEXT PRIMARY KEY,          -- sha256 of the raw token
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at    TEXT NOT NULL,
+        expires_at    TEXT NOT NULL,
+        last_seen_at  TEXT,
+        user_agent    TEXT,
+        ip            TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at)",
+    # -------------------------------------------------------------- threads
+    """
+    CREATE TABLE IF NOT EXISTS threads (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id     INTEGER NOT NULL REFERENCES users(id),
+        title        TEXT NOT NULL,
+        description  TEXT,
+        archived     INTEGER NOT NULL DEFAULT 0,
+        created_at   TEXT NOT NULL,
+        updated_at   TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_threads_owner_updated ON threads(owner_id, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_threads_title ON threads(title)",
+    # ------------------------------------------------------------- meetings
+    """
+    CREATE TABLE IF NOT EXISTS meetings (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id             INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        owner_id              INTEGER NOT NULL REFERENCES users(id),
+        title                 TEXT NOT NULL,
+        meeting_at            TEXT,
+        status                TEXT NOT NULL DEFAULT 'new',
+        original_filename     TEXT,
+        original_path         TEXT,
+        original_mime         TEXT,
+        original_bytes        INTEGER,
+        audio_path            TEXT,
+        audio_converted       INTEGER NOT NULL DEFAULT 0,
+        audio_duration_sec    REAL,
+        audio_sample_rate     INTEGER,
+        audio_channels        INTEGER,
+        active_diarization_id INTEGER REFERENCES diarizations(id),
+        active_summary_id     INTEGER REFERENCES summaries(id),
+        notes                 TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_meetings_thread ON meetings(thread_id, meeting_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_meetings_owner ON meetings(owner_id, created_at DESC)",
+    # --------------------------------------------------------- diarizations
+    # raw_json is written once and never updated. Speaker renames live in
+    # speaker_map and are applied at render time.
+    """
+    CREATE TABLE IF NOT EXISTS diarizations (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id    INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        provider_url  TEXT NOT NULL,
+        model         TEXT NOT NULL,
+        raw_json      TEXT NOT NULL,
+        json_path     TEXT,
+        duration_sec  REAL,
+        num_speakers  INTEGER,
+        segment_count INTEGER,
+        request_ms    INTEGER,
+        created_at    TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_diar_meeting ON diarizations(meeting_id, created_at DESC)",
+    # ---------------------------------------------------------- speaker_map
+    """
+    CREATE TABLE IF NOT EXISTS speaker_map (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id   INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        speaker_id   TEXT NOT NULL,
+        label        TEXT,
+        display_name TEXT,
+        color        TEXT,
+        sort_order   INTEGER,
+        source       TEXT DEFAULT 'user',
+        updated_at   TEXT
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_speaker_map ON speaker_map(meeting_id, speaker_id)",
+    # ------------------------------------------------------------ summaries
+    """
+    CREATE TABLE IF NOT EXISTS summaries (
+        id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id          INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        version             INTEGER NOT NULL,
+        is_current          INTEGER NOT NULL DEFAULT 0,
+        status              TEXT NOT NULL DEFAULT 'ok',
+        model               TEXT NOT NULL,
+        llm_base_url        TEXT,
+        temperature         REAL,
+        prompt_name         TEXT NOT NULL,
+        prompt_version      TEXT,
+        prompt_sha256       TEXT NOT NULL,
+        prompt_text         TEXT NOT NULL,
+        diarization_id      INTEGER REFERENCES diarizations(id),
+        transcript_sha256   TEXT,
+        tldr                TEXT,
+        summary_md          TEXT,
+        title_suggestion    TEXT,
+        key_decisions_json  TEXT,
+        topics_json         TEXT,
+        open_questions_json TEXT,
+        participants_json   TEXT,
+        raw_response        TEXT,
+        prompt_tokens       INTEGER,
+        completion_tokens   INTEGER,
+        duration_sec        REAL,
+        error               TEXT,
+        created_by          INTEGER REFERENCES users(id),
+        created_at          TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_summary_version ON summaries(meeting_id, version)",
+    "CREATE INDEX IF NOT EXISTS idx_summary_current ON summaries(meeting_id, is_current)",
+    # --------------------------------------------------------- action_items
+    """
+    CREATE TABLE IF NOT EXISTS action_items (
+        id               INTEGER PRIMARY KEY AUTOINCREMENT,
+        summary_id       INTEGER NOT NULL REFERENCES summaries(id) ON DELETE CASCADE,
+        meeting_id       INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        idx              INTEGER NOT NULL,
+        text             TEXT NOT NULL,
+        owner_label      TEXT,
+        owner_speaker_id TEXT,
+        due_text         TEXT,
+        due_date         TEXT,
+        priority         TEXT,
+        confidence       REAL,
+        status           TEXT NOT NULL DEFAULT 'open',
+        done_at          TEXT,
+        created_at       TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_ai_meeting ON action_items(meeting_id, status)",
+    "CREATE INDEX IF NOT EXISTS idx_ai_summary ON action_items(summary_id, idx)",
+    # ----------------------------------------------------------------- jobs
+    """
+    CREATE TABLE IF NOT EXISTS jobs (
+        id               TEXT PRIMARY KEY,
+        type             TEXT NOT NULL,
+        status           TEXT NOT NULL,
+        stage            TEXT,
+        progress         REAL NOT NULL DEFAULT 0,
+        meeting_id       INTEGER REFERENCES meetings(id) ON DELETE CASCADE,
+        thread_id        INTEGER REFERENCES threads(id) ON DELETE CASCADE,
+        user_id          INTEGER NOT NULL REFERENCES users(id),
+        payload_json     TEXT,
+        result_json      TEXT,
+        error            TEXT,
+        error_stage      TEXT,
+        error_trace      TEXT,
+        attempts         INTEGER NOT NULL DEFAULT 0,
+        max_attempts     INTEGER NOT NULL DEFAULT 1,
+        cancel_requested INTEGER NOT NULL DEFAULT 0,
+        created_at       TEXT NOT NULL,
+        started_at       TEXT,
+        finished_at      TEXT,
+        updated_at       TEXT,
+        heartbeat_at     TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, created_at)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_meeting ON jobs(meeting_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_jobs_user ON jobs(user_id, created_at DESC)",
+    # ----------------------------------------------------------- job_events
+    """
+    CREATE TABLE IF NOT EXISTS job_events (
+        id       INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_id   TEXT NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+        ts       TEXT NOT NULL,
+        stage    TEXT,
+        level    TEXT NOT NULL DEFAULT 'info',
+        message  TEXT NOT NULL,
+        progress REAL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_job_events ON job_events(job_id, id)",
+    # -------------------------------------------------------- thread_emails
+    """
+    CREATE TABLE IF NOT EXISTS thread_emails (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id         INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        meeting_id        INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        mcp_id            TEXT,
+        message_id        TEXT,
+        sender            TEXT,
+        subject           TEXT,
+        date              TEXT,
+        snippet           TEXT,
+        account           TEXT,
+        triage_level      INTEGER,
+        tag               TEXT,
+        reason            TEXT,
+        summary           TEXT,
+        score             REAL,
+        raw_json          TEXT NOT NULL,
+        relevance_score   REAL,
+        relevance_reason  TEXT,
+        attached_by       INTEGER REFERENCES users(id),
+        attached_at       TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_email ON thread_emails(thread_id, message_id)",
+    # ----------------------------------------------- thread_calendar_events
+    """
+    CREATE TABLE IF NOT EXISTS thread_calendar_events (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id         INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        meeting_id        INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        uid               TEXT NOT NULL,
+        url               TEXT,
+        summary           TEXT,
+        description       TEXT,
+        location          TEXT,
+        start_at          TEXT,
+        end_at            TEXT,
+        calendar_name     TEXT,
+        account           TEXT,
+        event_type        TEXT,
+        raw_json          TEXT NOT NULL,
+        relevance_score   REAL,
+        relevance_reason  TEXT,
+        attached_by       INTEGER REFERENCES users(id),
+        attached_at       TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_event ON thread_calendar_events(thread_id, uid)",
+    "CREATE INDEX IF NOT EXISTS idx_tce_timeline ON thread_calendar_events(thread_id, start_at)",
+    # ----------------------------------------------------------- match_runs
+    """
+    CREATE TABLE IF NOT EXISTS match_runs (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id      INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        thread_id       INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        user_id         INTEGER NOT NULL REFERENCES users(id),
+        job_id          TEXT REFERENCES jobs(id) ON DELETE SET NULL,
+        status          TEXT NOT NULL,
+        query_json      TEXT,
+        candidates_json TEXT,
+        ranked_json     TEXT,
+        model           TEXT,
+        prompt_sha256   TEXT,
+        email_error     TEXT,
+        calendar_error  TEXT,
+        error           TEXT,
+        created_at      TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_match_meeting ON match_runs(meeting_id, created_at DESC)",
+    # ---------------------------------------------------------- mcp_servers
+    """
+    CREATE TABLE IF NOT EXISTS mcp_servers (
+        name                  TEXT PRIMARY KEY,
+        kind                  TEXT NOT NULL,
+        transport             TEXT NOT NULL,
+        enabled               INTEGER NOT NULL DEFAULT 1,
+        base_url              TEXT,
+        auth_token            TEXT,
+        command               TEXT,
+        args_json             TEXT,
+        cwd                   TEXT,
+        env_json              TEXT,
+        tool_name             TEXT NOT NULL,
+        default_profile       TEXT,
+        timeout_sec           INTEGER NOT NULL DEFAULT 60,
+        last_test_at          TEXT,
+        last_test_ok          INTEGER,
+        last_test_error       TEXT,
+        last_test_tools_json  TEXT,
+        created_at            TEXT NOT NULL,
+        updated_at            TEXT NOT NULL
+    )
+    """,
+    # --------------------------------------------------------- app_settings
+    """
+    CREATE TABLE IF NOT EXISTS app_settings (
+        key        TEXT PRIMARY KEY,
+        value      TEXT,
+        value_type TEXT NOT NULL DEFAULT 'str',
+        is_secret  INTEGER NOT NULL DEFAULT 0,
+        updated_by INTEGER REFERENCES users(id),
+        updated_at TEXT
+    )
+    """,
+)
+
+# Columns added after the initial release go here as (table, column, ddl_fragment).
+# Applied best-effort; "duplicate column name" is the expected no-op outcome.
+LATE_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+
+
+def init_db(db_path: Path | str | None = None) -> None:
+    """Create every table and index. Safe to run repeatedly."""
+    with get_conn(db_path) as conn:
+        for statement in SCHEMA:
+            conn.execute(statement)
+
+        for table, column, ddl in LATE_COLUMNS:
+            try:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            except sqlite3.OperationalError as exc:
+                if "duplicate column name" not in str(exc).lower():
+                    raise
+
+
+def seed_mcp_servers(db_path: Path | str | None = None) -> None:
+    """Insert the two known MCP servers if they aren't configured yet.
+
+    Tokens come from the environment so they never land in the repo. An existing
+    row is left alone -- the Settings page owns it from then on.
+    """
+    settings = get_settings()
+    now = utcnow()
+
+    defaults = [
+        {
+            "name": "calendar",
+            "kind": "calendar",
+            "transport": "sse",
+            "base_url": settings.mcp_calendar_url,
+            "auth_token": settings.mcp_calendar_token,
+            "tool_name": "search_events",
+        },
+        {
+            "name": "email",
+            "kind": "email",
+            "transport": "sse",
+            "base_url": settings.mcp_email_url,
+            "auth_token": settings.mcp_email_token,
+            "tool_name": "search_emails",
+        },
+    ]
+
+    with get_conn(db_path) as conn:
+        for row in defaults:
+            exists = conn.execute(
+                "SELECT 1 FROM mcp_servers WHERE name = ?", (row["name"],)
+            ).fetchone()
+            if exists:
+                continue
+            conn.execute(
+                """
+                INSERT INTO mcp_servers
+                    (name, kind, transport, enabled, base_url, auth_token,
+                     tool_name, default_profile, timeout_sec, created_at, updated_at)
+                VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row["name"],
+                    row["kind"],
+                    row["transport"],
+                    row["base_url"],
+                    row["auth_token"],
+                    row["tool_name"],
+                    settings.mcp_profile,
+                    settings.mcp_timeout_sec,
+                    now,
+                    now,
+                ),
+            )

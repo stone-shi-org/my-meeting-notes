@@ -1,0 +1,233 @@
+"""Thread and meeting persistence."""
+
+from __future__ import annotations
+
+import sqlite3
+
+from app.db import utcnow
+from app.errors import NotFoundError
+
+# Thread list cards show these counts, so they're computed in the list query
+# rather than N+1 round trips from the SPA.
+THREAD_COUNTS_SQL = """
+    (SELECT COUNT(*) FROM meetings m WHERE m.thread_id = t.id)                AS meeting_count,
+    (SELECT MAX(m.meeting_at) FROM meetings m WHERE m.thread_id = t.id)       AS last_meeting_at,
+    (SELECT COUNT(*) FROM thread_emails e WHERE e.thread_id = t.id)           AS email_count,
+    (SELECT COUNT(*) FROM thread_calendar_events c WHERE c.thread_id = t.id)  AS event_count
+"""
+
+SORTABLE = {
+    "updated_at": "t.updated_at",
+    "created_at": "t.created_at",
+    "title": "t.title COLLATE NOCASE",
+}
+
+
+def touch_thread(conn: sqlite3.Connection, thread_id: int) -> None:
+    """Bump updated_at so the thread rises in the list after any child write."""
+    conn.execute(
+        "UPDATE threads SET updated_at = ? WHERE id = ?", (utcnow(), thread_id)
+    )
+
+
+def get_thread(conn: sqlite3.Connection, thread_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT t.*, {THREAD_COUNTS_SQL} FROM threads t WHERE t.id = ?", (thread_id,)
+    ).fetchone()
+
+
+def require_thread(conn: sqlite3.Connection, thread_id: int) -> sqlite3.Row:
+    row = get_thread(conn, thread_id)
+    if row is None:
+        raise NotFoundError("Thread not found")
+    return row
+
+
+def create_thread(
+    conn: sqlite3.Connection,
+    *,
+    owner_id: int,
+    title: str,
+    description: str | None = None,
+) -> sqlite3.Row:
+    now = utcnow()
+    cur = conn.execute(
+        "INSERT INTO threads (owner_id, title, description, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (owner_id, title, description, now, now),
+    )
+    return require_thread(conn, cur.lastrowid)  # type: ignore[arg-type]
+
+
+def list_threads(
+    conn: sqlite3.Connection,
+    *,
+    scope_sql: str,
+    scope_params: list,
+    q: str | None,
+    archived: bool | None,
+    sort: str,
+    order: str,
+    limit: int,
+    offset: int,
+) -> tuple[list[sqlite3.Row], int]:
+    where = [scope_sql.replace("owner_id", "t.owner_id")]
+    params: list = list(scope_params)
+
+    if q:
+        where.append("(t.title LIKE ? OR t.description LIKE ?)")
+        like = f"%{q}%"
+        params.extend([like, like])
+
+    if archived is not None:
+        where.append("t.archived = ?")
+        params.append(int(archived))
+
+    where_sql = " AND ".join(where)
+    order_col = SORTABLE.get(sort, SORTABLE["updated_at"])
+    direction = "ASC" if order.lower() == "asc" else "DESC"
+
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM threads t WHERE {where_sql}", params
+    ).fetchone()[0]
+
+    rows = conn.execute(
+        f"""
+        SELECT t.*, {THREAD_COUNTS_SQL}
+          FROM threads t
+         WHERE {where_sql}
+         ORDER BY {order_col} {direction}, t.id DESC
+         LIMIT ? OFFSET ?
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+
+    return rows, total
+
+
+def row_to_thread(row: sqlite3.Row) -> dict:
+    return {
+        "id": row["id"],
+        "owner_id": row["owner_id"],
+        "title": row["title"],
+        "description": row["description"],
+        "archived": bool(row["archived"]),
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "meeting_count": row["meeting_count"] if "meeting_count" in row.keys() else 0,
+        "last_meeting_at": row["last_meeting_at"] if "last_meeting_at" in row.keys() else None,
+        "email_count": row["email_count"] if "email_count" in row.keys() else 0,
+        "event_count": row["event_count"] if "event_count" in row.keys() else 0,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Meetings
+# --------------------------------------------------------------------------- #
+
+MEETING_EXTRAS_SQL = """
+    (SELECT s.tldr FROM summaries s
+      WHERE s.meeting_id = m.id AND s.is_current = 1 LIMIT 1)     AS summary_tldr,
+    (SELECT COUNT(*) FROM action_items a
+      WHERE a.meeting_id = m.id AND a.status = 'open')            AS open_action_items,
+    (SELECT COUNT(*) FROM speaker_map sp WHERE sp.meeting_id = m.id) AS speaker_count
+"""
+
+
+def get_meeting(conn: sqlite3.Connection, meeting_id: int) -> sqlite3.Row | None:
+    return conn.execute(
+        f"SELECT m.*, {MEETING_EXTRAS_SQL} FROM meetings m WHERE m.id = ?",
+        (meeting_id,),
+    ).fetchone()
+
+
+def require_meeting(conn: sqlite3.Connection, meeting_id: int) -> sqlite3.Row:
+    row = get_meeting(conn, meeting_id)
+    if row is None:
+        raise NotFoundError("Meeting not found")
+    return row
+
+
+def create_meeting(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: int,
+    owner_id: int,
+    title: str,
+    meeting_at: str | None = None,
+    notes: str | None = None,
+) -> sqlite3.Row:
+    now = utcnow()
+    cur = conn.execute(
+        """
+        INSERT INTO meetings (thread_id, owner_id, title, meeting_at, status,
+                              notes, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 'new', ?, ?, ?)
+        """,
+        (thread_id, owner_id, title, meeting_at or now, notes, now, now),
+    )
+    touch_thread(conn, thread_id)
+    return require_meeting(conn, cur.lastrowid)  # type: ignore[arg-type]
+
+
+def list_meetings(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: int | None,
+    scope_sql: str,
+    scope_params: list,
+    limit: int,
+    offset: int,
+) -> tuple[list[sqlite3.Row], int]:
+    where = [scope_sql.replace("owner_id", "m.owner_id")]
+    params: list = list(scope_params)
+
+    if thread_id is not None:
+        where.append("m.thread_id = ?")
+        params.append(thread_id)
+
+    where_sql = " AND ".join(where)
+
+    total = conn.execute(
+        f"SELECT COUNT(*) FROM meetings m WHERE {where_sql}", params
+    ).fetchone()[0]
+
+    rows = conn.execute(
+        f"""
+        SELECT m.*, {MEETING_EXTRAS_SQL}
+          FROM meetings m
+         WHERE {where_sql}
+         ORDER BY m.meeting_at DESC, m.id DESC
+         LIMIT ? OFFSET ?
+        """,
+        [*params, limit, offset],
+    ).fetchall()
+
+    return rows, total
+
+
+def row_to_meeting(row: sqlite3.Row) -> dict:
+    keys = row.keys()
+    return {
+        "id": row["id"],
+        "thread_id": row["thread_id"],
+        "owner_id": row["owner_id"],
+        "title": row["title"],
+        "meeting_at": row["meeting_at"],
+        "status": row["status"],
+        "original_filename": row["original_filename"],
+        "original_bytes": row["original_bytes"],
+        "audio_duration_sec": row["audio_duration_sec"],
+        "audio_sample_rate": row["audio_sample_rate"],
+        "audio_channels": row["audio_channels"],
+        "audio_converted": bool(row["audio_converted"]),
+        "has_audio": bool(row["audio_path"]),
+        "has_transcript": row["active_diarization_id"] is not None,
+        "has_summary": row["active_summary_id"] is not None,
+        "notes": row["notes"],
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+        "summary_tldr": row["summary_tldr"] if "summary_tldr" in keys else None,
+        "open_action_items": row["open_action_items"] if "open_action_items" in keys else 0,
+        "speaker_count": row["speaker_count"] if "speaker_count" in keys else 0,
+    }

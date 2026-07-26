@@ -1,0 +1,17 @@
+data/
+.env
+docker-compose.override.yml
+venv/
+.venv/
+.git/
+.gitignore
+test-reports/
+coverage/
+__pycache__/
+*.pyc
+*.db
+*.db-wal
+*.db-shm
+web/node_modules/
+web/dist/
+.pytest_cache/

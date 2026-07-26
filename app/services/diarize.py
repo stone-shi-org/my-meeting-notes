@@ -1,0 +1,186 @@
+"""The diarization service client.
+
+POSTs multipart to a LocalAI-compatible ``/v1/audio/diarization``. The two
+non-obvious fields are load-bearing:
+
+  include_text=true        without it the service returns speaker turns with
+                           no words in them at all
+  response_format=verbose_json   gives the segments/speakers structure rather
+                           than a flat transcript
+
+The request runs for minutes on a long recording and the service reports no
+progress, so a heartbeat task synthesises one from the audio duration.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from pathlib import Path
+
+import httpx
+
+from app.config import effective, get_settings
+from app.db import get_conn
+from app.errors import DiarizationError, DiarizationUnreachableError
+from app.logging_config import get_logger
+
+log = get_logger("diarize")
+
+# Never let the synthesised bar hit 100% -- a full bar that then keeps waiting
+# is worse than an honest one that stalls at 95%.
+PROGRESS_CEILING = 0.95
+HEARTBEAT_INTERVAL_SEC = 5.0
+
+
+def build_form(model: str) -> dict[str, str]:
+    return {
+        "model": model,
+        "include_text": "true",
+        "response_format": "verbose_json",
+    }
+
+
+def _headers(api_key: str | None) -> dict[str, str]:
+    return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+def diarize_sync(
+    path: Path,
+    *,
+    url: str,
+    model: str,
+    api_key: str | None,
+    timeout: int,
+) -> tuple[dict, int]:
+    """Blocking POST. Returns ``(payload, elapsed_ms)``."""
+    started = time.monotonic()
+    try:
+        with path.open("rb") as fh:
+            files = {"file": (path.name, fh, "audio/wav")}
+            response = httpx.post(
+                url,
+                files=files,
+                data=build_form(model),
+                headers=_headers(api_key),
+                timeout=timeout,
+            )
+    except httpx.ConnectError as exc:
+        raise DiarizationUnreachableError(
+            f"Could not reach the diarization service at {url}"
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise DiarizationError(
+            f"Diarization timed out after {timeout}s. Increase "
+            f"MMN_DIARIZATION_TIMEOUT_SEC for very long recordings."
+        ) from exc
+    except httpx.HTTPError as exc:
+        raise DiarizationError(f"Diarization request failed: {exc}") from exc
+
+    elapsed_ms = int((time.monotonic() - started) * 1000)
+
+    if response.status_code >= 400:
+        raise DiarizationError(
+            f"Diarization service returned {response.status_code}: "
+            f"{response.text[:400]}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise DiarizationError(
+            f"Diarization service returned non-JSON: {response.text[:200]}"
+        ) from exc
+
+    if not isinstance(payload, dict) or "segments" not in payload:
+        raise DiarizationError(
+            f"Unexpected diarization response shape: keys={list(payload)[:10]}"
+        )
+
+    if not payload["segments"]:
+        raise DiarizationError("Diarization returned no segments — is the audio silent?")
+
+    # The distinguishing symptom of a missing include_text: turns with no words.
+    if all(not (s.get("text") or "").strip() for s in payload["segments"]):
+        raise DiarizationError(
+            "Diarization returned segments with no text. The service ignored "
+            "include_text=true or the model does not support transcription."
+        )
+
+    return payload, elapsed_ms
+
+
+async def diarize_file(
+    ctx,
+    path: Path,
+    *,
+    model: str,
+    duration_sec: float | None = None,
+) -> tuple[dict, int]:
+    """Run diarization off the event loop while reporting synthetic progress."""
+    settings = get_settings()
+    with get_conn(ctx.db_path) as conn:
+        url = effective(conn, "diarization_url")
+        api_key = effective(conn, "diarization_api_key")
+        timeout = effective(conn, "diarization_timeout_sec")
+
+    expected = None
+    if duration_sec:
+        expected = duration_sec * settings.diarize_seconds_per_audio_second
+        ctx.event(
+            f"Estimated {expected / 60:.1f} min of processing for "
+            f"{duration_sec / 60:.1f} min of audio",
+            stage="diarizing",
+        )
+
+    stop = asyncio.Event()
+
+    async def heartbeat() -> None:
+        """Keep the bar and the stale-job watchdog alive during a long silence."""
+        started = time.monotonic()
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SEC)
+                return
+            except asyncio.TimeoutError:
+                pass
+            elapsed = time.monotonic() - started
+            ctx.heartbeat()
+            if expected:
+                ctx.stage_progress(min(elapsed / expected, PROGRESS_CEILING))
+
+    ticker = asyncio.create_task(heartbeat())
+    try:
+        payload, elapsed_ms = await asyncio.to_thread(
+            diarize_sync,
+            path,
+            url=url,
+            model=model,
+            api_key=api_key or None,
+            timeout=timeout,
+        )
+    finally:
+        stop.set()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+    log.info(
+        "diarized %s in %.1fs: %d segments, %s speakers",
+        path.name,
+        elapsed_ms / 1000,
+        len(payload.get("segments", [])),
+        payload.get("num_speakers"),
+    )
+    return payload, elapsed_ms
+
+
+def list_models(base_url: str, api_key: str | None = None, timeout: int = 15) -> list[dict]:
+    """Populate the model dropdown from the service's own /v1/models."""
+    root = base_url.split("/v1/")[0].rstrip("/")
+    try:
+        response = httpx.get(
+            f"{root}/v1/models", headers=_headers(api_key), timeout=timeout
+        )
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise DiarizationError(f"Could not list diarization models: {exc}") from exc
+    return response.json().get("data", [])
