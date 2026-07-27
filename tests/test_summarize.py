@@ -295,6 +295,55 @@ def test_regenerate_with_a_different_model(user_client, meeting, mock_llm):
     assert user_client.get(f"/api/meetings/{mid}/summary").json()["model"] == "other/model"
 
 
+def test_related_context_reaches_the_prompt_when_confirmed(
+    user_client, meeting, mock_llm, isolated_settings
+):
+    """Attached calendar events and emails become background context, not a
+    silent no-op -- this is the whole point of matching feeding the summary."""
+    from app.db import utcnow
+
+    mid = meeting["meeting_id"]
+    with get_conn(isolated_settings.db_path) as conn:
+        conn.execute(
+            """
+            INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, summary,
+                location, start_at, raw_json, attached_at)
+            VALUES (?, ?, 'evt-1', 'Recruiter sync', 'Zoom', '2026-03-18T10:00:00Z',
+                '{}', ?)
+            """,
+            (meeting["thread_id"], mid, utcnow()),
+        )
+        conn.execute(
+            """
+            INSERT INTO thread_emails (thread_id, meeting_id, message_id, sender,
+                subject, date, snippet, raw_json, attached_at)
+            VALUES (?, ?, 'msg-1', 'donna@example.com', 'Re: role details',
+                '2026-03-17', 'Sending over the role description now.', '{}', ?)
+            """,
+            (meeting["thread_id"], mid, utcnow()),
+        )
+
+    _wait(
+        user_client,
+        user_client.post(f"/api/meetings/{mid}/summary/regenerate", json={}).json()["job_id"],
+    )
+
+    body = json.loads(mock_llm.calls[-1].request.content)
+    user_message = body["messages"][1]["content"]
+    assert "[Event] Recruiter sync" in user_message
+    assert "[Email] Re: role details" in user_message
+    assert "Sending over the role description now." in user_message
+
+
+def test_related_context_defaults_to_none_when_nothing_confirmed(user_client, meeting, mock_llm):
+    """No attached email/event must render as an explicit "(none)", never as a
+    literal unsubstituted {{related_context}} leaking to the model."""
+    body = json.loads(mock_llm.calls[0].request.content)
+    user_message = body["messages"][1]["content"]
+    assert "(none confirmed for this meeting)" in user_message
+    assert "{{related_context}}" not in user_message
+
+
 def test_regenerate_needs_a_transcript(user_client):
     m = user_client.post(
         "/api/meetings", json={"new_thread_title": "T", "title": "No audio"}

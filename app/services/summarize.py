@@ -19,11 +19,14 @@ from app.db import get_conn, utcnow
 from app.errors import LLMError, NotFoundError
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
+from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
 
 log = get_logger("summarize")
+
+CONTEXT_SNIPPET_LIMIT = 240
 
 
 # Defaults on every field: a model that omits open_questions must not fail a
@@ -61,6 +64,37 @@ class MeetingSummaryResult(BaseModel):
     participants: list[Participant] = Field(default_factory=list)
 
 
+def _render_related_context(context: dict) -> str:
+    events = context.get("events") or []
+    emails = context.get("emails") or []
+    if not events and not emails:
+        return "(none confirmed for this meeting)"
+
+    lines: list[str] = []
+    for e in events:
+        when = (e.get("start_at") or "")[:16].replace("T", " ")
+        where = e.get("location") or e.get("calendar_name") or ""
+        bits = ", ".join(b for b in (when, where) if b)
+        header = f"[Event] {e.get('summary') or 'Untitled'}"
+        if bits:
+            header += f" ({bits})"
+        lines.append(header)
+        if e.get("description"):
+            lines.append(f"  {e['description'][:CONTEXT_SNIPPET_LIMIT].strip()}")
+
+    for m in emails:
+        when = (m.get("date") or "")[:10]
+        meta = ", ".join(b for b in (m.get("sender"), when) if b)
+        header = f"[Email] {m.get('subject') or '(no subject)'}"
+        if meta:
+            header += f" ({meta})"
+        lines.append(header)
+        if m.get("snippet"):
+            lines.append(f"  {m['snippet'][:CONTEXT_SNIPPET_LIMIT].strip()}")
+
+    return "\n".join(lines)
+
+
 def build_prompt_values(
     conn: sqlite3.Connection, meeting_id: int, transcript: dict, transcript_text: str
 ) -> dict[str, str]:
@@ -71,6 +105,7 @@ def build_prompt_values(
         s["display_name"] or s["id"] for s in transcript.get("speakers", [])
     )
     duration = transcript.get("duration") or meeting["audio_duration_sec"] or 0
+    related_context = _render_related_context(matching_svc.attached_context(conn, meeting_id))
 
     return {
         "thread_title": thread["title"] or "",
@@ -79,6 +114,7 @@ def build_prompt_values(
         "meeting_date": (meeting["meeting_at"] or "")[:10],
         "duration_human": transcript_svc.fmt_clock(duration),
         "speaker_list": speakers,
+        "related_context": related_context,
         "transcript": transcript_text,
     }
 

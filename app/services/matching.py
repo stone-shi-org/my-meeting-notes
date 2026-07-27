@@ -506,6 +506,33 @@ def latest_match_run(conn: sqlite3.Connection, meeting_id: int) -> dict | None:
     }
 
 
+def attached_context(conn: sqlite3.Connection, meeting_id: int) -> dict:
+    """Calendar events and emails the user confirmed as relevant to this meeting.
+
+    Scoped to this meeting, not the whole thread: a thread can span many
+    meetings, and pulling in items attached via a different meeting's match
+    would feed the summarizer content the user never confirmed for this one.
+    """
+    events = conn.execute(
+        """
+        SELECT summary, start_at, location, calendar_name, description
+        FROM thread_calendar_events WHERE meeting_id = ? ORDER BY start_at
+        """,
+        (meeting_id,),
+    ).fetchall()
+    emails = conn.execute(
+        """
+        SELECT subject, sender, date, snippet
+        FROM thread_emails WHERE meeting_id = ? ORDER BY date
+        """,
+        (meeting_id,),
+    ).fetchall()
+    return {
+        "events": [dict(r) for r in events],
+        "emails": [dict(r) for r in emails],
+    }
+
+
 def attach_selected(
     conn: sqlite3.Connection,
     *,
