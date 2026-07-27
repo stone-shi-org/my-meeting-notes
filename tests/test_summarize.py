@@ -303,6 +303,36 @@ def test_regenerate_needs_a_transcript(user_client):
     assert resp.status_code == 400
 
 
+def test_regenerate_produces_the_first_summary_when_none_exists(user_client, mock_llm):
+    """The path behind the UI's "Generate summary" button.
+
+    When the summarize stage fails during ingest the transcript is kept and no
+    summary row is written at all, so the endpoint has to work from zero
+    versions -- not just re-run an existing one, despite the name.
+    """
+    with (FIXTURES / "tiny16k.wav").open("rb") as fh:
+        body = user_client.post(
+            "/api/meetings/upload",
+            data={"title": "T", "new_thread_title": "X", "auto_summarize": "false"},
+            files={"file": ("tiny16k.wav", fh, "audio/wav")},
+        ).json()
+    _wait(user_client, body["job_id"])
+
+    mid = body["meeting_id"]
+    assert user_client.get(f"/api/meetings/{mid}/summary").status_code == 404
+
+    job = _wait(
+        user_client,
+        user_client.post(f"/api/meetings/{mid}/summary/regenerate", json={}).json()["job_id"],
+    )
+    assert job["status"] == "succeeded", job.get("error")
+
+    created = user_client.get(f"/api/meetings/{mid}/summary").json()
+    assert created["version"] == 1
+    assert created["is_current"] is True
+    assert created["tldr"] == GOOD_SUMMARY["tldr"]
+
+
 def test_action_items_of_an_old_version_survive_with_it(user_client, meeting, mock_llm):
     mid = meeting["meeting_id"]
     _wait(

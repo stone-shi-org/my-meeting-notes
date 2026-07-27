@@ -1,8 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import DOMPurify from 'dompurify';
-import { CheckSquare, RefreshCw, Square, Sparkles } from 'lucide-react';
+import { CheckSquare, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
 import { marked } from 'marked';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives';
@@ -18,7 +18,7 @@ import { initials, speakerVars } from '@/lib/speakerColors';
 import { watchJob } from '@/hooks/useJob';
 import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript } from '@/types/api';
 
-type Tab = 'summary' | 'actions' | 'speakers';
+const TRANSCRIPT_PREF_KEY = 'mmn.showTranscript';
 
 function SpeakerLegend({
   meetingId,
@@ -194,16 +194,76 @@ function ActionItemList({ meetingId, items }: { meetingId: number; items: Action
   );
 }
 
-function SummaryPanel({ meetingId, summary }: { meetingId: number; summary: Summary }) {
+/** Queue a summary run. Shared by the regenerate button and the empty state,
+ * since "generate the first one" and "redo it" are the same request. */
+function useGenerateSummary(meetingId: number) {
   const queryClient = useQueryClient();
-
-  const regenerate = useMutation({
+  return useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/meetings/${meetingId}/summary/regenerate`, {}),
     onSuccess: (data) => {
       watchJob(data.job_id);
       void queryClient.invalidateQueries({ queryKey: ['jobs', 'active'] });
     },
   });
+}
+
+/**
+ * Shown when a meeting has a transcript but no summary -- normally because
+ * the summarize stage failed while the transcript succeeded. The ingest job
+ * deliberately doesn't fail in that case (a costly transcript shouldn't be
+ * thrown away over a summary), so without this the user is stuck with no way
+ * to ask for one.
+ */
+function NoSummaryPanel({ meetingId, canGenerate }: { meetingId: number; canGenerate: boolean }) {
+  const generate = useGenerateSummary(meetingId);
+
+  return (
+    <div className="py-4 text-center">
+      <Sparkles className="mx-auto size-6 text-fg-faint" aria-hidden />
+      <p className="mt-2 text-sm text-fg-subtle">
+        {canGenerate
+          ? 'No summary yet. This usually means the language model was unavailable when the recording was processed.'
+          : 'No summary yet.'}
+      </p>
+
+      {canGenerate && (
+        <>
+          <Button
+            size="sm"
+            variant="primary"
+            className="mt-3"
+            onClick={() => generate.mutate()}
+            loading={generate.isPending}
+          >
+            <RefreshCw />
+            Generate summary
+          </Button>
+
+          {generate.error && (
+            <p className="mt-2 text-sm text-danger-ink">
+              {(generate.error as Error).message}
+            </p>
+          )}
+
+          {generate.isSuccess && (
+            <p className="mt-2 text-xs text-fg-muted">
+              Started.{' '}
+              <Link
+                to={`/jobs/${generate.data.job_id}`}
+                className="text-primary hover:underline"
+              >
+                Follow progress
+              </Link>
+            </p>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function SummaryPanel({ meetingId, summary }: { meetingId: number; summary: Summary }) {
+  const regenerate = useGenerateSummary(meetingId);
 
   const html = useMemo(() => {
     if (!summary.summary_md) return '';
@@ -316,7 +376,18 @@ function DeepLinkSeek() {
 
 export function TranscriptPage() {
   const { meetingId } = useParams<{ meetingId: string }>();
-  const [tab, setTab] = useState<Tab>('summary');
+  const speakersRef = useRef<HTMLDivElement>(null);
+
+  // Collapsed by default -- the transcript is reference material, not the
+  // headline. Remembered so anyone who does read along isn't re-opening it
+  // on every meeting.
+  const [showTranscript, setShowTranscript] = useState(
+    () => localStorage.getItem(TRANSCRIPT_PREF_KEY) === '1',
+  );
+
+  useEffect(() => {
+    localStorage.setItem(TRANSCRIPT_PREF_KEY, showTranscript ? '1' : '0');
+  }, [showTranscript]);
 
   const meeting = useQuery({
     queryKey: ['meeting', meetingId],
@@ -384,88 +455,119 @@ export function TranscriptPage() {
             </p>
           </div>
 
-          <Select
-            className="w-auto"
-            aria-label="Export transcript"
-            defaultValue=""
-            onChange={(e) => {
-              if (!e.target.value) return;
-              window.open(
-                `/api/meetings/${m.id}/transcript?format=${e.target.value}`,
-                '_blank',
-              );
-              e.target.value = '';
-            }}
-          >
-            <option value="">Export…</option>
-            <option value="text">Plain text</option>
-            <option value="md">Markdown</option>
-            <option value="vtt">WebVTT</option>
-            <option value="json">JSON</option>
-          </Select>
+          <div className="flex items-center gap-2">
+            <Button
+              variant={showTranscript ? 'secondary' : 'ghost'}
+              onClick={() => setShowTranscript((v) => !v)}
+              aria-expanded={showTranscript}
+            >
+              <FileText />
+              {showTranscript ? 'Hide transcript' : 'Show transcript'}
+            </Button>
+
+            <Select
+              className="w-auto"
+              aria-label="Export transcript"
+              defaultValue=""
+              onChange={(e) => {
+                if (!e.target.value) return;
+                window.open(
+                  `/api/meetings/${m.id}/transcript?format=${e.target.value}`,
+                  '_blank',
+                );
+                e.target.value = '';
+              }}
+            >
+              <option value="">Export…</option>
+              <option value="text">Plain text</option>
+              <option value="md">Markdown</option>
+              <option value="vtt">WebVTT</option>
+              <option value="json">JSON</option>
+            </Select>
+          </div>
         </div>
 
-        <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
-          <Card className="overflow-hidden">
-            {transcript.isLoading && <Skeleton className="h-96 w-full" />}
-            {transcript.data && (
-              <>
-                <TranscriptView
-                  segments={transcript.data.segments}
-                  meetingId={m.id}
-                  onRename={() => setTab('speakers')}
-                />
-                <PlayerBar />
-              </>
-            )}
-          </Card>
-
-          <div className="space-y-4 lg:sticky lg:top-20 lg:self-start">
-            <Card>
-              <div className="flex border-b border-border" role="tablist">
-                {(['summary', 'actions', 'speakers'] as Tab[]).map((t) => (
-                  <button
-                    key={t}
-                    role="tab"
-                    aria-selected={tab === t}
-                    onClick={() => setTab(t)}
-                    className={cn(
-                      'flex-1 border-b-2 px-3 py-2 text-sm font-medium capitalize transition-colors duration-fast',
-                      tab === t
-                        ? 'border-primary text-fg'
-                        : 'border-transparent text-fg-subtle hover:text-fg',
-                    )}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-
-              <div className="p-4">
-                {tab === 'summary' &&
-                  (summary.data ? (
-                    <SummaryPanel meetingId={m.id} summary={summary.data} />
-                  ) : (
-                    <div className="text-center">
-                      <Sparkles className="mx-auto size-6 text-fg-faint" aria-hidden />
-                      <p className="mt-2 text-sm text-fg-subtle">No summary yet.</p>
-                    </div>
-                  ))}
-
-                {tab === 'actions' && (
-                  <ActionItemList meetingId={m.id} items={summary.data?.action_items ?? []} />
-                )}
-
-                {tab === 'speakers' && transcript.data && (
-                  <SpeakerLegend meetingId={m.id} transcript={transcript.data} />
-                )}
-              </div>
+        {/* Summary, actions and speakers are what people come here for, so
+            they get the main column and are all visible at once rather than
+            hidden behind tabs. The transcript is reference material: it moves
+            to a side panel, collapsed by default. */}
+        <div
+          className={cn(
+            'grid items-start gap-4',
+            showTranscript && 'xl:grid-cols-[minmax(0,1fr)_460px]',
+          )}
+        >
+          <div className="min-w-0 space-y-4">
+            <Card className="p-5">
+              <h2 className="mb-3 font-display text-lg font-semibold">Summary</h2>
+              {summary.data ? (
+                <SummaryPanel meetingId={m.id} summary={summary.data} />
+              ) : summary.isLoading ? (
+                <Skeleton className="h-32 w-full" />
+              ) : (
+                <NoSummaryPanel meetingId={m.id} canGenerate={m.has_transcript} />
+              )}
             </Card>
+
+            <div className="grid gap-4 md:grid-cols-2">
+              <Card className="p-5">
+                <h2 className="mb-3 font-display text-lg font-semibold">
+                  Action items
+                  {summary.data && summary.data.action_items.length > 0 && (
+                    <span className="ml-2 text-sm font-normal text-fg-subtle tabular">
+                      {summary.data.action_items.filter((a) => a.status === 'open').length} open
+                    </span>
+                  )}
+                </h2>
+                {/* Action items come out of the summary, so with no summary
+                    "none detected" would be a lie -- nothing has looked yet. */}
+                {summary.data ? (
+                  <ActionItemList meetingId={m.id} items={summary.data.action_items} />
+                ) : summary.isLoading ? (
+                  <Skeleton className="h-24 w-full" />
+                ) : (
+                  <NoSummaryPanel meetingId={m.id} canGenerate={m.has_transcript} />
+                )}
+              </Card>
+
+              <Card className="p-5" ref={speakersRef}>
+                <h2 className="mb-3 font-display text-lg font-semibold">Speakers</h2>
+                {transcript.data ? (
+                  <SpeakerLegend meetingId={m.id} transcript={transcript.data} />
+                ) : (
+                  <Skeleton className="h-24 w-full" />
+                )}
+              </Card>
+            </div>
 
             <McpMatchPanel meeting={m} onAttached={() => meeting.refetch()} />
           </div>
+
+          {showTranscript && (
+            <Card className="flex max-h-[calc(100dvh-11rem)] flex-col overflow-hidden xl:sticky xl:top-20">
+              {transcript.isLoading && <Skeleton className="h-96 w-full" />}
+              {transcript.data && (
+                <div className="min-h-0 flex-1 overflow-y-auto">
+                  <TranscriptView
+                    segments={transcript.data.segments}
+                    meetingId={m.id}
+                    onRename={() =>
+                      speakersRef.current?.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'center',
+                      })
+                    }
+                  />
+                </div>
+              )}
+            </Card>
+          )}
         </div>
       </div>
+
+      {/* Outside the grid so playback stays available with the transcript
+          collapsed -- listening back doesn't require reading along. */}
+      <PlayerBar />
     </PlayerProvider>
   );
 }

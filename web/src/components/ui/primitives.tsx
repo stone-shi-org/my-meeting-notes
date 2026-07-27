@@ -6,24 +6,23 @@ import { cn } from '@/lib/cn';
 /* Card                                                                        */
 /* -------------------------------------------------------------------------- */
 
-export function Card({
-  className,
-  interactive,
-  ...props
-}: React.HTMLAttributes<HTMLDivElement> & { interactive?: boolean }) {
-  return (
-    <div
-      className={cn(
-        'rounded-lg border border-border bg-surface shadow-xs',
-        interactive &&
-          'cursor-pointer transition-[box-shadow,transform] duration-fast ease-out ' +
-            'hover:-translate-y-px hover:shadow-sm motion-reduce:hover:translate-y-0',
-        className,
-      )}
-      {...props}
-    />
-  );
-}
+export const Card = forwardRef<
+  HTMLDivElement,
+  React.HTMLAttributes<HTMLDivElement> & { interactive?: boolean }
+>(({ className, interactive, ...props }, ref) => (
+  <div
+    ref={ref}
+    className={cn(
+      'rounded-lg border border-border bg-surface shadow-xs',
+      interactive &&
+        'cursor-pointer transition-[box-shadow,transform] duration-fast ease-out ' +
+          'hover:-translate-y-px hover:shadow-sm motion-reduce:hover:translate-y-0',
+      className,
+    )}
+    {...props}
+  />
+));
+Card.displayName = 'Card';
 
 export function CardHeader({ className, ...props }: React.HTMLAttributes<HTMLDivElement>) {
   return <div className={cn('flex flex-col gap-1 p-5 pb-3', className)} {...props} />;

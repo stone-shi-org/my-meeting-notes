@@ -157,7 +157,7 @@ export function TranscriptView({
 
   return (
     <div>
-      <div className="sticky top-14 z-20 border-b border-border bg-surface/90 px-3 py-2 backdrop-blur-xl">
+      <div className="sticky top-0 z-20 border-b border-border bg-surface/90 px-3 py-2 backdrop-blur-xl">
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
