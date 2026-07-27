@@ -37,9 +37,13 @@ export class ApiError extends Error {
       case 'LLM_AUTH_FAILED':
       case 'llm_error':
         return '/settings/llm';
+      case 'NO_INTEGRATIONS':
+      case 'NEEDS_REAUTH':
+      // Still mapped after the rename: a cached bundle can raise these, and
+      // /settings/mcp redirects to the same place.
       case 'MCP_TIMEOUT':
       case 'mcp_error':
-        return '/settings/mcp';
+        return '/settings/integrations';
       default:
         return null;
     }
@@ -266,6 +270,11 @@ export interface Email {
   relevance_reason: string | null;
   suggested?: boolean;
   attached_at?: string;
+  /** Provider-owned deep link. Null for IMAP, which has no web UI to link to. */
+  url?: string | null;
+  /** The real RFC 2822 Message-ID, for the Gmail fallback link. */
+  rfc_message_id?: string | null;
+  provider?: string | null;
 }
 
 export interface MatchRun {
@@ -275,13 +284,23 @@ export interface MatchRun {
     keywords: string[];
     calendar: { query: string; start_date: string; end_date: string };
     email: { query: string };
+    sources?: { kind: string; provider: string; integration_id: number; account: string }[];
   };
   events: CalendarEvent[];
   emails: Email[];
   notes: string;
   model: string | null;
+  /** Aggregates, set only when every account of that kind failed. */
   calendar_error: string | null;
   email_error: string | null;
+  /** Per-account detail behind those aggregates. */
+  source_errors?: {
+    kind: string;
+    provider: string;
+    integration_id: number;
+    account: string;
+    error: string;
+  }[];
   error: string | null;
   created_at: string;
 }
@@ -293,40 +312,58 @@ export interface TimelineItem {
   payload: Meeting | CalendarEvent | Email;
 }
 
-export interface McpServer {
-  name: string;
-  kind: string;
-  transport: 'sse' | 'stdio';
+/** One connected calendar/email account. Always the caller's own. */
+export interface Integration {
+  id: number;
+  provider: string;
+  provider_label: string;
+  supported_kinds: string[];
+  account_key: string;
+  account_label: string | null;
+  calendar_enabled: boolean;
+  email_enabled: boolean;
   enabled: boolean;
-  base_url: string | null;
-  auth_token: string | null;
-  has_token: boolean;
-  command: string | null;
-  args: string[];
-  cwd: string | null;
-  env: Record<string, string>;
-  tool_name: string;
-  default_profile: string | null;
-  timeout_sec: number;
-  last_test: {
-    at: string | null;
-    ok: boolean | null;
-    error: string | null;
-    tools: string[];
-  };
+  auth_type: 'oauth2' | 'password' | 'token';
+  /** Non-secret settings only. */
+  config: Record<string, unknown>;
+  has_secret: boolean;
+  /** Masked tail, e.g. ••••1234. Echo it back to leave the secret unchanged. */
+  secret_preview: string | null;
+  status: 'ok' | 'error' | 'unverified' | 'reauth_required';
+  scopes: string | null;
+  token_expires_at: string | null;
+  last_test: { at: string | null; ok: boolean | null; error: string | null };
+  created_at: string;
+  updated_at: string;
 }
 
-export interface UserMcpProfile {
-  server_name: string;
-  kind: string;
-  enabled: boolean;
-  tool_name: string;
-  shared_profile: string | null;
-  profile: string | null;
-  has_override: boolean;
-  has_personal_token: boolean;
-  auth_token: string | null;
-  last_test: { at: string | null; ok: boolean | null; error: string | null; tools: string[] } | null;
+export interface ProviderSpec {
+  id: string;
+  label: string;
+  kinds: string[];
+  auth_type: 'oauth2' | 'password' | 'token';
+  docs_url: string;
+}
+
+/** Drives the enabled/disabled state of the match button. */
+export interface IntegrationSummary {
+  calendar: number;
+  email: number;
+  needs_reauth: { id: number; provider: string; account_label: string }[];
+}
+
+/** One leg of a connection test -- a provider can be half-working. */
+export interface IntegrationCheck {
+  name: string;
+  ok: boolean;
+  error: string | null;
+}
+
+export interface IntegrationTestResult {
+  ok: boolean;
+  latency_ms: number;
+  checks: IntegrationCheck[];
+  error: string | null;
 }
 
 export interface SettingEntry {

@@ -156,8 +156,10 @@ export function JobErrorPanel({
       ? '/settings/diarization'
       : job.error?.toLowerCase().includes('llm')
         ? '/settings/llm'
-        : job.error?.toLowerCase().includes('mcp')
-          ? '/settings/mcp'
+        : ['mcp', 'integration', 'calendar', 'inbox'].some((word) =>
+              job.error?.toLowerCase().includes(word),
+            )
+          ? '/settings/integrations'
           : null;
 
   return (

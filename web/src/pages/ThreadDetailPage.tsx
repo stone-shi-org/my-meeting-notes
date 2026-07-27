@@ -18,7 +18,7 @@ import { Badge, Card, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import { gmailLink } from '@/lib/links';
+import { emailLink } from '@/lib/links';
 import { fmtClock } from '@/lib/time';
 import type {
   CalendarEvent,
@@ -134,7 +134,7 @@ function EventTimelineCard({ event }: { event: CalendarEvent }) {
 }
 
 function EmailTimelineCard({ email }: { email: Email }) {
-  const href = gmailLink(email.message_id);
+  const href = emailLink(email);
   return (
     <div className="py-1.5 pl-3">
       <p className="text-sm">

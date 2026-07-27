@@ -1,12 +1,20 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { AlertTriangle, CalendarDays, ExternalLink, Link2, Mail, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Meter, Spinner } from '@/components/ui/primitives';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import { gmailLink } from '@/lib/links';
-import { ApiError, type CalendarEvent, type Email, type MatchRun, type Meeting } from '@/types/api';
+import { emailLink } from '@/lib/links';
+import {
+  ApiError,
+  type CalendarEvent,
+  type Email,
+  type IntegrationSummary,
+  type MatchRun,
+  type Meeting,
+} from '@/types/api';
 
 function bucket(score: number | null): { label: string; variant: 'success' | 'warning' | 'neutral' } {
   if (score === null) return { label: 'Unranked', variant: 'neutral' };
@@ -127,6 +135,14 @@ export function McpMatchPanel({
     refetchInterval: jobId ? 2000 : false,
   });
 
+  // Asked before the click, not after: starting a match returns 202, so a
+  // "nothing connected" failure raised inside the job would surface as a failed
+  // job rather than as something the button could have prevented.
+  const summary = useQuery({
+    queryKey: ['integrations', 'summary'],
+    queryFn: () => api.get<IntegrationSummary>('/integrations/summary'),
+  });
+
   const start = useMutation({
     mutationFn: () => api.post<{ job_id: string }>(`/meetings/${meeting.id}/match`, {}),
     onSuccess: (data) => {
@@ -185,6 +201,8 @@ export function McpMatchPanel({
   }, [pickedEvent, run, meeting.title]);
 
   const running = start.isPending || !!jobId;
+  const sourceCount = (summary.data?.calendar ?? 0) + (summary.data?.email ?? 0);
+  const nothingConnected = summary.isSuccess && sourceCount === 0;
 
   return (
     <Card className="overflow-hidden">
@@ -196,11 +214,39 @@ export function McpMatchPanel({
             Search your calendar and email for things that belong to this meeting.
           </p>
         </div>
-        <Button variant="secondary" onClick={() => start.mutate()} loading={running}>
+        <Button
+          variant="secondary"
+          onClick={() => start.mutate()}
+          loading={running}
+          disabled={nothingConnected}
+          title={
+            nothingConnected ? 'Connect a calendar or inbox first' : undefined
+          }
+        >
           <Search />
           {run ? 'Search again' : 'Find matches'}
         </Button>
       </div>
+
+      {nothingConnected && (
+        <p className="border-b border-border bg-surface-2/50 p-4 text-sm text-fg-subtle">
+          No calendar or inbox is connected to your account yet.{' '}
+          <Link to="/settings/integrations" className="text-primary hover:underline">
+            Connect one in Settings
+          </Link>{' '}
+          to match meetings against your events and email.
+        </p>
+      )}
+
+      {summary.data?.needs_reauth?.length ? (
+        <p className="border-b border-border bg-warning-soft/40 p-3 text-xs text-fg-muted">
+          {summary.data.needs_reauth.map((a) => a.account_label).join(', ')} need
+          {summary.data.needs_reauth.length === 1 ? 's' : ''} reconnecting.{' '}
+          <Link to="/settings/integrations" className="text-primary hover:underline">
+            Fix in Settings
+          </Link>
+        </p>
+      ) : null}
 
       {running && (
         <div className="flex items-center gap-2 p-4 text-sm text-fg-subtle">
@@ -212,7 +258,7 @@ export function McpMatchPanel({
         <p className="p-4 text-sm text-danger-ink">{(start.error as Error).message}</p>
       )}
 
-      {!run && !running && !start.error && (
+      {!run && !running && !start.error && !nothingConnected && (
         <p className="p-4 text-sm text-fg-subtle">
           Nothing searched yet.
         </p>
@@ -220,12 +266,24 @@ export function McpMatchPanel({
 
       {run && !running && (
         <>
-          {(run.calendar_error || run.email_error || run.error) && (
+          {(run.calendar_error || run.email_error || run.error || run.source_errors?.length) && (
             <div className="flex items-start gap-2 border-b border-border bg-warning-soft/40 p-3">
               <AlertTriangle className="mt-0.5 size-4 shrink-0 text-warning" aria-hidden />
               <div className="text-xs text-fg-muted">
-                {run.calendar_error && <p>Calendar: {run.calendar_error}</p>}
-                {run.email_error && <p>Email: {run.email_error}</p>}
+                {/* Per-account detail when we have it: with several accounts
+                    connected, "Calendar: failed" alone does not say which one. */}
+                {run.source_errors?.length
+                  ? run.source_errors.map((failure) => (
+                      <p key={`${failure.kind}-${failure.integration_id}`}>
+                        {failure.account}: {failure.error}
+                      </p>
+                    ))
+                  : (
+                    <>
+                      {run.calendar_error && <p>Calendar: {run.calendar_error}</p>}
+                      {run.email_error && <p>Email: {run.email_error}</p>}
+                    </>
+                  )}
                 {run.error && <p>Ranking unavailable — results are shown unranked.</p>}
               </div>
             </div>
@@ -287,7 +345,7 @@ export function McpMatchPanel({
                         })
                       }
                       title={email.subject || '(no subject)'}
-                      href={gmailLink(email.message_id)}
+                      href={emailLink(email)}
                       meta={[email.sender, (email.date ?? '').slice(0, 16).replace('T', ' ')]
                         .filter(Boolean)
                         .join(' · ')}

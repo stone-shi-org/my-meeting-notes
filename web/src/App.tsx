@@ -14,8 +14,8 @@ import { LoginPage } from '@/pages/LoginPage';
 import { NewMeetingPage } from '@/pages/NewMeetingPage';
 import {
   DiarizationSettingsPage,
+  IntegrationsSettingsPage,
   LlmSettingsPage,
-  McpSettingsPage,
   PromptSettingsPage,
   SettingsPage,
   UsersSettingsPage,
@@ -72,7 +72,13 @@ export function App() {
                       <Route index element={<Navigate to="/settings/llm" replace />} />
                       <Route path="llm" element={<LlmSettingsPage />} />
                       <Route path="diarization" element={<DiarizationSettingsPage />} />
-                      <Route path="mcp" element={<McpSettingsPage />} />
+                      <Route path="integrations" element={<IntegrationsSettingsPage />} />
+                      {/* Old path kept as a redirect: bookmarks, and error
+                          deep-links from a cached bundle, both still land. */}
+                      <Route
+                        path="mcp"
+                        element={<Navigate to="/settings/integrations" replace />}
+                      />
                       <Route path="prompt" element={<PromptSettingsPage />} />
                       <Route element={<RequireAdmin />}>
                         <Route path="users" element={<UsersSettingsPage />} />

@@ -178,29 +178,67 @@ class TimelineItem(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# Per-user MCP profiles
+# Per-user integrations
 # --------------------------------------------------------------------------- #
 
 
-class UserMcpProfileOut(BaseModel):
-    server_name: str
-    kind: str
+class ProviderSpecOut(BaseModel):
+    """One entry in the "Add integration" picker."""
+
+    id: str
+    label: str
+    kinds: list[str]
+    auth_type: str  # oauth2 | password | token
+    docs_url: str = ""
+
+
+class IntegrationOut(BaseModel):
+    id: int
+    provider: str
+    provider_label: str
+    supported_kinds: list[str]
+    account_key: str
+    account_label: str | None
+    calendar_enabled: bool
+    email_enabled: bool
     enabled: bool
-    tool_name: str
-    shared_profile: str | None
-    """The account everyone uses when they have no personal override."""
-    profile: str | None
-    """The account this user actually searches -- their own if set, else shared_profile."""
-    has_override: bool
-    has_personal_token: bool
-    auth_token: str | None
-    """Masked; only present when has_personal_token is true."""
-    last_test: dict | None = None
+    auth_type: str
+    config: dict
+    """Non-secret settings only -- URLs, profile names, region."""
+    has_secret: bool
+    secret_preview: str | None
+    """Masked tail, e.g. ••••1234. The credential itself is never returned."""
+    status: str  # ok | error | unverified | reauth_required
+    scopes: str | None
+    token_expires_at: str | None
+    last_test: dict
+    created_at: str
+    updated_at: str
 
 
-class SetUserMcpProfileRequest(BaseModel):
-    profile: str = Field(min_length=1, max_length=100)
-    auth_token: str | None = Field(default=None, max_length=500)
-    """None leaves an existing personal token untouched; "" clears it (revert
-    to the shared token); a masked value echoed back is also treated as
-    unchanged."""
+class CreateIntegrationRequest(BaseModel):
+    provider: str
+    account_label: str | None = Field(default=None, max_length=200)
+    calendar_enabled: bool | None = None
+    email_enabled: bool | None = None
+    config: dict = Field(default_factory=dict)
+    secret: dict[str, str] = Field(default_factory=dict)
+
+
+class UpdateIntegrationRequest(BaseModel):
+    account_label: str | None = Field(default=None, max_length=200)
+    calendar_enabled: bool | None = None
+    email_enabled: bool | None = None
+    enabled: bool | None = None
+    config: dict | None = None
+    secret: dict[str, str] | None = None
+    """Per key: absent leaves it alone, "" clears it, a masked echo is also
+    treated as unchanged, anything else replaces it."""
+
+
+class IntegrationSummaryOut(BaseModel):
+    """Drives the enabled/disabled state of the match button."""
+
+    calendar: int
+    email: int
+    needs_reauth: list[dict]

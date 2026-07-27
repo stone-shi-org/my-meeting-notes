@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckCircle2, PlugZap, XCircle } from 'lucide-react';
+import { PlugZap, Plus, Trash2 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -17,19 +17,20 @@ import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import type {
-  McpServer,
+  Integration,
+  IntegrationTestResult,
   Paginated,
   PromptDetail,
   PromptSummary,
+  ProviderSpec,
   SettingEntry,
   User,
-  UserMcpProfile,
 } from '@/types/api';
 
 const TABS = [
   { to: '/settings/llm', label: 'LLM' },
   { to: '/settings/diarization', label: 'Diarization' },
-  { to: '/settings/mcp', label: 'Integrations' },
+  { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/users', label: 'Users', adminOnly: true },
 ];
@@ -357,418 +358,388 @@ export function DiarizationSettingsPage() {
 }
 
 /* -------------------------------------------------------------------------- */
-/* MCP                                                                         */
+/* Integrations                                                                */
 /* -------------------------------------------------------------------------- */
 
-function McpServerCard({ server }: { server: McpServer }) {
-  const { isAdmin } = useAuth();
-  const queryClient = useQueryClient();
-  const [draft, setDraft] = useState<Partial<McpServer>>({});
-  const [testResult, setTestResult] = useState<{
-    ok: boolean;
-    error: string | null;
-    tools: string[];
-    latency_ms: number;
-  } | null>(null);
+const STATUS_BADGE: Record<
+  Integration['status'],
+  { label: string; variant: 'success' | 'warning' | 'danger' | 'neutral' }
+> = {
+  ok: { label: 'Connected', variant: 'success' },
+  unverified: { label: 'Not tested', variant: 'neutral' },
+  error: { label: 'Error', variant: 'danger' },
+  reauth_required: { label: 'Reconnect needed', variant: 'warning' },
+};
 
-  const merged = { ...server, ...draft };
-  const dirty = Object.keys(draft).length > 0;
-
-  const save = useMutation({
-    mutationFn: () => api.put(`/mcp/servers/${server.name}`, draft),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['mcp-servers'] });
-      setDraft({});
-    },
-  });
-
-  const test = useMutation({
-    mutationFn: () => api.post<typeof testResult>(`/mcp/servers/${server.name}/test`, draft),
-    onSuccess: (data) => {
-      setTestResult(data);
-      void queryClient.invalidateQueries({ queryKey: ['mcp-servers'] });
-    },
-  });
-
-  const last = server.last_test;
-
+function CheckList({ result }: { result: IntegrationTestResult }) {
   return (
-    <Card className="p-5">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <h3 className="font-display text-lg font-semibold capitalize">{server.name}</h3>
-          <p className="text-sm text-fg-subtle">
-            Tool <code className="font-mono text-xs">{server.tool_name}</code>
-          </p>
-        </div>
-        {last.ok === true && (
-          <Badge variant="success">
-            <CheckCircle2 className="size-3" aria-hidden /> Connected
-          </Badge>
-        )}
-        {last.ok === false && (
-          <Badge variant="danger">
-            <XCircle className="size-3" aria-hidden /> Failing
-          </Badge>
-        )}
-      </div>
-
-      <div className="mt-4 space-y-3">
-        <div>
-          <Label htmlFor={`${server.name}-transport`}>Transport</Label>
-          <Select
-            id={`${server.name}-transport`}
-            className="mt-1.5"
-            value={merged.transport}
-            disabled={!isAdmin}
-            onChange={(e) =>
-              setDraft((d) => ({ ...d, transport: e.target.value as 'sse' | 'stdio' }))
-            }
-          >
-            <option value="sse">SSE (HTTP)</option>
-            <option value="stdio">stdio (local process)</option>
-          </Select>
-          {merged.transport === 'stdio' && (
-            <p className="mt-1 text-xs text-warning-ink">
-              A stdio server cannot run inside the container — use SSE when deployed.
-            </p>
-          )}
-        </div>
-
-        {merged.transport === 'sse' ? (
-          <>
-            <div>
-              <Label htmlFor={`${server.name}-url`}>Base URL</Label>
-              <Input
-                id={`${server.name}-url`}
-                className="mt-1.5"
-                value={merged.base_url ?? ''}
-                disabled={!isAdmin}
-                onChange={(e) => setDraft((d) => ({ ...d, base_url: e.target.value }))}
-              />
-            </div>
-            <div>
-              <Label htmlFor={`${server.name}-token`}>Token</Label>
-              <Input
-                id={`${server.name}-token`}
-                className="mt-1.5"
-                type="password"
-                placeholder={server.has_token ? 'unchanged' : 'paste the token'}
-                value={draft.auth_token ?? ''}
-                disabled={!isAdmin}
-                onChange={(e) => setDraft((d) => ({ ...d, auth_token: e.target.value }))}
-              />
-            </div>
-          </>
-        ) : (
-          <>
-            <div>
-              <Label htmlFor={`${server.name}-cmd`}>Command</Label>
-              <Input
-                id={`${server.name}-cmd`}
-                className="mt-1.5"
-                value={merged.command ?? ''}
-                disabled={!isAdmin}
-                onChange={(e) => setDraft((d) => ({ ...d, command: e.target.value }))}
-              />
-            </div>
-            <div>
-              <Label htmlFor={`${server.name}-cwd`}>Working directory</Label>
-              <Input
-                id={`${server.name}-cwd`}
-                className="mt-1.5"
-                value={merged.cwd ?? ''}
-                disabled={!isAdmin}
-                onChange={(e) => setDraft((d) => ({ ...d, cwd: e.target.value }))}
-              />
-            </div>
-          </>
-        )}
-
-        <div className="grid grid-cols-2 gap-3">
-          <div>
-            <Label htmlFor={`${server.name}-profile`}>Profile</Label>
-            <Input
-              id={`${server.name}-profile`}
-              className="mt-1.5"
-              value={merged.default_profile ?? ''}
-              disabled={!isAdmin}
-              onChange={(e) => setDraft((d) => ({ ...d, default_profile: e.target.value }))}
-            />
-          </div>
-          <div>
-            <Label htmlFor={`${server.name}-timeout`}>Timeout (s)</Label>
-            <Input
-              id={`${server.name}-timeout`}
-              className="mt-1.5"
-              type="number"
-              value={merged.timeout_sec}
-              disabled={!isAdmin}
-              onChange={(e) => setDraft((d) => ({ ...d, timeout_sec: Number(e.target.value) }))}
-            />
-          </div>
-        </div>
-      </div>
-
-      {(testResult || last.error) && (
-        <div
-          className={cn(
-            'mt-4 rounded border p-3 text-sm',
-            (testResult?.ok ?? last.ok)
-              ? 'border-success/30 bg-success-soft/40 text-success-ink'
-              : 'border-danger/30 bg-danger-soft/40 text-danger-ink',
-          )}
-        >
-          {testResult?.ok || (!testResult && last.ok) ? (
-            <p>
-              Connected in {testResult?.latency_ms ?? '—'}ms ·{' '}
-              {(testResult?.tools ?? last.tools).length} tools available
-            </p>
-          ) : (
-            <p>{testResult?.error ?? last.error}</p>
-          )}
-        </div>
+    <div
+      className={cn(
+        'mt-3 rounded border p-2 text-sm',
+        result.ok
+          ? 'border-success/30 bg-success-soft/40 text-success-ink'
+          : 'border-danger/30 bg-danger-soft/40 text-danger-ink',
       )}
-
-      {isAdmin && (
-        <div className="mt-4 flex flex-wrap items-center gap-2 border-t border-border pt-4">
-          <Button variant="secondary" onClick={() => test.mutate()} loading={test.isPending}>
-            <PlugZap />
-            Test connection
-          </Button>
-          <Button
-            variant="primary"
-            disabled={!dirty}
-            loading={save.isPending}
-            onClick={() => save.mutate()}
-          >
-            Save
-          </Button>
-          {dirty && (
-            <Button variant="ghost" onClick={() => setDraft({})}>
-              Discard
-            </Button>
-          )}
-        </div>
+    >
+      <p>{result.ok ? `Connected in ${result.latency_ms}ms` : result.error}</p>
+      {/* Per-check detail, because a provider can be half-working: reaching a
+          calendar while the mailbox login is rejected is a normal outcome. */}
+      {result.checks.length > 1 && (
+        <ul className="mt-1 space-y-0.5 text-xs">
+          {result.checks.map((check) => (
+            <li key={check.name}>
+              {check.ok ? '✓' : '✕'} {check.name}
+              {check.error ? ` — ${check.error}` : ''}
+            </li>
+          ))}
+        </ul>
       )}
-    </Card>
+    </div>
   );
 }
 
-function MyMcpProfileCard({ profile }: { profile: UserMcpProfile }) {
+function IntegrationCard({ integration }: { integration: Integration }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
-  const [profileDraft, setProfileDraft] = useState(profile.profile ?? '');
-  const [tokenDraft, setTokenDraft] = useState('');
-  const [testResult, setTestResult] = useState<{
-    ok: boolean;
-    error: string | null;
-    tools: string[];
-    latency_ms: number;
-  } | null>(null);
+  const [label, setLabel] = useState(integration.account_label ?? '');
+  const [secret, setSecret] = useState('');
+  const [result, setResult] = useState<IntegrationTestResult | null>(null);
 
   const invalidate = () => {
-    void queryClient.invalidateQueries({ queryKey: ['my-mcp-profiles'] });
+    void queryClient.invalidateQueries({ queryKey: ['integrations'] });
+    void queryClient.invalidateQueries({ queryKey: ['integrations', 'summary'] });
   };
 
   const save = useMutation({
     mutationFn: () =>
-      api.put<UserMcpProfile>(`/me/mcp-profiles/${profile.server_name}`, {
-        profile: profileDraft,
-        auth_token: tokenDraft || null,
+      api.patch<Integration>(`/integrations/${integration.id}`, {
+        account_label: label,
+        ...(secret ? { secret: { auth_token: secret } } : {}),
       }),
     onSuccess: () => {
       invalidate();
       setEditing(false);
-      setTokenDraft('');
+      setSecret('');
     },
   });
 
-  const clear = useMutation({
-    mutationFn: () => api.del(`/me/mcp-profiles/${profile.server_name}`),
-    onSuccess: () => {
-      invalidate();
-      setEditing(false);
-    },
+  const toggle = useMutation({
+    mutationFn: (patch: Partial<Integration>) =>
+      api.patch<Integration>(`/integrations/${integration.id}`, patch),
+    onSuccess: invalidate,
+  });
+
+  const disconnect = useMutation({
+    mutationFn: () => api.del(`/integrations/${integration.id}`),
+    onSuccess: invalidate,
   });
 
   const test = useMutation({
-    mutationFn: () =>
-      api.post<typeof testResult>(`/me/mcp-profiles/${profile.server_name}/test`, {
-        profile: profileDraft,
-        auth_token: tokenDraft || null,
-      }),
-    onSuccess: setTestResult,
+    mutationFn: () => api.post<IntegrationTestResult>(`/integrations/${integration.id}/test`, {}),
+    onSuccess: (data) => {
+      setResult(data);
+      invalidate();
+    },
+    onError: (error) =>
+      setResult({ ok: false, latency_ms: 0, checks: [], error: (error as Error).message }),
   });
 
-  function startEditing() {
-    setProfileDraft(profile.profile ?? '');
-    setTokenDraft('');
-    setTestResult(null);
-    setEditing(true);
-  }
+  const badge = STATUS_BADGE[integration.status] ?? STATUS_BADGE.unverified;
+  const canCalendar = integration.supported_kinds.includes('calendar');
+  const canEmail = integration.supported_kinds.includes('email');
 
   return (
     <Card className="p-4">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0">
-          <p className="font-medium capitalize">{profile.server_name}</p>
-          {profile.has_override ? (
-            <p className="text-sm text-fg-subtle">
-              You search as <span className="font-medium text-fg">{profile.profile}</span>
-              {profile.has_personal_token && ' · using your own token'}
+          <div className="flex items-center gap-2">
+            <p className="truncate font-medium">
+              {integration.account_label || integration.account_key}
             </p>
-          ) : (
-            <p className="text-sm text-fg-subtle">
-              Using the shared account (<span className="font-medium">{profile.shared_profile}</span>)
-            </p>
-          )}
+            <Badge variant={badge.variant} size="sm">
+              {badge.label}
+            </Badge>
+          </div>
+          <p className="mt-0.5 truncate text-sm text-fg-subtle">
+            {integration.provider_label}
+            {integration.config.profile ? ` · ${String(integration.config.profile)}` : ''}
+            {integration.config.base_url ? ` · ${String(integration.config.base_url)}` : ''}
+          </p>
         </div>
         {!editing && (
-          <Button size="sm" variant="ghost" onClick={startEditing}>
-            {profile.has_override ? 'Change' : 'Use my own account'}
+          <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+            Edit
           </Button>
         )}
+      </div>
+
+      {integration.status === 'reauth_required' && (
+        <p className="mt-2 rounded bg-warning-soft/40 p-2 text-xs text-warning-ink">
+          {integration.last_test.error ||
+            'This account needs reconnecting before it can be searched again.'}
+        </p>
+      )}
+
+      <div className="mt-3 flex flex-wrap items-center gap-4 text-sm">
+        {canCalendar && (
+          <label className="inline-flex cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-border-strong"
+              checked={integration.calendar_enabled}
+              onChange={(e) => toggle.mutate({ calendar_enabled: e.target.checked })}
+            />
+            Search calendar
+          </label>
+        )}
+        {canEmail && (
+          <label className="inline-flex cursor-pointer items-center gap-2">
+            <input
+              type="checkbox"
+              className="size-4 rounded border-border-strong"
+              checked={integration.email_enabled}
+              onChange={(e) => toggle.mutate({ email_enabled: e.target.checked })}
+            />
+            Search email
+          </label>
+        )}
+        <Button
+          size="sm"
+          variant="secondary"
+          className="ml-auto"
+          loading={test.isPending}
+          onClick={() => test.mutate()}
+        >
+          <PlugZap />
+          Test
+        </Button>
       </div>
 
       {editing && (
         <div className="mt-3 space-y-3 border-t border-border pt-3">
           <div>
-            <Label htmlFor={`my-${profile.server_name}-profile`}>Profile name</Label>
+            <Label htmlFor={`int-${integration.id}-label`}>Name</Label>
             <Input
-              id={`my-${profile.server_name}-profile`}
+              id={`int-${integration.id}-label`}
               className="mt-1.5"
-              value={profileDraft}
-              onChange={(e) => setProfileDraft(e.target.value)}
-              placeholder={profile.shared_profile ?? 'default'}
-            />
-            <p className="mt-1 text-xs text-fg-subtle">
-              The account name your calendar/email administrator gave you (e.g. your username).
-            </p>
-          </div>
-          <div>
-            <Label htmlFor={`my-${profile.server_name}-token`}>Personal token (optional)</Label>
-            <Input
-              id={`my-${profile.server_name}-token`}
-              className="mt-1.5"
-              type="password"
-              value={tokenDraft}
-              onChange={(e) => setTokenDraft(e.target.value)}
-              placeholder={
-                profile.has_personal_token ? 'unchanged' : 'leave blank to use the shared token'
-              }
+              value={label}
+              onChange={(e) => setLabel(e.target.value)}
             />
           </div>
-
-          {testResult && (
-            <div
-              className={cn(
-                'rounded border p-2 text-sm',
-                testResult.ok
-                  ? 'border-success/30 bg-success-soft/40 text-success-ink'
-                  : 'border-danger/30 bg-danger-soft/40 text-danger-ink',
-              )}
-            >
-              {testResult.ok
-                ? `Connected in ${testResult.latency_ms}ms · ${testResult.tools.length} tools`
-                : testResult.error}
+          {integration.auth_type === 'token' && (
+            <div>
+              <Label htmlFor={`int-${integration.id}-secret`}>Token</Label>
+              <Input
+                id={`int-${integration.id}-secret`}
+                className="mt-1.5"
+                type="password"
+                value={secret}
+                onChange={(e) => setSecret(e.target.value)}
+                placeholder={integration.secret_preview ?? 'not set'}
+              />
+              <p className="mt-1 text-xs text-fg-subtle">Leave blank to keep the current token.</p>
             </div>
           )}
-          {save.error && (
-            <p className="text-sm text-danger-ink">{(save.error as Error).message}</p>
-          )}
-
+          {save.error && <p className="text-sm text-danger-ink">{(save.error as Error).message}</p>}
           <div className="flex flex-wrap items-center gap-2">
-            <Button
-              size="sm"
-              variant="secondary"
-              onClick={() => test.mutate()}
-              loading={test.isPending}
-              disabled={!profileDraft}
-            >
-              <PlugZap />
-              Test
-            </Button>
-            <Button
-              size="sm"
-              variant="primary"
-              onClick={() => save.mutate()}
-              loading={save.isPending}
-              disabled={!profileDraft}
-            >
+            <Button size="sm" variant="primary" loading={save.isPending} onClick={() => save.mutate()}>
               Save
             </Button>
-            {profile.has_override && (
-              <Button size="sm" variant="ghost" onClick={() => clear.mutate()} loading={clear.isPending}>
-                Use shared account instead
-              </Button>
-            )}
             <Button size="sm" variant="ghost" onClick={() => setEditing(false)}>
               Cancel
             </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto text-danger-ink"
+              loading={disconnect.isPending}
+              onClick={() => disconnect.mutate()}
+            >
+              <Trash2 />
+              Disconnect
+            </Button>
           </div>
+        </div>
+      )}
+
+      {result && <CheckList result={result} />}
+    </Card>
+  );
+}
+
+/** Connect an MCP-backed calendar or inbox. */
+function AddMcpForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const [baseUrl, setBaseUrl] = useState('');
+  const [profile, setProfile] = useState('');
+  const [token, setToken] = useState('');
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post<Integration>('/integrations', {
+        provider: spec.id,
+        account_label: `${spec.label} (${profile || 'default'})`,
+        config: {
+          transport: 'sse',
+          base_url: baseUrl.trim(),
+          profile: profile.trim() || null,
+          tool_name: spec.id === 'mcp_calendar' ? 'search_events' : 'search_emails',
+        },
+        ...(token ? { secret: { auth_token: token } } : {}),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      void queryClient.invalidateQueries({ queryKey: ['integrations', 'summary'] });
+      onDone();
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <Label htmlFor="add-base-url">Server URL</Label>
+        <Input
+          id="add-base-url"
+          className="mt-1.5"
+          value={baseUrl}
+          onChange={(e) => setBaseUrl(e.target.value)}
+          placeholder="http://calendar-mcp.internal:4006"
+        />
+      </div>
+      <div>
+        <Label htmlFor="add-profile">Profile</Label>
+        <Input
+          id="add-profile"
+          className="mt-1.5"
+          value={profile}
+          onChange={(e) => setProfile(e.target.value)}
+          placeholder="your account name on that server"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Which calendar or inbox on that server belongs to you.
+        </p>
+      </div>
+      <div>
+        <Label htmlFor="add-token">Token</Label>
+        <Input
+          id="add-token"
+          className="mt-1.5"
+          type="password"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+        />
+      </div>
+      {create.error && <p className="text-sm text-danger-ink">{(create.error as Error).message}</p>}
+      <div className="flex items-center gap-2">
+        <Button
+          variant="primary"
+          size="sm"
+          loading={create.isPending}
+          disabled={!baseUrl.trim()}
+          onClick={() => create.mutate()}
+        >
+          Connect
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
+  const [picked, setPicked] = useState<ProviderSpec | null>(null);
+  const [open, setOpen] = useState(false);
+
+  if (!open) {
+    return (
+      <Button variant="secondary" onClick={() => setOpen(true)}>
+        <Plus />
+        Add integration
+      </Button>
+    );
+  }
+
+  const close = () => {
+    setOpen(false);
+    setPicked(null);
+  };
+
+  return (
+    <Card className="p-4">
+      <h3 className="font-display text-base font-semibold">
+        {picked ? `Connect ${picked.label}` : 'What would you like to connect?'}
+      </h3>
+
+      {!picked ? (
+        <div className="mt-3 space-y-2">
+          {providers.map((spec) => (
+            <button
+              key={spec.id}
+              type="button"
+              onClick={() => setPicked(spec)}
+              className="flex w-full items-center justify-between rounded border border-border p-3 text-left text-sm hover:bg-surface-2"
+            >
+              <span>
+                <span className="font-medium">{spec.label}</span>
+                <span className="ml-2 text-xs text-fg-subtle">{spec.kinds.join(' · ')}</span>
+              </span>
+              <span className="text-primary">Connect →</span>
+            </button>
+          ))}
+          <Button variant="ghost" size="sm" onClick={close}>
+            Cancel
+          </Button>
+        </div>
+      ) : (
+        <div className="mt-3">
+          <AddMcpForm spec={picked} onDone={close} />
         </div>
       )}
     </Card>
   );
 }
 
-function MyMcpProfilesSection() {
-  const profiles = useQuery({
-    queryKey: ['my-mcp-profiles'],
-    queryFn: () => api.get<UserMcpProfile[]>('/me/mcp-profiles'),
+export function IntegrationsSettingsPage() {
+  const integrations = useQuery({
+    queryKey: ['integrations'],
+    queryFn: () => api.get<Integration[]>('/integrations'),
+  });
+  const providers = useQuery({
+    queryKey: ['integration-providers'],
+    queryFn: () => api.get<ProviderSpec[]>('/integrations/providers'),
   });
 
-  if (profiles.isLoading) return <Skeleton className="h-32 w-full" />;
-  if (profiles.isError) return <ErrorState error={profiles.error} />;
+  if (integrations.isLoading) return <Skeleton className="h-48 w-full" />;
+  if (integrations.isError) return <ErrorState error={integrations.error} />;
 
-  return (
-    <Card className="p-5">
-      <h2 className="font-display text-lg font-semibold">Your account</h2>
-      <p className="mt-1 text-sm text-fg-subtle">
-        By default everyone searches the same shared calendar and inbox below. If you have your
-        own account on these servers, point your meetings at it here.
-      </p>
-      <div className="mt-4 space-y-3">
-        {profiles.data!.map((p) => (
-          <MyMcpProfileCard key={p.server_name} profile={p} />
-        ))}
-      </div>
-    </Card>
-  );
-}
-
-export function McpSettingsPage() {
-  const { isAdmin } = useAuth();
-  const servers = useQuery({
-    queryKey: ['mcp-servers'],
-    queryFn: () => api.get<McpServer[]>('/mcp/servers'),
-  });
+  const mine = integrations.data ?? [];
 
   return (
     <div className="space-y-4">
-      <MyMcpProfilesSection />
-
-      <div>
-        <h2 className="mb-1 font-display text-lg font-semibold">
-          {isAdmin ? 'Shared server configuration' : 'Shared servers'}
-        </h2>
-        <p className="mb-3 text-sm text-fg-subtle">
-          {isAdmin
-            ? 'How the app reaches each MCP server. This is the account everyone uses unless they set up their own above.'
-            : 'How the app reaches each MCP server. Only administrators can change this.'}
+      <Card className="p-5">
+        <h2 className="font-display text-lg font-semibold">Your calendars and inboxes</h2>
+        <p className="mt-1 text-sm text-fg-subtle">
+          Meetings are matched against the accounts you connect here. They are yours alone —
+          nobody else can see or search them.
         </p>
 
-        {servers.isLoading && <Skeleton className="h-64 w-full" />}
-        {servers.isError && <ErrorState error={servers.error} />}
-        {servers.data && (
-          <div className="space-y-4">
-            {servers.data.map((server) => (
-              <McpServerCard key={server.name} server={server} />
+        {mine.length === 0 ? (
+          <p className="mt-4 rounded border border-dashed border-border p-4 text-sm text-fg-subtle">
+            Nothing connected yet. Until you add a calendar or an inbox, meetings cannot be
+            matched to events or email.
+          </p>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {mine.map((integration) => (
+              <IntegrationCard key={integration.id} integration={integration} />
             ))}
           </div>
         )}
-      </div>
+      </Card>
+
+      <AddIntegration providers={providers.data ?? []} />
     </div>
   );
 }

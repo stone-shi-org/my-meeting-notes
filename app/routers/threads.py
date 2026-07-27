@@ -214,7 +214,17 @@ def _row_to_email(row: sqlite3.Row) -> dict:
         "relevance_score": row["relevance_score"],
         "relevance_reason": row["relevance_reason"],
         "attached_at": row["attached_at"],
+        # Late columns: absent on rows written before the provider refactor, so
+        # read them defensively rather than assuming the column is populated.
+        "url": _optional(row, "url"),
+        "rfc_message_id": _optional(row, "rfc_message_id"),
+        "provider": _optional(row, "provider"),
     }
+
+
+def _optional(row: sqlite3.Row, column: str):
+    """Read a column that may predate this row, without raising."""
+    return row[column] if column in row.keys() else None
 
 
 def _row_to_event(row: sqlite3.Row) -> dict:
@@ -234,6 +244,8 @@ def _row_to_event(row: sqlite3.Row) -> dict:
         "relevance_score": row["relevance_score"],
         "relevance_reason": row["relevance_reason"],
         "attached_at": row["attached_at"],
+        "source_uid": _optional(row, "source_uid"),
+        "provider": _optional(row, "provider"),
     }
 
 

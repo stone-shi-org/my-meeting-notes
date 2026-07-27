@@ -15,14 +15,11 @@ from app.schemas import (
     Page,
     ResetPasswordRequest,
     ResetPasswordResponse,
-    SetUserMcpProfileRequest,
     UserCreateRequest,
-    UserMcpProfileOut,
     UserOut,
     UserUpdateRequest,
 )
 from app.security import validate_password
-from app.services import mcpclient as mcp_svc
 from app.services import users as users_svc
 from app.config import get_settings
 
@@ -178,66 +175,3 @@ def delete_user(
 
     log.info("admin %s deactivated user %s (%d owned threads)", admin.username, user_id, owned)
     return {"ok": True, "deactivated": True, "owned_threads": owned}
-
-
-# --------------------------------------------------------------------------- #
-# MCP profiles on behalf of a user
-#
-# Mirrors /api/me/mcp-profiles but for someone else -- for onboarding a user
-# who doesn't yet have their own token from whoever administers the
-# calendar/email MCP servers.
-# --------------------------------------------------------------------------- #
-
-
-@router.get("/{user_id}/mcp-profiles", response_model=list[UserMcpProfileOut])
-def list_user_mcp_profiles(
-    user_id: int,
-    _: CurrentUser = Depends(require_admin),
-    conn: sqlite3.Connection = Depends(get_db),
-) -> list[UserMcpProfileOut]:
-    users_svc.require_user(conn, user_id)
-    servers = conn.execute("SELECT name FROM mcp_servers ORDER BY name").fetchall()
-    return [
-        UserMcpProfileOut(**mcp_svc.describe_user_profile(conn, user_id, row["name"]))
-        for row in servers
-    ]
-
-
-@router.put("/{user_id}/mcp-profiles/{server_name}", response_model=UserMcpProfileOut)
-def set_user_mcp_profile(
-    user_id: int,
-    server_name: str,
-    payload: SetUserMcpProfileRequest,
-    admin: CurrentUser = Depends(require_admin),
-    conn: sqlite3.Connection = Depends(get_db),
-) -> UserMcpProfileOut:
-    target = users_svc.require_user(conn, user_id)
-    auth_token, clear_token = mcp_svc.resolve_token_update(payload.auth_token)
-    mcp_svc.set_user_override(
-        conn,
-        user_id,
-        server_name,
-        profile=payload.profile,
-        auth_token=auth_token,
-        clear_token=clear_token,
-    )
-    log.info(
-        "admin %s set %s's %s profile to %r",
-        admin.username, target["username"], server_name, payload.profile,
-    )
-    return UserMcpProfileOut(**mcp_svc.describe_user_profile(conn, user_id, server_name))
-
-
-@router.delete("/{user_id}/mcp-profiles/{server_name}")
-def clear_user_mcp_profile(
-    user_id: int,
-    server_name: str,
-    admin: CurrentUser = Depends(require_admin),
-    conn: sqlite3.Connection = Depends(get_db),
-) -> dict:
-    target = users_svc.require_user(conn, user_id)
-    removed = mcp_svc.delete_user_override(conn, user_id, server_name)
-    log.info(
-        "admin %s cleared %s's %s profile override", admin.username, target["username"], server_name
-    )
-    return {"ok": True, "removed": removed}
