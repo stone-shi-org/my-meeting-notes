@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import DOMPurify from 'dompurify';
-import { CheckSquare, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
+import { CheckSquare, Download, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
 import { marked } from 'marked';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams, useSearchParams } from 'react-router-dom';
@@ -484,6 +484,31 @@ export function TranscriptPage() {
               <option value="vtt">WebVTT</option>
               <option value="json">JSON</option>
             </Select>
+
+            {m.audio_converted ? (
+              <Select
+                className="w-auto"
+                aria-label="Download audio"
+                defaultValue=""
+                onChange={(e) => {
+                  if (!e.target.value) return;
+                  window.open(`/api/meetings/${m.id}/audio?original=${e.target.value}`, '_blank');
+                  e.target.value = '';
+                }}
+              >
+                <option value="">Download audio…</option>
+                <option value="false">Converted (16kHz mono)</option>
+                <option value="true">Original recording</option>
+              </Select>
+            ) : (
+              <Button
+                variant="ghost"
+                onClick={() => window.open(`/api/meetings/${m.id}/audio`, '_blank')}
+              >
+                <Download />
+                Download audio
+              </Button>
+            )}
           </div>
         </div>
 
