@@ -88,6 +88,19 @@ class LLMAuthError(LLMError):
     code = "LLM_AUTH_FAILED"
 
 
+class LLMReasoningTruncatedError(LLMError):
+    """The model spent its whole token budget reasoning and emitted no content.
+
+    Distinct from a generic LLMError because it proves the opposite of a
+    connection problem: the endpoint, credentials and model routing all
+    worked. Only the budget was too small. The summarize path still treats
+    this as a failure (it genuinely has no summary), but a connection test
+    should report it as reachable.
+    """
+
+    code = "LLM_REASONING_TRUNCATED"
+
+
 class MCPError(AppError):
     status_code = 502
     code = "mcp_error"

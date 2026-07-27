@@ -14,13 +14,14 @@ from __future__ import annotations
 
 import json
 import re
+import secrets
 import time
 
 import httpx
 
 from app.config import effective
 from app.db import get_conn
-from app.errors import LLMAuthError, LLMError
+from app.errors import LLMAuthError, LLMError, LLMReasoningTruncatedError
 from app.logging_config import get_logger
 
 log = get_logger("llm")
@@ -146,7 +147,8 @@ def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:
             f"LLM rejected the API key ({response.status_code}). Check LLM settings."
         )
     if response.status_code >= 400:
-        raise LLMError(f"LLM returned {response.status_code}: {response.text[:300]}")
+        body_preview = response.text[:300].strip() or "(empty body)"
+        raise LLMError(f"LLM returned {response.status_code}: {body_preview}")
 
     # Defensive: if the server streamed anyway, say so plainly rather than
     # dying inside .json() with an opaque decode error.
@@ -169,12 +171,17 @@ def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:
     message = choices[0].get("message") or {}
     content = message.get("content") or ""
     if not content.strip():
-        # A reasoning-only reply means include_reasoning was ignored and the
-        # budget went to thinking. Naming that is more useful than "empty".
-        if message.get("reasoning"):
-            raise LLMError(
+        # A reasoning-only reply means the model spent the whole budget
+        # thinking before it could answer. include_reasoning=false only
+        # controls whether that trace is labelled separately -- some
+        # providers (e.g. deepseek via omniroute) reason unconditionally and
+        # still charge those tokens against max_tokens, just under
+        # "reasoning_content" instead of "reasoning".
+        if message.get("reasoning") or message.get("reasoning_content"):
+            raise LLMReasoningTruncatedError(
                 "LLM returned only a reasoning trace and no content. The model "
-                "may have hit max_tokens while thinking."
+                "hit max_tokens while thinking -- raise max_tokens or use a "
+                "non-reasoning model."
             )
         raise LLMError("LLM returned empty content")
 
@@ -234,7 +241,23 @@ def test_connection(config: LLMConfig) -> dict:
     include_reasoning=false, JSON-object parsing where relevant) rather than
     just checking the endpoint answers, since a reachable server with a
     misconfigured model still breaks the pipeline.
+
+    max_tokens is deliberately generous. Reasoning models charge their
+    internal trace against the budget before emitting any visible content,
+    and that trace varies run to run -- measured at 26-83 tokens for this
+    trivial prompt against deepseek-v4-flash. A tight budget makes a perfectly
+    healthy model fail intermittently, which is far more confusing than a
+    clean failure. Because a model stops as soon as it is done, a high ceiling
+    costs no extra latency: 64 and 512 both return in ~1.5s.
+
+    The user message includes a random nonce so repeated clicks are never an
+    exact cache hit. Some gateways (omniroute included) cache a completion by
+    (model, messages) alone, ignoring max_tokens -- without the nonce, a single
+    earlier test with too small a budget poisons the cache and every later
+    Test click replays that same truncated, empty-content response forever,
+    regardless of what this function now sends.
     """
+    nonce = secrets.token_hex(4)
     started = time.monotonic()
     try:
         content, usage = chat(
@@ -242,11 +265,27 @@ def test_connection(config: LLMConfig) -> dict:
             build_payload(
                 config.model,
                 "Reply with exactly one word.",
-                "Reply with the single word: ok",
+                f"Reply with the single word: ok (ref {nonce})",
                 temperature=0,
-                max_tokens=5,
+                max_tokens=512,
             ),
         )
+    except LLMReasoningTruncatedError:
+        # Reaching this means the endpoint, credentials and model routing all
+        # worked -- the model just reasoned past even a generous budget.
+        # Calling that a connection failure would be a false negative, since
+        # the summarize path sets no such ceiling.
+        return {
+            "ok": True,
+            "latency_ms": int((time.monotonic() - started) * 1000),
+            "error": None,
+            "response": None,
+            "note": (
+                "Connected. This is a reasoning model and it used the whole "
+                "test budget thinking, so it returned no visible text -- "
+                "normal summarization is unaffected."
+            ),
+        }
     except LLMError as exc:
         return {
             "ok": False,

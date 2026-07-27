@@ -70,7 +70,28 @@ class TestLLMTestConnection:
         body = json.loads(route.calls[0].request.content)
         assert body["stream"] is False
         assert body["include_reasoning"] is False
-        assert body["max_tokens"] == 5
+        # Generous on purpose. A reasoning model's trace is charged against
+        # this before any visible content and varies run to run (measured
+        # 26-83 tokens for this prompt), so a tight ceiling fails
+        # intermittently. Costs nothing: the model stops when it's done.
+        assert body["max_tokens"] == 512
+
+    @respx.mock
+    def test_the_message_is_not_identical_between_calls(self):
+        """Some gateways (omniroute included) cache a completion by (model,
+        messages) alone, ignoring max_tokens. A fixed literal prompt means one
+        earlier test with too small a budget poisons the cache forever, and
+        every later click replays that stale empty-content response --
+        regardless of what this call now sends. A nonce breaks the cache key."""
+        route = respx.post(LLM_URL).mock(return_value=httpx.Response(200, json=completion("ok")))
+        llm_svc.test_connection(self.config())
+        llm_svc.test_connection(self.config())
+
+        import json
+
+        first = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+        second = json.loads(route.calls[1].request.content)["messages"][1]["content"]
+        assert first != second
 
     @respx.mock
     def test_a_bad_model_is_reported_not_raised(self):
@@ -83,11 +104,103 @@ class TestLLMTestConnection:
         assert result["response"] is None
 
     @respx.mock
+    def test_a_failure_with_an_empty_body_still_says_something(self):
+        """omniroute's own 500 for a bare, unnamespaced model alias (e.g.
+        "deepseek-v4-flash" instead of "deepseek/deepseek-v4-flash") comes
+        back with no body at all -- the error must not just say "LLM returned
+        500: "."""
+        respx.post(LLM_URL).mock(return_value=httpx.Response(500, text=""))
+        result = llm_svc.test_connection(self.config())
+        assert result["ok"] is False
+        assert "500" in result["error"]
+        assert "empty body" in result["error"]
+
+    @respx.mock
     def test_auth_failure_is_reported_not_raised(self):
         respx.post(LLM_URL).mock(return_value=httpx.Response(401))
         result = llm_svc.test_connection(self.config())
         assert result["ok"] is False
         assert "reject" in result["error"].lower() or "auth" in result["error"].lower()
+
+    @respx.mock
+    def test_a_reasoning_model_with_enough_headroom_still_answers(self):
+        """The exact shape omniroute's deepseek route returns: reasoning burns
+        part of the budget under reasoning_content, not the legacy
+        'reasoning' key, and content still arrives if max_tokens has room."""
+        respx.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "ok",
+                                "reasoning_content": "The user asked me to say ok, so: ok.",
+                            }
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 2006, "completion_tokens": 32},
+                },
+            )
+        )
+        result = llm_svc.test_connection(self.config())
+        assert result["ok"] is True
+        assert result["response"] == "ok"
+
+    @respx.mock
+    def test_reasoning_truncation_is_reachable_not_a_failure(self):
+        """The false negative that made a healthy model look broken.
+
+        A reasoning model can burn the whole budget thinking and return no
+        visible text. That is not a connection problem -- endpoint, auth and
+        model routing all demonstrably worked, and the summarize path sets no
+        such ceiling. Reporting ok=False here is a lie that sends the user
+        hunting a config bug that doesn't exist.
+        """
+        respx.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {
+                                "role": "assistant",
+                                "content": "",
+                                "reasoning_content": "We are asked to say",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ],
+                    "usage": {"prompt_tokens": 2006, "completion_tokens": 512},
+                },
+            )
+        )
+        result = llm_svc.test_connection(self.config())
+        assert result["ok"] is True
+        assert result["error"] is None
+        assert "reasoning model" in result["note"]
+
+    @respx.mock
+    def test_reasoning_truncation_still_fails_the_summarize_path(self):
+        """Only the *connection test* forgives truncation. A real summary
+        genuinely has no content, so chat() must still raise."""
+        from app.errors import LLMReasoningTruncatedError
+
+        respx.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"role": "assistant", "content": "",
+                                     "reasoning_content": "thinking..."}}
+                    ],
+                    "usage": {},
+                },
+            )
+        )
+        with pytest.raises(LLMReasoningTruncatedError):
+            llm_svc.chat(self.config(), llm_svc.build_payload("m", "s", "u"))
 
 
 class TestDiarizationTestConnection:

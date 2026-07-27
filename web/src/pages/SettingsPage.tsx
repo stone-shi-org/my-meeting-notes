@@ -91,6 +91,9 @@ interface TestResult {
   latency_ms: number;
   response?: string | null;
   models_count?: number;
+  /** Set when the connection worked but the result needs a caveat, e.g. a
+   * reasoning model that returned no visible text. */
+  note?: string | null;
 }
 
 function SettingsForm({
@@ -240,13 +243,18 @@ function SettingsForm({
           )}
         >
           {testResult.ok ? (
-            <p>
-              Connected in {testResult.latency_ms}ms
-              {testResult.response && <> · replied &ldquo;{testResult.response}&rdquo;</>}
-              {testResult.models_count !== undefined && (
-                <> · model found among {testResult.models_count} available</>
+            <>
+              <p>
+                Connected in {testResult.latency_ms}ms
+                {testResult.response && <> · replied &ldquo;{testResult.response}&rdquo;</>}
+                {testResult.models_count !== undefined && (
+                  <> · model found among {testResult.models_count} available</>
+                )}
+              </p>
+              {testResult.note && (
+                <p className="mt-1 text-xs opacity-80">{testResult.note}</p>
               )}
-            </p>
+            </>
           ) : (
             <p>{testResult.error}</p>
           )}
@@ -304,7 +312,11 @@ export function LlmSettingsPage() {
       keys={[
         { key: 'llm_base_url', label: 'Base URL', hint: 'OpenAI-compatible, ending in /v1' },
         { key: 'llm_api_key', label: 'API key' },
-        { key: 'llm_model', label: 'Model' },
+        {
+          key: 'llm_model',
+          label: 'Model',
+          hint: 'Use the fully-qualified id from the dropdown (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
+        },
         { key: 'llm_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
         { key: 'llm_temperature', label: 'Temperature', type: 'number' },
       ]}
