@@ -4,6 +4,7 @@ import {
   CalendarDays,
   CheckSquare,
   Clock,
+  ExternalLink,
   Mail,
   MapPin,
   Mic,
@@ -17,6 +18,7 @@ import { Badge, Card, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { gmailLink } from '@/lib/links';
 import { fmtClock } from '@/lib/time';
 import type {
   CalendarEvent,
@@ -100,7 +102,21 @@ function MeetingTimelineCard({ meeting }: { meeting: Meeting }) {
 function EventTimelineCard({ event }: { event: CalendarEvent }) {
   return (
     <div className="rounded-md border-l-2 border-entity-event bg-surface-2/50 py-2 pl-3 pr-3">
-      <p className="text-sm font-medium">{event.summary || 'Untitled event'}</p>
+      <p className="text-sm font-medium">
+        {event.url ? (
+          <a
+            href={event.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-primary hover:underline"
+          >
+            {event.summary || 'Untitled event'}
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
+        ) : (
+          event.summary || 'Untitled event'
+        )}
+      </p>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
         {event.calendar_name && <span>{event.calendar_name}</span>}
         {event.location && (
@@ -118,9 +134,24 @@ function EventTimelineCard({ event }: { event: CalendarEvent }) {
 }
 
 function EmailTimelineCard({ email }: { email: Email }) {
+  const href = gmailLink(email.message_id);
   return (
     <div className="py-1.5 pl-3">
-      <p className="text-sm">{email.subject || '(no subject)'}</p>
+      <p className="text-sm">
+        {href ? (
+          <a
+            href={href}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-1 text-primary hover:underline"
+          >
+            {email.subject || '(no subject)'}
+            <ExternalLink className="size-3" aria-hidden />
+          </a>
+        ) : (
+          email.subject || '(no subject)'
+        )}
+      </p>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-fg-subtle">
         <span className="truncate">{email.sender}</span>
         {email.tag && <Badge variant="outline" size="sm">{email.tag}</Badge>}

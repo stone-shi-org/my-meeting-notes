@@ -1,10 +1,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { AlertTriangle, CalendarDays, Link2, Mail, Search } from 'lucide-react';
+import { AlertTriangle, CalendarDays, ExternalLink, Link2, Mail, Search } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Meter, Spinner } from '@/components/ui/primitives';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { gmailLink } from '@/lib/links';
 import { ApiError, type CalendarEvent, type Email, type MatchRun, type Meeting } from '@/types/api';
 
 function bucket(score: number | null): { label: string; variant: 'success' | 'warning' | 'neutral' } {
@@ -18,6 +19,7 @@ function CandidateRow({
   checked,
   onToggle,
   title,
+  href,
   meta,
   snippet,
   score,
@@ -27,6 +29,7 @@ function CandidateRow({
   checked: boolean;
   onToggle: () => void;
   title: string;
+  href?: string | null;
   meta: string;
   snippet?: string | null;
   score: number | null;
@@ -46,7 +49,22 @@ function CandidateRow({
           className="mt-1 size-4 shrink-0 rounded border-border-strong"
         />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-medium">{title}</p>
+          <p className="truncate text-sm font-medium">
+            {href ? (
+              <a
+                href={href}
+                target="_blank"
+                rel="noopener noreferrer"
+                onClick={(e) => e.stopPropagation()}
+                className="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                {title}
+                <ExternalLink className="size-3 shrink-0" aria-hidden />
+              </a>
+            ) : (
+              title
+            )}
+          </p>
           <p className="mt-0.5 truncate text-xs text-fg-subtle">{meta}</p>
           {snippet && <p className="mt-1 line-clamp-1 text-xs text-fg-faint">{snippet}</p>}
 
@@ -232,6 +250,7 @@ export function McpMatchPanel({
                         setPickedEvent((prev) => (prev === event.uid ? null : event.uid))
                       }
                       title={event.summary || 'Untitled event'}
+                      href={event.url}
                       meta={[
                         (event.start ?? event.start_at ?? '').slice(0, 16).replace('T', ' '),
                         event.calendar_name,
@@ -268,6 +287,7 @@ export function McpMatchPanel({
                         })
                       }
                       title={email.subject || '(no subject)'}
+                      href={gmailLink(email.message_id)}
                       meta={[email.sender, (email.date ?? '').slice(0, 16).replace('T', ' ')]
                         .filter(Boolean)
                         .join(' · ')}
