@@ -13,6 +13,7 @@ import respx
 from app.db import get_conn
 from app.errors import MCPError
 from app.services import matching as m
+from app.services.providers.base import EmailCandidate, EventCandidate, IntegrationRef
 from tests.conftest import FIXTURES
 
 LLM_URL = "https://llm.test/v1/chat/completions"
@@ -265,24 +266,48 @@ RANKING = {
 }
 
 
-class FakeMCP:
-    """Stands in for MCPClient. Modes cover the failures we actually see."""
+class FakeProvider:
+    """Stands in for one connected account.
+
+    Faked a level above the transport -- at the provider, not at MCPClient -- so
+    these tests describe "a calendar account failed" rather than "an SSE handshake
+    failed", and stay true whichever backend the account actually uses.
+    """
 
     calendar_mode = "ok"
     email_mode = "ok"
 
-    def __init__(self, config):
-        self.config = config
+    def __init__(self, kind: str, *, integration_id: int, label: str, provider="fake"):
+        self.kind = kind
+        self.ref = IntegrationRef(
+            id=integration_id,
+            provider=provider,
+            account_label=label,
+            calendar_enabled=kind == "calendar",
+            email_enabled=kind == "email",
+        )
 
     async def search_events(self, **kwargs):
-        if FakeMCP.calendar_mode == "down":
+        if FakeProvider.calendar_mode == "down":
             raise MCPError("Could not connect", server="calendar")
-        return list(EVENTS)
+        return [EventCandidate(**e) for e in EVENTS]
 
-    async def search_emails(self, query, **kwargs):
-        if FakeMCP.email_mode == "down":
+    async def search_emails(self, **kwargs):
+        if FakeProvider.email_mode == "down":
             raise MCPError("rejected the token (401)", server="email")
-        return list(EMAILS)
+        return [EmailCandidate(**m) for m in EMAILS]
+
+
+def fake_load_for_user(conn, user_id, *, kind=None):
+    """One calendar account and one inbox, matching the pre-refactor topology."""
+    if user_id is None:
+        return []
+    sources = []
+    if kind in (None, "calendar"):
+        sources.append(FakeProvider("calendar", integration_id=1, label="calendar@x"))
+    if kind in (None, "email"):
+        sources.append(FakeProvider("email", integration_id=2, label="email@x"))
+    return sources
 
 
 @pytest.fixture(autouse=True)
@@ -296,9 +321,11 @@ def wiring(monkeypatch):
 
     reset_settings_cache()
 
-    FakeMCP.calendar_mode = "ok"
-    FakeMCP.email_mode = "ok"
-    monkeypatch.setattr("app.services.matching.mcp_svc.MCPClient", FakeMCP)
+    FakeProvider.calendar_mode = "ok"
+    FakeProvider.email_mode = "ok"
+    monkeypatch.setattr(
+        "app.services.matching.providers_svc.load_for_user", fake_load_for_user
+    )
 
 
 @pytest.fixture
@@ -374,7 +401,7 @@ class TestMatchJob:
     def test_a_dead_calendar_still_returns_email_results(
         self, user_client, meeting, mock_llm
     ):
-        FakeMCP.calendar_mode = "down"
+        FakeProvider.calendar_mode = "down"
         job = run_match(user_client, meeting["id"])
         assert job["status"] == "succeeded"
 
@@ -384,15 +411,103 @@ class TestMatchJob:
         assert latest["events"] == []
         assert len(latest["emails"]) == 2
 
+    def test_a_dead_account_is_named_in_source_errors(self, user_client, meeting, mock_llm):
+        """The aggregate says "calendar broke"; this says which account and why."""
+        FakeProvider.calendar_mode = "down"
+        run_match(user_client, meeting["id"])
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        assert len(latest["source_errors"]) == 1
+        failure = latest["source_errors"][0]
+        assert failure["kind"] == "calendar"
+        assert failure["account"] == "calendar@x"
+        assert "Could not connect" in failure["error"]
+
     def test_both_servers_down_is_recorded_not_crashed(self, user_client, meeting, mock_llm):
-        FakeMCP.calendar_mode = "down"
-        FakeMCP.email_mode = "down"
+        FakeProvider.calendar_mode = "down"
+        FakeProvider.email_mode = "down"
         job = run_match(user_client, meeting["id"])
 
         assert job["status"] == "succeeded"
         latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
         assert latest["status"] == "failed"
         assert latest["calendar_error"] and latest["email_error"]
+
+    def test_one_healthy_calendar_among_two_is_not_reported_as_an_error(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        """The property that has to survive users adding accounts.
+
+        With two calendars and one broken, the search still succeeded -- flagging
+        it 'partial' would put a warning banner on a perfectly good result, and
+        would do so more often the more accounts someone connects.
+        """
+
+        class HalfDeadProvider(FakeProvider):
+            async def search_events(self, **kwargs):
+                if self.ref.id == 99:
+                    raise MCPError("Could not connect", server="calendar")
+                return [EventCandidate(**e) for e in EVENTS]
+
+        def two_calendars(conn, user_id, *, kind=None):
+            sources = []
+            if kind in (None, "calendar"):
+                sources.append(
+                    HalfDeadProvider("calendar", integration_id=1, label="good@x")
+                )
+                sources.append(
+                    HalfDeadProvider("calendar", integration_id=99, label="broken@x")
+                )
+            if kind in (None, "email"):
+                sources.append(FakeProvider("email", integration_id=2, label="email@x"))
+            return sources
+
+        monkeypatch.setattr(
+            "app.services.matching.providers_svc.load_for_user", two_calendars
+        )
+        run_match(user_client, meeting["id"])
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        assert latest["status"] == "ok"
+        assert latest["calendar_error"] is None
+        assert len(latest["events"]) == 2, "the healthy calendar's events still arrive"
+        # The failure is not hidden, just not escalated to an aggregate.
+        assert [e["account"] for e in latest["source_errors"]] == ["broken@x"]
+
+    def test_the_same_event_from_two_accounts_is_shown_once(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        """A Google account reachable both directly and via the calendar MCP
+        server must not produce two identical candidates."""
+
+        def duplicate_calendars(conn, user_id, *, kind=None):
+            sources = []
+            if kind in (None, "calendar"):
+                sources.append(FakeProvider("calendar", integration_id=1, label="a@x"))
+                sources.append(FakeProvider("calendar", integration_id=2, label="b@x"))
+            return sources
+
+        monkeypatch.setattr(
+            "app.services.matching.providers_svc.load_for_user", duplicate_calendars
+        )
+        run_match(user_client, meeting["id"])
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        assert len(latest["events"]) == 2, "deduped to the two distinct events"
+
+    def test_no_connected_accounts_is_a_clear_failure(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        """Belt to the SPA's braces: the button should already be disabled, so
+        reaching here means a stale bundle. The error still has to say what to do."""
+        monkeypatch.setattr(
+            "app.services.matching.providers_svc.load_for_user",
+            lambda conn, user_id, **kw: [],
+        )
+        job = run_match(user_client, meeting["id"])
+
+        assert job["status"] == "failed"
+        assert "Integrations" in (job["error"] or "")
 
     def test_a_failed_ranking_still_lets_the_user_choose(self, user_client, meeting, mock_llm):
         """Unranked beats nothing: ticking boxes is the point."""

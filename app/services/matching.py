@@ -19,12 +19,20 @@ from datetime import datetime, timedelta, timezone
 
 from app.config import effective
 from app.db import get_conn, utcnow
-from app.errors import MCPError, NotFoundError
+from app.errors import NoIntegrationsError, NotFoundError
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
-from app.services import mcpclient as mcp_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
+from app.services.providers import loader as providers_svc
+
+# Native query syntax lives with the providers that speak it. Re-exported here
+# because these names are part of this module's established surface.
+from app.services.providers.query import (  # noqa: F401
+    build_gmail_query,
+    gmail_date,
+    iso_date,
+)
 
 log = get_logger("matching")
 
@@ -94,11 +102,6 @@ def date_window(
     return anchor - timedelta(days=days_before), anchor + timedelta(days=days_after)
 
 
-def iso_date(value: datetime) -> str:
-    """Calendar search wants ISO-8601: 2026-03-11."""
-    return value.strftime("%Y-%m-%d")
-
-
 def normalize_timestamp(value: str | None) -> str | None:
     """Coerce a timestamp to ISO-8601.
 
@@ -128,21 +131,6 @@ def normalize_timestamp(value: str | None) -> str | None:
     return parsed.isoformat()
 
 
-def gmail_date(value: datetime) -> str:
-    """Gmail search wants slashes: after:2026/03/11. Not the same as ISO."""
-    return value.strftime("%Y/%m/%d")
-
-
-def build_gmail_query(keywords: list[str], start: datetime, end: datetime) -> str:
-    parts = []
-    if keywords:
-        top = keywords[:3]
-        parts.append(f"({' OR '.join(top)})" if len(top) > 1 else top[0])
-    parts.append(f"after:{gmail_date(start)}")
-    parts.append(f"before:{gmail_date(end)}")
-    return " ".join(parts)
-
-
 # --------------------------------------------------------------------------- #
 # Gathering
 # --------------------------------------------------------------------------- #
@@ -163,22 +151,19 @@ async def gather_candidates(
     max_candidates: int,
     user_id: int | None = None,
 ) -> dict:
-    """Query both MCP servers concurrently. One being down is not fatal.
+    """Search every calendar and inbox this user has connected, concurrently.
 
-    ``user_id`` selects that user's own profile/token if they have one
-    configured (Settings -> Integrations -> your account), so Jenny's meetings
-    search her calendar and inbox rather than whoever owns the shared server
-    config. With no override, everyone shares the server's default account.
+    One account being down is not fatal, and that property has to survive a user
+    adding a second account: an aggregate error is only reported when *every*
+    source of that kind failed. Otherwise the warning banner would fire on a
+    perfectly good search just because one of three calendars was unreachable.
+
+    Integrations are per-user, so this searches the requesting user's own accounts
+    and nobody else's.
     """
     with conn_factory() as conn:
-        try:
-            calendar_cfg = mcp_svc.resolve_effective_config(conn, "calendar", user_id)
-        except NotFoundError:
-            calendar_cfg = None
-        try:
-            email_cfg = mcp_svc.resolve_effective_config(conn, "email", user_id)
-        except NotFoundError:
-            email_cfg = None
+        calendar_sources = providers_svc.load_for_user(conn, user_id, kind="calendar")
+        email_sources = providers_svc.load_for_user(conn, user_id, kind="email")
 
         attached_uids = {
             r["uid"]
@@ -197,63 +182,58 @@ async def gather_candidates(
             )
         }
 
+    if not calendar_sources and not email_sources:
+        raise NoIntegrationsError(
+            "Connect a calendar or email account in Settings → Integrations before "
+            "matching a meeting."
+        )
+
     gmail_query = build_gmail_query(keywords, start, end)
     calendar_query = " ".join(keywords[:3])
 
-    async def fetch_calendar() -> list[dict]:
-        if calendar_cfg is None or not calendar_cfg.enabled:
-            raise MCPError("Calendar server is not enabled", server="calendar")
-        client = mcp_svc.MCPClient(calendar_cfg)
-        # Two passes: a keyword search, plus a bare window sweep. The tool ANDs a
-        # single query string, so an event whose title shares no keyword would
-        # otherwise be invisible -- and the window is small enough to be cheap.
-        keyworded, windowed = await asyncio.gather(
-            client.search_events(
-                query=calendar_query or None,
-                start_date=iso_date(start),
-                end_date=iso_date(end),
-            ),
-            client.search_events(start_date=iso_date(start), end_date=iso_date(end)),
-            return_exceptions=True,
+    # (kind, provider, coroutine). Coroutines do not run until gathered.
+    planned: list[tuple[str, object, object]] = [
+        (
+            "calendar",
+            source,
+            source.search_events(query=calendar_query or None, start=start, end=end),
         )
-        merged: dict[str, dict] = {}
-        for batch in (keyworded, windowed):
-            if isinstance(batch, BaseException):
-                continue
-            for item in batch:
-                uid = item.get("uid")
-                if uid:
-                    merged.setdefault(uid, item)
-        if not merged and isinstance(keyworded, BaseException):
-            raise keyworded
-        return list(merged.values())
+        for source in calendar_sources
+    ] + [
+        ("email", source, source.search_emails(keywords=keywords, start=start, end=end))
+        for source in email_sources
+    ]
 
-    async def fetch_email() -> list[dict]:
-        if email_cfg is None or not email_cfg.enabled:
-            raise MCPError("Email server is not enabled", server="email")
-        return await mcp_svc.MCPClient(email_cfg).search_emails(gmail_query)
-
-    events_result, emails_result = await asyncio.gather(
-        fetch_calendar(), fetch_email(), return_exceptions=True
+    results = await asyncio.gather(
+        *(coro for _, _, coro in planned), return_exceptions=True
     )
 
-    calendar_error = None
     events: list[dict] = []
-    if isinstance(events_result, BaseException):
-        calendar_error = getattr(events_result, "message", str(events_result))
-        log.warning("calendar search failed: %s", calendar_error)
-    else:
-        events = [e for e in events_result if e.get("uid") not in attached_uids]
-
-    email_error = None
     emails: list[dict] = []
-    if isinstance(emails_result, BaseException):
-        email_error = getattr(emails_result, "message", str(emails_result))
-        log.warning("email search failed: %s", email_error)
-    else:
-        emails = [
-            m for m in emails_result if m.get("message_id") not in attached_msgs
-        ]
+    source_errors: list[dict] = []
+    failures = {"calendar": 0, "email": 0}
+
+    for (kind, source, _), result in zip(planned, results):
+        if isinstance(result, BaseException):
+            message = getattr(result, "message", None) or str(result)
+            failures[kind] += 1
+            source_errors.append(
+                {
+                    "kind": kind,
+                    "provider": source.ref.provider,
+                    "integration_id": source.ref.id,
+                    "account": source.ref.display,
+                    "error": message,
+                }
+            )
+            log.warning("%s search failed for %s: %s", kind, source.ref.display, message)
+            continue
+
+        bucket = events if kind == "calendar" else emails
+        bucket.extend(candidate.to_dict() for candidate in result)
+
+    events = _dedupe_events(events, attached_uids)
+    emails = _dedupe_emails(emails, attached_msgs)
 
     # Nearest-in-time first, so the cap keeps what is most likely to matter.
     anchor = start + (end - start) / 2
@@ -273,6 +253,13 @@ async def gather_candidates(
     events = events[:max_candidates]
     emails = emails[:max_candidates]
 
+    # Aggregates for the SPA's warning banner, kept for API compatibility. Set
+    # only when a kind had sources and every one of them failed -- a kind with no
+    # sources at all is a configuration choice, not an error, and reporting it
+    # would make every search 'partial' for a user who only connected email.
+    calendar_error = _aggregate_error(source_errors, "calendar", calendar_sources, failures)
+    email_error = _aggregate_error(source_errors, "email", email_sources, failures)
+
     status = "ok"
     if calendar_error and email_error:
         status = "failed"
@@ -285,16 +272,80 @@ async def gather_candidates(
         "emails": emails,
         "calendar_error": calendar_error,
         "email_error": email_error,
+        "source_errors": source_errors,
         "query": {
             "keywords": keywords,
+            # Kept because a zero-result match has to stay debuggable from the UI.
+            # With several providers there is no single native query, so these two
+            # are the representative rendering and `sources` carries the detail.
             "calendar": {
                 "query": calendar_query,
                 "start_date": iso_date(start),
                 "end_date": iso_date(end),
             },
             "email": {"query": gmail_query},
+            "sources": [
+                {
+                    "kind": kind,
+                    "provider": source.ref.provider,
+                    "integration_id": source.ref.id,
+                    "account": source.ref.display,
+                }
+                for kind, source, _ in planned
+            ],
         },
     }
+
+
+def _aggregate_error(
+    source_errors: list[dict], kind: str, sources: list, failures: dict[str, int]
+) -> str | None:
+    if not sources or failures[kind] < len(sources):
+        return None
+    messages = [e["error"] for e in source_errors if e["kind"] == kind]
+    if len(sources) == 1:
+        return messages[0] if messages else None
+    # Name the accounts: "all my calendars failed" is only actionable if the user
+    # can see which ones and why.
+    return "; ".join(
+        f"{e['account']}: {e['error']}" for e in source_errors if e["kind"] == kind
+    )
+
+
+def _dedupe_events(events: list[dict], attached_uids: set[str]) -> list[dict]:
+    """Drop already-attached events, then collapse the same event seen twice.
+
+    Two providers can surface one real event (a Google account connected both
+    directly and through the calendar MCP server). They agree on the provider's
+    own ``source_uid`` but not on ``uid``, which is namespaced per integration --
+    so the cross-provider key is (source_uid, start).
+    """
+    seen: set[tuple[str, str]] = set()
+    out: list[dict] = []
+    for event in events:
+        if event.get("uid") in attached_uids:
+            continue
+        key = (event.get("source_uid") or event.get("uid") or "", event.get("start") or "")
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(event)
+    return out
+
+
+def _dedupe_emails(emails: list[dict], attached_msgs: set[str]) -> list[dict]:
+    """Same idea for mail, keyed on the RFC 2822 Message-ID where we have one."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for mail in emails:
+        if mail.get("message_id") in attached_msgs:
+            continue
+        key = mail.get("rfc_message_id") or mail.get("message_id") or ""
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(mail)
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -465,8 +516,8 @@ def save_match_run(
         """
         INSERT INTO match_runs (meeting_id, thread_id, user_id, job_id, status,
             query_json, candidates_json, ranked_json, model, prompt_sha256,
-            email_error, calendar_error, error, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            email_error, calendar_error, source_errors_json, error, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             meeting_id, thread_id, user_id, job_id, status,
@@ -476,6 +527,7 @@ def save_match_run(
                         "notes": ranked.get("notes", "")}),
             ranked.get("model"), ranked.get("prompt_sha256"),
             gathered.get("email_error"), gathered.get("calendar_error"),
+            json.dumps(gathered.get("source_errors") or []),
             ranked.get("error"), utcnow(),
         ),
     )
@@ -501,6 +553,11 @@ def latest_match_run(conn: sqlite3.Connection, meeting_id: int) -> dict | None:
         "model": row["model"],
         "calendar_error": row["calendar_error"],
         "email_error": row["email_error"],
+        # Per-account detail behind the aggregate errors above. Older rows predate
+        # the column, hence the guarded access.
+        "source_errors": json.loads(
+            (row["source_errors_json"] if "source_errors_json" in row.keys() else None) or "[]"
+        ),
         "error": row["error"],
         "created_at": row["created_at"],
     }
@@ -565,8 +622,8 @@ def attach_selected(
             INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, url, summary,
                 description, location, start_at, end_at, calendar_name, account,
                 event_type, raw_json, relevance_score, relevance_reason,
-                attached_by, attached_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_uid, provider, attached_by, attached_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(thread_id, uid) DO UPDATE SET
                 meeting_id = excluded.meeting_id,
                 relevance_score = excluded.relevance_score,
@@ -580,6 +637,7 @@ def attach_selected(
                 event.get("calendar_name"), event.get("account"),
                 event.get("type"), json.dumps(event),
                 event.get("relevance_score"), event.get("relevance_reason"),
+                event.get("source_uid"), event.get("provider"),
                 user_id, utcnow(),
             ),
         )
@@ -594,8 +652,9 @@ def attach_selected(
             """
             INSERT INTO thread_emails (thread_id, meeting_id, mcp_id, message_id, sender,
                 subject, date, snippet, account, triage_level, tag, reason, summary,
-                score, raw_json, relevance_score, relevance_reason, attached_by, attached_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                score, raw_json, relevance_score, relevance_reason,
+                url, rfc_message_id, provider, attached_by, attached_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(thread_id, message_id) DO UPDATE SET
                 meeting_id = excluded.meeting_id,
                 relevance_score = excluded.relevance_score,
@@ -608,7 +667,9 @@ def attach_selected(
                 email.get("account"), email.get("triage_level"), email.get("tag"),
                 email.get("reason"), email.get("summary"), email.get("score"),
                 json.dumps(email), email.get("relevance_score"),
-                email.get("relevance_reason"), user_id, utcnow(),
+                email.get("relevance_reason"),
+                email.get("url"), email.get("rfc_message_id"), email.get("provider"),
+                user_id, utcnow(),
             ),
         )
         attached_emails += 1

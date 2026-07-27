@@ -13,6 +13,7 @@ import pytest
 
 from app.config import get_settings, reset_settings_cache
 from app.db import get_conn, init_db
+from app.services import secretstore
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -25,8 +26,13 @@ def isolated_settings(tmp_path, monkeypatch):
     monkeypatch.setenv("MMN_MCP_CALENDAR_TOKEN", "test-calendar-token")
     monkeypatch.setenv("MMN_MCP_EMAIL_TOKEN", "test-email-token")
     monkeypatch.setenv("MMN_LLM_API_KEY", "test-llm-key")
+    # Pinned so no test generates (and leaves behind) a data/secret.key, and so
+    # the key does not change between tests that share encrypted fixtures.
+    monkeypatch.setenv("MMN_SECRET_KEY", "test-suite-credential-encryption-key")
     reset_settings_cache()
+    secretstore.reset_key_cache()
     yield get_settings()
+    secretstore.reset_key_cache()
     reset_settings_cache()
 
 

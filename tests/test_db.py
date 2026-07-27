@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 
 import pytest
 
@@ -23,6 +24,8 @@ EXPECTED_TABLES = {
     "thread_calendar_events",
     "match_runs",
     "mcp_servers",
+    "user_mcp_profiles",
+    "integrations",
     "app_settings",
 }
 
@@ -47,6 +50,8 @@ EXPECTED_INDEXES = {
     "uq_thread_event",
     "idx_tce_timeline",
     "idx_match_meeting",
+    "uq_integration_account",
+    "idx_integrations_user",
 }
 
 
@@ -79,6 +84,97 @@ def test_init_db_is_idempotent(db_path):
 def test_pragmas_are_applied(conn):
     assert conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
     assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Late columns and integrations
+# --------------------------------------------------------------------------- #
+
+
+def _columns(conn, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+@pytest.mark.parametrize(
+    "table,column",
+    [
+        ("thread_emails", "url"),
+        ("thread_emails", "rfc_message_id"),
+        ("thread_emails", "provider"),
+        ("thread_calendar_events", "provider"),
+        ("thread_calendar_events", "source_uid"),
+        ("match_runs", "source_errors_json"),
+    ],
+)
+def test_late_columns_are_applied(conn, table, column):
+    """LATE_COLUMNS was an empty tuple until this refactor, so the ALTER TABLE
+    loop in init_db had never actually run. Assert it does."""
+    assert column in _columns(conn, table)
+
+
+def test_late_columns_survive_a_second_init(db_path):
+    """The second run hits "duplicate column name", which must be swallowed."""
+    init_db(db_path)
+    init_db(db_path)
+    with get_conn(db_path) as conn:
+        assert "url" in _columns(conn, "thread_emails")
+
+
+def _make_user(conn, user_id: int, username: str) -> None:
+    now = utcnow()
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, password_salt, created_at, updated_at) "
+        "VALUES (?, ?, 'h', 's', ?, ?)",
+        (user_id, username, now, now),
+    )
+
+
+def _add_integration(conn, user_id: int, provider: str, account_key: str) -> None:
+    now = utcnow()
+    conn.execute(
+        "INSERT INTO integrations (user_id, provider, account_key, auth_type, "
+        "created_at, updated_at) VALUES (?, ?, ?, 'token', ?, ?)",
+        (user_id, provider, account_key, now, now),
+    )
+
+
+class TestIntegrationsTable:
+    def test_the_same_account_cannot_be_connected_twice(self, conn):
+        """Guards the "four Connect clicks make four rows" failure."""
+        _make_user(conn, 1, "one")
+        _add_integration(conn, 1, "google", "sub-123")
+        with pytest.raises(sqlite3.IntegrityError):
+            _add_integration(conn, 1, "google", "sub-123")
+
+    def test_two_users_may_connect_the_same_account(self, conn):
+        """Integrations are per-user; a shared family mailbox is legitimate."""
+        _make_user(conn, 1, "one")
+        _make_user(conn, 2, "two")
+        _add_integration(conn, 1, "google", "sub-123")
+        _add_integration(conn, 2, "google", "sub-123")
+        assert conn.execute("SELECT COUNT(*) FROM integrations").fetchone()[0] == 2
+
+    def test_one_user_may_connect_two_accounts_of_one_provider(self, conn):
+        _make_user(conn, 1, "one")
+        _add_integration(conn, 1, "google", "work-sub")
+        _add_integration(conn, 1, "google", "personal-sub")
+        assert conn.execute("SELECT COUNT(*) FROM integrations").fetchone()[0] == 2
+
+    def test_deleting_a_user_removes_their_integrations(self, conn):
+        _make_user(conn, 1, "one")
+        _add_integration(conn, 1, "google", "sub-123")
+        conn.execute("DELETE FROM users WHERE id = 1")
+        assert conn.execute("SELECT COUNT(*) FROM integrations").fetchone()[0] == 0
+
+    def test_capabilities_default_to_off(self, conn):
+        """A freshly created row must not silently start searching anything."""
+        _make_user(conn, 1, "one")
+        _add_integration(conn, 1, "google", "sub-123")
+        row = conn.execute(
+            "SELECT calendar_enabled, email_enabled, status FROM integrations"
+        ).fetchone()
+        assert (row["calendar_enabled"], row["email_enabled"]) == (0, 0)
+        assert row["status"] == "unverified"
 
 
 # --------------------------------------------------------------------------- #

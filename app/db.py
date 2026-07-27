@@ -381,11 +381,71 @@ SCHEMA: tuple[str, ...] = (
         PRIMARY KEY (user_id, server_name)
     )
     """,
+    # --------------------------------------------------------- integrations
+    # One row per connected *account*, not per capability: a credential has a
+    # single lifecycle (expiry, rotation, revoke, reauth), so splitting one
+    # Google OAuth grant into a calendar row and an email row would mean two
+    # copies of one rotating refresh token and two independent refresh races.
+    # calendar_enabled/email_enabled say which capabilities to actually use.
+    #
+    # UNIQUE is on account_key -- a stable provider-supplied id -- and never on
+    # account_label: labels are renameable, and SQLite treats NULLs as distinct,
+    # so a nullable label would let repeated "Connect" clicks pile up rows.
+    """
+    CREATE TABLE IF NOT EXISTS integrations (
+        id                        INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id                   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        provider                  TEXT NOT NULL,
+        account_key               TEXT NOT NULL,
+        account_label             TEXT,
+        calendar_enabled          INTEGER NOT NULL DEFAULT 0,
+        email_enabled             INTEGER NOT NULL DEFAULT 0,
+        enabled                   INTEGER NOT NULL DEFAULT 1,
+        auth_type                 TEXT NOT NULL,
+        config_json               TEXT NOT NULL DEFAULT '{}',
+        secret_json               TEXT,
+        secret_version            INTEGER NOT NULL DEFAULT 1,
+        scopes                    TEXT,
+        token_expires_at          TEXT,
+        refresh_token_obtained_at TEXT,
+        refresh_lease_until       TEXT,
+        status                    TEXT NOT NULL DEFAULT 'unverified',
+        last_test_at              TEXT,
+        last_test_ok              INTEGER,
+        last_test_error           TEXT,
+        created_at                TEXT NOT NULL,
+        updated_at                TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_account "
+    "ON integrations(user_id, provider, account_key)",
+    "CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id, enabled)",
 )
 
 # Columns added after the initial release go here as (table, column, ddl_fragment).
 # Applied best-effort; "duplicate column name" is the expected no-op outcome.
-LATE_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+# Note SQLite's ALTER TABLE ADD COLUMN cannot add NOT NULL without a default, and
+# cannot add UNIQUE -- anything needing those has to go in SCHEMA instead.
+LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    # A provider-owned deep link to the message. Gmail and Zoho have one; plain
+    # IMAP does not. Without this the SPA falls back to a Gmail-only URL builder,
+    # which would point iCloud and Zoho mail at a Gmail search that finds nothing.
+    ("thread_emails", "url", "TEXT"),
+    # The real RFC 2822 Message-ID. Distinct from `message_id`, which is now an
+    # app-owned composite; this is what cross-provider dedup and the Gmail
+    # rfc822msgid fallback link need.
+    ("thread_emails", "rfc_message_id", "TEXT"),
+    # Which integration surfaced the row, for display and provenance.
+    ("thread_emails", "provider", "TEXT"),
+    ("thread_calendar_events", "provider", "TEXT"),
+    # The provider's own recurrence-set identity (Google iCalUID, CalDAV UID).
+    # `uid` is app-owned and instance-scoped, so identifying "the same real
+    # event seen through two providers" needs this stored separately.
+    ("thread_calendar_events", "source_uid", "TEXT"),
+    # Per-source failures, one entry per integration that errored. The older
+    # calendar_error/email_error columns remain as derived aggregates.
+    ("match_runs", "source_errors_json", "TEXT"),
+)
 
 
 def init_db(db_path: Path | str | None = None) -> None:

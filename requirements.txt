@@ -7,6 +7,9 @@ python-dotenv>=1.0.0
 httpx>=0.28.0
 pyyaml>=6.0
 mcp>=1.0.0
+# Fernet, for encrypting integration credentials at rest. Already arrives as an
+# mcp transitive dep, but pinned here because we now import it directly.
+cryptography>=42.0.0
 pytest>=7.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.10.0

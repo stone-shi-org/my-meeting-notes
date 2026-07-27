@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     max_upload_mb: int = 1024
     long_audio_warn_sec: int = 1800
 
+    # --- secrets ------------------------------------------------------------
+    # Encrypts per-user integration credentials. Blank means "generate and keep
+    # data/secret.key"; set it explicitly to hold the key outside the volume the
+    # database lives in. Any string works -- it is normalised into a Fernet key.
+    secret_key: str = ""
+
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20
     page_size_max: int = 100

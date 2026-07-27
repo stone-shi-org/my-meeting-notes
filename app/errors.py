@@ -121,6 +121,30 @@ class MCPTimeoutError(MCPError):
     code = "MCP_TIMEOUT"
 
 
+class NoIntegrationsError(AppError):
+    """The user has not connected any calendar or inbox to search.
+
+    409 rather than 400: nothing about the request is malformed, the account just
+    is not set up yet. The SPA normally prevents this by grouping the match button
+    behind the integrations summary, so reaching here means a stale bundle -- the
+    code is mapped to a Settings deep link for exactly that case.
+    """
+
+    status_code = 409
+    code = "NO_INTEGRATIONS"
+
+
+class IntegrationAuthError(AppError):
+    """A connected account's credentials no longer work and cannot be refreshed.
+
+    Terminal on purpose: retrying an ``invalid_grant`` forever just burns quota
+    and hides the one thing that fixes it, which is the user reconnecting.
+    """
+
+    status_code = 502
+    code = "NEEDS_REAUTH"
+
+
 class JobCancelled(Exception):
     """Raised inside a job body at a stage boundary when cancellation was requested."""
 

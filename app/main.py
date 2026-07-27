@@ -17,9 +17,9 @@ from app.logging_config import configure_logging, get_logger
 from app.jobs.queue import JobQueue, set_queue
 from app.routers import (
     auth,
+    integrations,
     jobs,
     matching,
-    me,
     meetings,
     settings_api,
     summaries,
@@ -29,6 +29,7 @@ from app.routers import (
     users,
 )
 from app.services import pipeline  # noqa: F401  -- registers the job bodies
+from app.services import integrations as integrations_svc
 from app.services import users as users_svc
 
 log = get_logger("main")
@@ -46,6 +47,9 @@ async def lifespan(app: FastAPI):
     with get_conn() as conn:
         users_svc.seed_admin(conn)
         purged = users_svc.purge_expired_sessions(conn)
+    # After seed_admin, so a first boot migrates the seeded MCP config onto the
+    # admin account rather than finding no users and doing nothing.
+    integrations_svc.migrate_mcp_servers()
     if purged:
         log.info("purged %d expired session(s)", purged)
     log.info("database ready at %s", settings.db_path)
@@ -120,7 +124,7 @@ def create_app() -> FastAPI:
     app.include_router(system.router)
     app.include_router(auth.router)
     app.include_router(users.router)
-    app.include_router(me.router)
+    app.include_router(integrations.router)
     app.include_router(threads.router)
     app.include_router(meetings.router)
     app.include_router(transcripts.router)
