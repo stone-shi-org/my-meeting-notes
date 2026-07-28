@@ -39,6 +39,15 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "match_max_candidates": ("int", False),
     "match_max_keywords": ("int", False),
     "page_size_default": ("int", False),
+    # Where this app is reachable, used to build OAuth redirect URIs. Google
+    # only accepts https:// or http://localhost, so a LAN address here will be
+    # rejected by the provider, not by us.
+    "public_base_url": ("str", False),
+    # OAuth *client* registration is necessarily app-level: the redirect URI has
+    # to be pre-registered with the provider. Each user still authorises their
+    # own account, and their tokens are per-user.
+    "google_client_id": ("str", False),
+    "google_client_secret": ("str", True),
 }
 
 
@@ -116,6 +125,11 @@ class Settings(BaseSettings):
     # data/secret.key"; set it explicitly to hold the key outside the volume the
     # database lives in. Any string works -- it is normalised into a Fernet key.
     secret_key: str = ""
+
+    # --- oauth --------------------------------------------------------------
+    public_base_url: str = "http://localhost:4020"
+    google_client_id: str = ""
+    google_client_secret: str = ""
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20

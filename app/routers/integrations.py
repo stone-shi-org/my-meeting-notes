@@ -8,10 +8,15 @@ rather than a 403, because a 403 would confirm it exists.
 from __future__ import annotations
 
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Cookie, Depends, Response
+from fastapi.responses import RedirectResponse
 
+from app.config import get_settings
+from app.db import utcnow
 from app.deps import CurrentUser, active_user, get_db
+from app.errors import ValidationError
 from app.logging_config import get_logger
 from app.schemas import (
     CreateIntegrationRequest,
@@ -21,7 +26,7 @@ from app.schemas import (
     UpdateIntegrationRequest,
 )
 from app.services import integrations as svc
-from app.services.providers import loader, registry
+from app.services.providers import google, loader, oauth, registry
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 log = get_logger("integrations_api")
@@ -51,6 +56,136 @@ def my_summary(
 ) -> IntegrationSummaryOut:
     """Counts the SPA needs *before* offering to match a meeting."""
     return IntegrationSummaryOut(**loader.summary_for_user(conn, user.id))
+
+
+# --------------------------------------------------------------------------- #
+# OAuth connect flow
+#
+# Declared before /{integration_id} so "oauth" is never parsed as an id.
+# --------------------------------------------------------------------------- #
+
+# Only OAuth providers appear here; token/password providers are created
+# directly through POST /api/integrations.
+OAUTH_CLIENTS = {
+    "google": (google.client_for, google.fetch_identity),
+}
+
+
+@router.get("/oauth/{provider}/start")
+def oauth_start(
+    provider: str,
+    response: Response,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Begin authorising an account. Returns the URL for the SPA to navigate to."""
+    if provider not in OAUTH_CLIENTS:
+        raise ValidationError(f"{provider} is not connected by authorising it")
+
+    build_client, _ = OAUTH_CLIENTS[provider]
+    client = build_client(conn)
+    redirect = oauth.redirect_uri(conn, provider)
+    nonce = oauth.new_nonce()
+    state = oauth.make_state(user.id, provider, nonce)
+
+    # The nonce lives in an httpOnly cookie as well as inside the signed state,
+    # so a state lifted out of a redirect URL cannot be replayed elsewhere.
+    response.set_cookie(
+        oauth.STATE_COOKIE,
+        nonce,
+        max_age=oauth.STATE_TTL_SEC,
+        httponly=True,
+        samesite="lax",
+        secure=get_settings().session_cookie_secure,
+    )
+    return {"authorize_url": oauth.authorize_url(client, redirect, state)}
+
+
+@router.get("/oauth/{provider}/callback")
+def oauth_callback(
+    provider: str,
+    state: str = "",
+    code: str = "",
+    error: str = "",
+    mmn_oauth_nonce: str | None = Cookie(default=None),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> RedirectResponse:
+    """Finish authorising and store the account.
+
+    Deliberately not authenticated by session: the browser arrives here from
+    Google, and the signed state plus the nonce cookie are what prove who started
+    the flow. The row is created only *after* the identity call, so a repeated
+    "Connect" cannot pile up half-built rows.
+    """
+    settings_url = "/settings/integrations"
+
+    if error:
+        return RedirectResponse(f"{settings_url}?error={error}", status_code=303)
+    if provider not in OAUTH_CLIENTS:
+        return RedirectResponse(f"{settings_url}?error=unknown_provider", status_code=303)
+
+    build_client, fetch_identity = OAUTH_CLIENTS[provider]
+    payload = oauth.parse_state(state, mmn_oauth_nonce)
+    user_id = payload["u"]
+
+    client = build_client(conn)
+    granted = oauth.exchange_code(client, code, oauth.redirect_uri(conn, provider))
+    identity = fetch_identity(granted["access_token"])
+    if not identity.get("account_key"):
+        return RedirectResponse(f"{settings_url}?error=no_identity", status_code=303)
+
+    secret = {"access_token": granted["access_token"]}
+    if granted.get("refresh_token"):
+        secret["refresh_token"] = granted["refresh_token"]
+
+    expires_at = (
+        datetime.now(timezone.utc) + timedelta(seconds=int(granted.get("expires_in", 3600)))
+    ).isoformat()
+
+    existing = conn.execute(
+        "SELECT id FROM integrations WHERE user_id = ? AND provider = ? AND account_key = ?",
+        (user_id, provider, identity["account_key"]),
+    ).fetchone()
+
+    if existing:
+        # Reconnecting an account we already know: refresh its credentials and
+        # clear whatever failure state it was in.
+        svc.update(
+            conn,
+            existing["id"],
+            user_id,
+            secret_updates={k: v for k, v in secret.items()},
+        )
+        conn.execute(
+            "UPDATE integrations SET status = 'ok', token_expires_at = ?, scopes = ?, "
+            "refresh_token_obtained_at = COALESCE(?, refresh_token_obtained_at) "
+            "WHERE id = ?",
+            (
+                expires_at,
+                granted.get("scope"),
+                utcnow() if granted.get("refresh_token") else None,
+                existing["id"],
+            ),
+        )
+        log.info("user %s reconnected %s (%s)", user_id, provider, identity["email"])
+    else:
+        svc.create(
+            conn,
+            user_id=user_id,
+            provider=provider,
+            account_key=identity["account_key"],
+            account_label=identity.get("email") or identity["account_key"],
+            config={},
+            secret=secret,
+            status="ok",
+            scopes=granted.get("scope"),
+            token_expires_at=expires_at,
+        )
+        log.info("user %s connected %s (%s)", user_id, provider, identity["email"])
+
+    redirect = RedirectResponse(f"{settings_url}?connected={provider}", status_code=303)
+    redirect.delete_cookie(oauth.STATE_COOKIE)
+    return redirect
 
 
 @router.get("", response_model=list[IntegrationOut])

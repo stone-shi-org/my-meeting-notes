@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.errors import NotFoundError
-from app.services.providers import mcp
+from app.services.providers import google, mcp
 
 CALENDAR = "calendar"
 EMAIL = "email"
@@ -37,6 +37,14 @@ class ProviderSpec:
 
 
 REGISTRY: dict[str, ProviderSpec] = {
+    "google": ProviderSpec(
+        id="google",
+        label="Google",
+        kinds=frozenset({CALENDAR, EMAIL}),
+        auth_type="oauth2",
+        factory=google.GoogleProvider,
+        docs_url="https://console.cloud.google.com/apis/credentials",
+    ),
     "mcp_calendar": ProviderSpec(
         id="mcp_calendar",
         label="Calendar MCP server",

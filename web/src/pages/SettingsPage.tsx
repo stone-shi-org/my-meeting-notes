@@ -648,6 +648,38 @@ function AddMcpForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }
   );
 }
 
+/** Hand off to the provider's consent screen. */
+function ConnectOAuth({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }) {
+  const start = useMutation({
+    mutationFn: () => api.get<{ authorize_url: string }>(`/integrations/oauth/${spec.id}/start`),
+    onSuccess: (data) => {
+      // Full navigation, not a popup: the callback redirects back into the SPA,
+      // and a popup would be blocked as often as not.
+      window.location.href = data.authorize_url;
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-fg-subtle">
+        You will be sent to {spec.label} to approve read-only access to your calendar and mail,
+        then returned here.
+      </p>
+      {start.error && (
+        <p className="text-sm text-danger-ink">{(start.error as Error).message}</p>
+      )}
+      <div className="flex items-center gap-2">
+        <Button variant="primary" size="sm" loading={start.isPending} onClick={() => start.mutate()}>
+          Continue to {spec.label}
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
   const [picked, setPicked] = useState<ProviderSpec | null>(null);
   const [open, setOpen] = useState(false);
@@ -694,14 +726,45 @@ function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
         </div>
       ) : (
         <div className="mt-3">
-          <AddMcpForm spec={picked} onDone={close} />
+          {picked.auth_type === 'oauth2' ? (
+            <ConnectOAuth spec={picked} onDone={close} />
+          ) : (
+            <AddMcpForm spec={picked} onDone={close} />
+          )}
         </div>
       )}
     </Card>
   );
 }
 
+/** App-level OAuth registration. Unavoidably shared: a provider will only
+ *  redirect back to a URI registered against one client. Each user still
+ *  authorises their own account against it. */
+function OAuthClientSettings() {
+  return (
+    <SettingsForm
+      title="Google sign-in (admin)"
+      description={
+        'Register one OAuth client at console.cloud.google.com, add ' +
+        'PUBLIC_BASE_URL/api/integrations/oauth/google/callback as an authorised redirect ' +
+        'URI, and set the consent screen to "In production" — while it is in Testing, ' +
+        'Google expires refresh tokens after 7 days and everyone has to reconnect weekly.'
+      }
+      keys={[
+        {
+          key: 'public_base_url',
+          label: 'Public base URL',
+          hint: 'Where this app is reachable. Google only accepts https:// or http://localhost — a LAN IP will be rejected.',
+        },
+        { key: 'google_client_id', label: 'Google client ID' },
+        { key: 'google_client_secret', label: 'Google client secret' },
+      ]}
+    />
+  );
+}
+
 export function IntegrationsSettingsPage() {
+  const { isAdmin } = useAuth();
   const integrations = useQuery({
     queryKey: ['integrations'],
     queryFn: () => api.get<Integration[]>('/integrations'),
@@ -740,6 +803,8 @@ export function IntegrationsSettingsPage() {
       </Card>
 
       <AddIntegration providers={providers.data ?? []} />
+
+      {isAdmin && <OAuthClientSettings />}
     </div>
   );
 }
