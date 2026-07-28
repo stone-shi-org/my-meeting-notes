@@ -349,3 +349,63 @@ class TestErrorTyping:
 
         assert not isinstance(exc.value, MCPError)
         assert exc.value.to_dict()["error"]["kind"] == "email"
+
+
+class TestSeparateMailLogin:
+    """An Apple ID can be any address. CalDAV accepts a third-party one; iCloud
+    Mail does not, and rejects it with a bare AUTHENTICATIONFAILED that looks
+    exactly like a wrong password. Found on a real account whose Apple ID was a
+    Gmail address: calendar worked, mail did not.
+    """
+
+    def _provider(self, config):
+        ref = IntegrationRef(
+            id=3, provider="apple", account_label="me@gmail.com",
+            calendar_enabled=True, email_enabled=True,
+        )
+        return AppleProvider(ref, config, {"username": "me@gmail.com", "password": "pw"})
+
+    def test_the_mail_login_defaults_to_the_apple_id(self):
+        assert self._provider({}).imap_username == "me@gmail.com"
+
+    def test_a_configured_icloud_address_is_used_for_mail(self):
+        p = self._provider({"imap_username": "me@icloud.com"})
+        assert p.imap_username == "me@icloud.com"
+        assert p.username == "me@gmail.com", "CalDAV still uses the Apple ID"
+
+    async def test_the_configured_address_reaches_the_imap_login(self, monkeypatch):
+        seen = {}
+
+        async def fake_search(**kwargs):
+            seen.update(kwargs)
+            return []
+
+        monkeypatch.setattr(_imap, "search", fake_search)
+        await self._provider({"imap_username": "me@icloud.com"}).search_emails(
+            keywords=["x"], start=START, end=END
+        )
+        assert seen["username"] == "me@icloud.com"
+
+    async def test_a_non_icloud_login_gets_a_message_naming_the_real_cause(self, monkeypatch):
+        """"Check your password" is actively wrong here -- CalDAV proves it works."""
+        async def rejecting(**kwargs):
+            raise IntegrationAuthError("rejected")
+
+        monkeypatch.setattr(_imap, "search", rejecting)
+        with pytest.raises(IntegrationAuthError) as exc:
+            await self._provider({}).search_emails(keywords=["x"], start=START, end=END)
+
+        message = str(exc.value)
+        assert "not an @icloud.com address" in message
+        assert "calendar only" in message
+
+    async def test_an_icloud_login_failure_still_blames_the_password(self, monkeypatch):
+        async def rejecting(**kwargs):
+            raise IntegrationAuthError("rejected")
+
+        monkeypatch.setattr(_imap, "search", rejecting)
+        with pytest.raises(IntegrationAuthError) as exc:
+            await self._provider({"imap_username": "me@icloud.com"}).search_emails(
+                keywords=["x"], start=START, end=END
+            )
+        assert "app-specific password" in str(exc.value)

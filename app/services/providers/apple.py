@@ -36,9 +36,25 @@ REQUEST_TIMEOUT_SEC = 30
 class AppleProvider(BaseProvider):
     provider_id = "apple"
 
+    # Apple's own domains. An Apple ID outside these is a third-party address,
+    # which CalDAV accepts but IMAP does not.
+    ICLOUD_DOMAINS = ("@icloud.com", "@me.com", "@mac.com")
+
     @property
     def username(self) -> str:
         return self.secret.get("username") or self.config.get("username") or ""
+
+    @property
+    def imap_username(self) -> str:
+        """The mailbox login, which is not always the Apple ID.
+
+        An Apple ID can be any address -- a Gmail one, say -- and CalDAV happily
+        authenticates with it. iCloud Mail will not: it wants the account's own
+        @icloud.com (or @me.com / @mac.com) address. When those differ, logging in
+        with the Apple ID fails with a bare AUTHENTICATIONFAILED that looks
+        exactly like a wrong password.
+        """
+        return self.config.get("imap_username") or self.username
 
     @property
     def password(self) -> str:
@@ -95,20 +111,42 @@ class AppleProvider(BaseProvider):
 
     # --------------------------------------------------------------------- mail
 
+    def _mail_auth_error(self, exc: Exception) -> IntegrationAuthError:
+        """Say which of the two likely causes it actually is.
+
+        "Check your password" is unhelpful and often wrong here -- if CalDAV
+        works, the password is fine and the username is the problem.
+        """
+        user = self.imap_username
+        if not user.lower().endswith(self.ICLOUD_DOMAINS):
+            return IntegrationAuthError(
+                f"iCloud Mail rejected the login for {user}. An Apple ID that is not "
+                "an @icloud.com address cannot be used as the mailbox login — set the "
+                "iCloud email address on this integration, or turn off email and use "
+                "the account for calendar only."
+            )
+        return IntegrationAuthError(
+            f"iCloud Mail rejected the login for {user}. Check the app-specific "
+            "password, and that iCloud Mail is switched on for this account."
+        )
+
     async def search_emails(
         self, *, keywords: list[str], start: datetime, end: datetime
     ) -> list[EmailCandidate]:
-        username, password = self._credentials()
-        messages = await _imap.search(
-            host=self.config.get("imap_host") or IMAP_HOST,
-            username=username,
-            password=password,
-            keywords=keywords,
-            start=start,
-            end=end,
-            limit=int(self.config.get("max_results") or 25),
-            mailbox=self.config.get("mailbox") or "INBOX",
-        )
+        _, password = self._credentials()
+        try:
+            messages = await _imap.search(
+                host=self.config.get("imap_host") or IMAP_HOST,
+                username=self.imap_username,
+                password=password,
+                keywords=keywords,
+                start=start,
+                end=end,
+                limit=int(self.config.get("max_results") or 25),
+                mailbox=self.config.get("mailbox") or "INBOX",
+            )
+        except IntegrationAuthError as exc:
+            raise self._mail_auth_error(exc) from exc
         return [self._to_email(m) for m in messages]
 
     def _to_email(self, message: dict) -> EmailCandidate:
@@ -157,10 +195,10 @@ class AppleProvider(BaseProvider):
 
         if self.ref.email_enabled:
             try:
-                username, password = self._credentials()
+                _, password = self._credentials()
                 await _imap.search(
                     host=self.config.get("imap_host") or IMAP_HOST,
-                    username=username,
+                    username=self.imap_username,
                     password=password,
                     keywords=[],
                     start=datetime.now().replace(microsecond=0),
@@ -168,6 +206,10 @@ class AppleProvider(BaseProvider):
                     limit=1,
                 )
                 checks.append(Check(name="mail (IMAP)", ok=True))
+            except IntegrationAuthError as exc:
+                checks.append(
+                    Check(name="mail (IMAP)", ok=False, error=str(self._mail_auth_error(exc)))
+                )
             except Exception as exc:  # noqa: BLE001
                 checks.append(Check(name="mail (IMAP)", ok=False, error=str(exc)))
 

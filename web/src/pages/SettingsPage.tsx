@@ -654,13 +654,17 @@ function AddAppleForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void
   const queryClient = useQueryClient();
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [imapUsername, setImapUsername] = useState('');
 
   const create = useMutation({
     mutationFn: () =>
       api.post<Integration>('/integrations', {
         provider: spec.id,
         account_label: username.trim(),
-        config: { username: username.trim() },
+        config: {
+          username: username.trim(),
+          ...(imapUsername.trim() ? { imap_username: imapUsername.trim() } : {}),
+        },
         secret: { username: username.trim(), password },
       }),
     onSuccess: () => {
@@ -703,6 +707,20 @@ function AddAppleForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void
             appleid.apple.com
           </a>{' '}
           under Sign-In and Security.
+        </p>
+      </div>
+      <div>
+        <Label htmlFor="apple-imap">iCloud email address (optional)</Label>
+        <Input
+          id="apple-imap"
+          className="mt-1.5"
+          value={imapUsername}
+          onChange={(e) => setImapUsername(e.target.value)}
+          placeholder="you@icloud.com"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Only needed if your Apple ID is not itself an @icloud.com address. Calendar works with
+          the Apple ID, but iCloud Mail will only accept the account&rsquo;s own iCloud address.
         </p>
       </div>
       {create.error && <p className="text-sm text-danger-ink">{(create.error as Error).message}</p>}
