@@ -193,6 +193,9 @@ class TestMail:
                     "data": [
                         {
                             "messageId": "m-1",
+                            # Always present on a real search response, and the
+                            # deep link is useless without it.
+                            "folderId": "f-9",
                             "fromAddress": "priya@acme.com",
                             "subject": "Re: cutover",
                             "summary": "rollback rehearsal",
@@ -208,7 +211,7 @@ class TestMail:
         assert mail.subject == "Re: cutover"
         assert mail.snippet == "rollback rehearsal"
         assert mail.message_id == "zoho:5:m-1"
-        assert mail.url and "m-1" in mail.url
+        assert mail.url == "https://mail.zoho.com/zm/#mail/folder/f-9/m-1"
         # Zoho's search payload has no RFC 2822 header, so the Gmail-style
         # fallback link must not be attempted for it.
         assert mail.rfc_message_id is None
@@ -360,3 +363,49 @@ class TestIdentity:
 
         assert route.calls[0].request.headers["authorization"] == "Zoho-oauthtoken at-1"
         assert identity == {"account_key": "778899", "email": "me@zoho.eu", "dc": "eu"}
+
+
+class TestEmailPresentation:
+    """Both found on a real Zoho account: the deep link opened the mailbox but
+    no message, and summaries rendered with literal &lt; and &quot;."""
+
+    def _provider(self):
+        ref = IntegrationRef(id=4, provider="zoho", account_label="me@zoho.com",
+                             email_enabled=True)
+        return ZohoProvider(ref, {"dc": "com"}, {"access_token": "at"})
+
+    def test_the_link_uses_the_real_folder_id(self):
+        """The hash route needs an actual folder; a placeholder segment loads the
+        mailbox and resolves to nothing."""
+        mail = self._provider()._to_email(
+            {"messageId": "msg-1001", "folderId": "folder-2002", "subject": "S"}
+        )
+        assert mail.url == (
+            "https://mail.zoho.com/zm/#mail/folder/folder-2002/msg-1001"
+        )
+
+    def test_no_folder_means_no_link_rather_than_a_broken_one(self):
+        """A link that lands on the wrong screen is worse than no link."""
+        mail = self._provider()._to_email({"messageId": "123", "subject": "S"})
+        assert mail.url is None
+
+    def test_html_entities_are_decoded(self):
+        mail = self._provider()._to_email(
+            {
+                "messageId": "1",
+                "folderId": "2",
+                "subject": "Re: R&amp;D sync",
+                "fromAddress": "&quot;Ada&quot;&lt;ada@example.com&gt;",
+                "summary": "notes &lt;attached&gt; &amp; reviewed",
+            }
+        )
+        assert mail.subject == "Re: R&D sync"
+        assert mail.sender == '"Ada"<ada@example.com>'
+        assert mail.snippet == "notes <attached> & reviewed"
+
+    def test_the_data_centre_is_reflected_in_the_link(self):
+        ref = IntegrationRef(id=4, provider="zoho", account_label="x", email_enabled=True)
+        mail = ZohoProvider(ref, {"dc": "eu"}, {})._to_email(
+            {"messageId": "1", "folderId": "2"}
+        )
+        assert mail.url.startswith("https://mail.zoho.eu/")

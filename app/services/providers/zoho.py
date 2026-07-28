@@ -16,6 +16,7 @@ wrong one authenticates fine and returns nothing.
 
 from __future__ import annotations
 
+import html
 import json
 import time
 from datetime import datetime, timedelta, timezone
@@ -132,6 +133,13 @@ def fetch_identity(access_token: str, conn=None, *, hints: dict | None = None) -
         "email": body.get("Email"),
         "dc": dc,
     }
+
+
+def _plain(value: str | None) -> str | None:
+    """Undo Zoho's HTML escaping of subjects, senders and summaries."""
+    if not value:
+        return None
+    return html.unescape(str(value))
 
 
 def parse_stamp(value: str | None) -> str | None:
@@ -310,6 +318,19 @@ class ZohoProvider(BaseProvider):
             if _within(candidate.date, start, end)
         ]
 
+    def _message_url(self, message_id: str, folder_id: str | None) -> str | None:
+        """Deep link into Zoho webmail.
+
+        The hash route is ``#mail/folder/<folder>/<messageId>`` and the folder
+        segment has to be a real folder -- a placeholder there loads the mailbox
+        but resolves to no message. Zoho's search response carries the numeric
+        folderId, so use it; without one there is nothing to link to, and a link
+        that lands on the wrong screen is worse than no link.
+        """
+        if not (message_id and folder_id):
+            return None
+        return f"https://mail.zoho.{self._dc()}/zm/#mail/folder/{folder_id}/{message_id}"
+
     def _to_email(self, item: dict) -> EmailCandidate:
         native = str(item.get("messageId") or "")
         return EmailCandidate(
@@ -317,14 +338,14 @@ class ZohoProvider(BaseProvider):
             # Zoho's search payload does not carry the RFC 2822 header.
             rfc_message_id=None,
             id=native,
-            sender=item.get("fromAddress") or item.get("sender"),
-            subject=item.get("subject"),
+            # Zoho HTML-escapes these, so a sender arrives as
+            # "&quot;Ada&quot;&lt;ada@x&gt;" and would render literally.
+            sender=_plain(item.get("fromAddress") or item.get("sender")),
+            subject=_plain(item.get("subject")),
             date=parse_stamp(item.get("receivedTime") or item.get("sentDateInGMT")),
-            snippet=item.get("summary"),
+            snippet=_plain(item.get("summary")),
             account=self.ref.account_label,
-            url=f"https://mail.zoho.{self._dc()}/zm/#mail/folder/all/{native}"
-            if native
-            else None,
+            url=self._message_url(native, item.get("folderId")),
             provider=self.provider_id,
             integration_id=self.ref.id,
         )
