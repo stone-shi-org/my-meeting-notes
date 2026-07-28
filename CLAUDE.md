@@ -15,9 +15,9 @@ app/
   deps.py        current_user / active_user / require_admin / owner_scope
   security.py    stdlib scrypt + opaque session tokens
   routers/       auth users integrations threads meetings transcripts summaries matching jobs
-                 settings_api system
-  services/      audio diarize llm prompts summarize transcript matching pipeline threads users
-                 integrations secretstore mcpclient
+                 calendar settings_api system
+  services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
+                 threads users integrations secretstore mcpclient
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
   prompts/       summary_prompt.md · match_rank_prompt.md   <- EDITABLE, no deploy needed
@@ -41,6 +41,11 @@ See `mcpclient.parse_tool_result`.
 
 **The two search date formats differ.** Calendar wants ISO-8601 (`2026-03-11`); Gmail wants
 `after:2026/03/11`. Cross-wiring them returns nothing, silently. Separate helpers, separate tests.
+
+**An all-day event's bare date is UTC midnight to `new Date()`.** `new Date('2026-07-30')` parses
+date-only strings as UTC, so west of Greenwich every all-day event renders a day early. `lib/calendar.ts`
+builds those in local time (`eventDate`) and everything on the upcoming list goes through it — the
+frontend half of the same trap `_caldav._stamp` guards on the server.
 
 **Gmail returns RFC 2822 timestamps.** Stored raw they sort lexically above every ISO date, so a
 July 15 email lands above a July 20 meeting on the timeline. `matching.normalize_timestamp` coerces
@@ -80,6 +85,30 @@ which is what cross-provider dedup keys on. Same rule for `message_id` vs `rfc_m
 **The MCP adapter is the deliberate exception** — it emits `uid`/`message_id` verbatim. Everything
 attached before the migration is stored under the bare MCP uid, so namespacing it would make each one
 fail the already-attached check and re-attach as a duplicate.
+
+### Upcoming events (the other direction)
+
+`services/upcoming.py` + `routers/calendar.py` run the match pipeline backwards: the home screen
+lists the next fortnight across every calendar, and creating a meeting from one event prefills title,
+time and speaker names and attaches the event in the same transaction. It reuses `matching`'s
+`dedupe_events`, `aggregate_error` and `attach_event` on purpose — three rules that must not drift
+between the two entry points, the last one because a column added to one INSERT and not the other is
+how `attached_context` starts feeding the summarizer NULLs.
+
+`MAX_DAYS` is **30, not 31**: the window starts at midnight this morning, so asking for 31 would push
+past Zoho's hard 31-day range cap and fail that one account.
+
+The create route takes the **event payload back from the client**. There is nothing to look up —
+the listing is not persisted and no provider offers fetch-by-uid — and it is safe because
+integrations are per-user: a forged payload only writes a meeting onto the caller's own thread with
+a title they could have typed. Field lengths are bounded so it cannot become a way to write
+megabytes into `raw_json`.
+
+**`EventCandidate.attendees` is what "prefill the speakers" runs on.** Display names, organizer
+first, rooms and decliners dropped. Google and CalDAV map their documented shapes explicitly;
+Zoho and MCP go through `base.coerce_attendees`, which drops an unrecognised entry rather than
+failing the search. `attendee_label` unpacks `first.last@` into "First Last" but leaves a
+separator-less local part alone — "jsmith" is not improved by becoming "Jsmith".
 
 **Aggregate errors only when every account of a kind failed.** `match_runs.calendar_error` /
 `email_error` are derived; per-account detail is in `source_errors_json`. Setting the aggregate on any

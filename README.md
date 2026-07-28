@@ -28,6 +28,7 @@ new password immediately; nothing else in the app is reachable until you do.
 | **Summarize** | An LLM writes a summary, decisions, open questions and action items. Runs automatically, and can be regenerated at any time. |
 | **Rename speakers** | `SPEAKER_00` → `Donna`, applied at render time. The stored diarization is never rewritten. |
 | **Match** | Searches the calendar and email accounts *you* connected, has the LLM rank what comes back, and you tick what to attach. |
+| **Upcoming** | The home screen lists the next two weeks across every connected calendar. Create a meeting from any event and its title, time and invitees are prefilled and the event is attached. |
 
 ## Configuration
 

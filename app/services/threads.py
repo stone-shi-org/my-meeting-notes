@@ -170,6 +170,28 @@ def create_meeting(
     return require_meeting(conn, cur.lastrowid)  # type: ignore[arg-type]
 
 
+def seed_speaker_names(conn: sqlite3.Connection, meeting_id: int, names: list[str]) -> int:
+    """Park names the user gave before the recording was processed.
+
+    They land on placeholder ids because the real SPEAKER_nn labels don't exist
+    until diarization returns; the UI maps them afterwards by talk time. Shared
+    by the upload form and by "create a meeting from a calendar event", which
+    seeds them from the event's attendees.
+    """
+    parsed = [n.strip() for n in names if n and n.strip()]
+    for i, name in enumerate(parsed):
+        conn.execute(
+            """
+            INSERT INTO speaker_map (meeting_id, speaker_id, display_name, sort_order,
+                                     source, updated_at)
+            VALUES (?, ?, ?, ?, 'user_hint', ?)
+            ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET display_name = excluded.display_name
+            """,
+            (meeting_id, f"HINT_{i:02d}", name, i, utcnow()),
+        )
+    return len(parsed)
+
+
 def list_meetings(
     conn: sqlite3.Connection,
     *,

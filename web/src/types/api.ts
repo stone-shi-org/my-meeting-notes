@@ -249,10 +249,49 @@ export interface CalendarEvent {
   calendar_name: string | null;
   account: string | null;
   type?: string | null;
+  /** Display names, organizer first. Prefilled as speaker names. */
+  attendees?: string[];
   relevance_score: number | null;
   relevance_reason: string | null;
   suggested?: boolean;
   attached_at?: string;
+}
+
+/** One event on the home screen's upcoming list. */
+export interface UpcomingEvent {
+  uid: string;
+  summary: string | null;
+  description: string | null;
+  location: string | null;
+  start: string | null;
+  end: string | null;
+  attendees: string[];
+  calendar_name: string | null;
+  account: string | null;
+  type: string | null;
+  url: string | null;
+  source_uid: string | null;
+  provider: string | null;
+  integration_id: number | null;
+  /** Set once a meeting has been created from it; null while it is still open. */
+  attached: { thread_id: number; meeting_id: number | null; meeting_title: string | null } | null;
+}
+
+export interface UpcomingList {
+  /** Calendar accounts searched. Zero means "connect one" rather than "none due". */
+  connected: number;
+  start: string;
+  end: string;
+  events: UpcomingEvent[];
+  /** Set only when every calendar failed; per-account detail is below. */
+  error: string | null;
+  source_errors: {
+    kind: string;
+    provider: string;
+    integration_id: number;
+    account: string;
+    error: string;
+  }[];
 }
 
 export interface Email {

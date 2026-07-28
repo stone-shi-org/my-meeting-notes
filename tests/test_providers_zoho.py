@@ -128,6 +128,43 @@ class TestCalendar:
         assert event.calendar_name == "Work"
 
     @respx.mock
+    async def test_attendees_survive_zohos_several_spellings(self, provider):
+        """Zoho names the organizer differently depending on how the event was
+        created, and attendee objects carry the display name as ``dname``."""
+        respx.get(CALENDARS).mock(
+            return_value=httpx.Response(200, json={"calendars": [{"uid": "c1", "name": "Work"}]})
+        )
+        respx.get(f"{CALENDARS}/c1/events").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "events": [
+                        {
+                            "uid": "evt-1",
+                            "title": "Atlas standup",
+                            "dateandtime": {"start": "20260318T090000+0000"},
+                            "organizer": "donna@example.com",
+                            "attendees": [
+                                {"email": "priya.raman@example.com", "dname": "Priya Raman"},
+                                {"email": "jsmith@example.com"},
+                                # A shape we do not recognise drops that one
+                                # attendee rather than failing the search.
+                                {"zuid": 12345},
+                            ],
+                        }
+                    ]
+                },
+            )
+        )
+
+        [event] = await provider.search_events(query=None, start=START, end=END)
+        # "priya.raman" unpacks into a name; "donna" and "jsmith" are left as
+        # addresses rather than being mangled into "Donna" and "Jsmith".
+        assert event.attendees == (
+            "donna@example.com", "Priya Raman", "jsmith@example.com",
+        )
+
+    @respx.mock
     async def test_one_failing_calendar_does_not_lose_the_others(self, provider):
         respx.get(CALENDARS).mock(
             return_value=httpx.Response(

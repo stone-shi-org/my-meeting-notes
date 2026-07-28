@@ -83,6 +83,57 @@ class TestCalendar:
         assert event.source_uid == "series-abc@google.com"
 
     @respx.mock
+    async def test_attendees_are_organizer_first_and_exclude_rooms(self, provider):
+        """These become prefilled speaker names, so a room is worse than nothing."""
+        respx.get(CALENDAR_LIST).mock(
+            return_value=httpx.Response(200, json={"items": [{"id": "c1", "summary": "Work"}]})
+        )
+        respx.get(events_route("c1")).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "items": [
+                        {
+                            "id": "e1",
+                            "summary": "Standup",
+                            "start": {"dateTime": "2026-03-18T09:00:00Z"},
+                            "end": {"dateTime": "2026-03-18T09:30:00Z"},
+                            "organizer": {"displayName": "Donna Chen", "email": "donna@x.com"},
+                            "attendees": [
+                                {"displayName": "Donna Chen", "email": "donna@x.com"},
+                                {"email": "priya.raman@x.com"},
+                                {"email": "jsmith@x.com"},
+                                {"displayName": "Room 4B", "email": "r4b@x.com",
+                                 "resource": True},
+                                {"displayName": "Sam Okafor", "email": "sam@x.com",
+                                 "responseStatus": "declined"},
+                            ],
+                        }
+                    ]
+                },
+            )
+        )
+
+        [event] = await provider.search_events(query=None, start=START, end=END)
+
+        assert event.attendees == ("Donna Chen", "Priya Raman", "jsmith@x.com")
+
+    @respx.mock
+    async def test_the_fields_mask_asks_for_attendees(self, provider):
+        """Omit them from the mask and Google returns none, silently."""
+        respx.get(CALENDAR_LIST).mock(
+            return_value=httpx.Response(200, json={"items": [{"id": "c1", "summary": "W"}]})
+        )
+        route = respx.get(events_route("c1")).mock(
+            return_value=httpx.Response(200, json={"items": []})
+        )
+        await provider.search_events(query=None, start=START, end=END)
+
+        fields = dict(route.calls[0].request.url.params)["fields"]
+        assert "attendees(" in fields
+        assert "organizer(" in fields
+
+    @respx.mock
     async def test_recurring_instances_stay_distinct(self, provider):
         """Both occurrences share one iCalUID. Keying on it would lose one."""
         respx.get(CALENDAR_LIST).mock(

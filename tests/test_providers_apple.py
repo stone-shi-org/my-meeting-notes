@@ -171,6 +171,31 @@ class TestRecurrence:
         assert dentist.url is None, "iCloud has no per-event web link"
 
 
+class TestAttendees:
+    """Prefilled speaker names when a meeting is created from an event."""
+
+    async def test_cn_and_address_both_become_names(self, provider, icloud):
+        """CAL-ADDRESS values are "mailto:…"; the human name is on the CN param."""
+        events = await provider.search_events(query=None, start=START, end=END)
+        standup = next(e for e in events if e.start.startswith("2026-03-11"))
+
+        # Organizer first, then attendees; the CN-less one is unpacked from its
+        # local part, and the organizer's duplicate attendee entry is collapsed.
+        assert standup.attendees == ("Donna Chen", "Priya Raman")
+
+    async def test_rooms_and_decliners_are_left_out(self, provider, icloud):
+        events = await provider.search_events(query=None, start=START, end=END)
+        standup = next(e for e in events if e.start.startswith("2026-03-11"))
+
+        assert "Room 4B" not in standup.attendees
+        assert "Sam Okafor" not in standup.attendees
+
+    async def test_an_event_with_no_attendees_has_none(self, provider, icloud):
+        events = await provider.search_events(query=None, start=START, end=END)
+        [dentist] = [e for e in events if e.summary == "Dentist"]
+        assert dentist.attendees == ()
+
+
 class TestCalDavRequest:
     async def test_the_report_carries_a_utc_time_range(self, provider, icloud):
         await provider.search_events(query=None, start=START, end=END)

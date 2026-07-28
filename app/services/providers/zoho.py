@@ -33,6 +33,7 @@ from app.services.providers.base import (
     Check,
     EmailCandidate,
     EventCandidate,
+    coerce_attendees,
     test_result,
 )
 from app.services.providers.query import zoho_range
@@ -264,6 +265,11 @@ class ZohoProvider(BaseProvider):
             location=item.get("location"),
             start=start,
             end=parse_stamp(when.get("end")),
+            # Zoho spells the organizer several ways depending on how the event
+            # was created; coerce_attendees drops whichever ones are absent.
+            attendees=coerce_attendees(
+                [item.get("organizer") or item.get("createdby"), *(item.get("attendees") or [])]
+            ),
             calendar_name=calendar.get("name") or calendar.get("displayname"),
             account=self.ref.account_label,
             type="zoho",

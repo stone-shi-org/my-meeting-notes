@@ -202,7 +202,7 @@ async def upload_meeting(
     )
 
     if speaker_names:
-        _seed_speaker_names(conn, meeting_id, speaker_names)
+        threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
 
     job_id = queue_mod.create_job(
         conn,
@@ -232,25 +232,6 @@ async def upload_meeting(
         "job_id": job_id,
         "bytes": written,
     }
-
-
-def _seed_speaker_names(conn: sqlite3.Connection, meeting_id: int, names: str) -> None:
-    """Park names given at upload time.
-
-    They land on placeholder ids because the real SPEAKER_nn labels don't exist
-    until diarization returns; the UI maps them afterwards by talk time.
-    """
-    parsed = [n.strip() for n in names.split(",") if n.strip()]
-    for i, name in enumerate(parsed):
-        conn.execute(
-            """
-            INSERT INTO speaker_map (meeting_id, speaker_id, display_name, sort_order,
-                                     source, updated_at)
-            VALUES (?, ?, ?, ?, 'user_hint', ?)
-            ON CONFLICT(meeting_id, speaker_id) DO UPDATE SET display_name = excluded.display_name
-            """,
-            (meeting_id, f"HINT_{i:02d}", name, i, utcnow()),
-        )
 
 
 @router.get("/{meeting_id}", response_model=MeetingOut)

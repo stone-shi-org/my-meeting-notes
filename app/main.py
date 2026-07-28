@@ -17,6 +17,7 @@ from app.logging_config import configure_logging, get_logger
 from app.jobs.queue import JobQueue, set_queue
 from app.routers import (
     auth,
+    calendar,
     integrations,
     jobs,
     matching,
@@ -129,6 +130,7 @@ def create_app() -> FastAPI:
     app.include_router(transcripts.router)
     app.include_router(summaries.router)
     app.include_router(matching.router)
+    app.include_router(calendar.router)
     app.include_router(jobs.router)
     app.include_router(settings_api.router)
 

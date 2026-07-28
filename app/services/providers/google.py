@@ -31,6 +31,8 @@ from app.services.providers.base import (
     Check,
     EmailCandidate,
     EventCandidate,
+    attendee_label,
+    clean_attendees,
     test_result,
 )
 from app.services.providers.query import build_gmail_query
@@ -163,7 +165,8 @@ class GoogleProvider(BaseProvider):
                         "maxResults": 250,
                         "fields": (
                             "items(id,iCalUID,summary,description,location,start,end,"
-                            "htmlLink,status)"
+                            "htmlLink,status,organizer(displayName,email),"
+                            "attendees(displayName,email,responseStatus,resource))"
                         ),
                     },
                 )
@@ -185,6 +188,21 @@ class GoogleProvider(BaseProvider):
             events.extend(batch)
         return events
 
+    @staticmethod
+    def _attendees(item: dict) -> tuple[str, ...]:
+        """Organizer first, then whoever has not declined.
+
+        Rooms and equipment are attendees as far as Google is concerned, and
+        "Meeting Room 4" prefilled as a speaker name is worse than nothing.
+        """
+        organizer = item.get("organizer") or {}
+        people = [attendee_label(organizer.get("displayName"), organizer.get("email"))]
+        for person in item.get("attendees") or []:
+            if person.get("resource") or person.get("responseStatus") == "declined":
+                continue
+            people.append(attendee_label(person.get("displayName"), person.get("email")))
+        return clean_attendees(people)
+
     def _to_event(self, item: dict, calendar: dict) -> EventCandidate:
         return EventCandidate(
             # `id` is per-instance once singleEvents expands a recurrence;
@@ -196,6 +214,7 @@ class GoogleProvider(BaseProvider):
             location=item.get("location"),
             start=_when(item.get("start")),
             end=_when(item.get("end")),
+            attendees=self._attendees(item),
             calendar_name=calendar.get("summary"),
             account=self.ref.account_label,
             type="google",

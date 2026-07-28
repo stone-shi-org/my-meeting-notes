@@ -17,9 +17,20 @@ selects -- and therefore what the summarizer sees -- are always populated.
 
 from __future__ import annotations
 
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-from typing import Protocol, runtime_checkable
+from email.utils import parseaddr
+from typing import Iterable, Protocol, runtime_checkable
+
+# Attendee lists are prefilled as speaker names when a meeting is created from an
+# event, so they are bounded: a 300-person all-hands invite is not a speaker list,
+# and the whole list would otherwise be persisted three times per match run.
+MAX_ATTENDEES = 24
+
+# Only these are unpacked from an address local part. "jsmith" is not improved by
+# becoming "Jsmith", but "jane.doe" genuinely is "Jane Doe".
+_LOCAL_PART_SEPARATORS = re.compile(r"[._-]+")
 
 
 def make_uid(provider: str, integration_id: int, native_instance_key: str) -> str:
@@ -35,6 +46,85 @@ def make_uid(provider: str, integration_id: int, native_instance_key: str) -> st
     return f"{provider}:{integration_id}:{native_instance_key}"
 
 
+def attendee_label(display_name: str | None, email: str | None) -> str | None:
+    """A human name for one attendee, or None if there is nothing usable.
+
+    Prefers whatever the server calls them. Falling back to the address, a
+    ``first.last@`` local part is unpacked into "First Last" -- these become
+    prefilled speaker names, and a bare mailbox reads as a bug in a transcript
+    header.
+    """
+    name = (display_name or "").strip()
+    if name:
+        return name
+
+    address = (email or "").strip()
+    if not address:
+        return None
+
+    local = address.split("@", 1)[0]
+    if not _LOCAL_PART_SEPARATORS.search(local):
+        return address
+    return _LOCAL_PART_SEPARATORS.sub(" ", local).strip().title() or address
+
+
+def clean_attendees(labels: Iterable[str | None]) -> tuple[str, ...]:
+    """Normalise a provider's attendee labels: no blanks, no repeats, bounded.
+
+    Case-insensitive dedup, because the organizer usually appears in the
+    attendee list too and the two spellings rarely match exactly.
+    """
+    out: list[str] = []
+    seen: set[str] = set()
+    for label in labels:
+        name = (label or "").strip()
+        if not name:
+            continue
+        key = name.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(name)
+        if len(out) >= MAX_ATTENDEES:
+            break
+    return tuple(out)
+
+
+def coerce_attendees(raw: object) -> tuple[str, ...]:
+    """Best-effort attendees out of a payload whose shape we do not control.
+
+    Zoho and the MCP servers both return free-form JSON here, spelled
+    differently, and neither documents the shape as stable -- so an unexpected
+    value drops that one attendee rather than failing the whole search. Google
+    and CalDAV have documented shapes and map their fields explicitly instead.
+    """
+    if raw is None:
+        return ()
+
+    items = raw if isinstance(raw, (list, tuple)) else [raw]
+    labels: list[str | None] = []
+
+    for item in items:
+        if isinstance(item, str):
+            # Covers "Jane Doe", "jane@x.com" and "Jane Doe <jane@x.com>" alike.
+            realname, address = parseaddr(item)
+            labels.append(attendee_label(realname, address) or item.strip())
+        elif isinstance(item, dict):
+            name = next(
+                (item[k] for k in ("displayName", "display_name", "dname", "name", "cn")
+                 if isinstance(item.get(k), str)),
+                None,
+            )
+            address = next(
+                (item[k] for k in ("email", "attendee", "address", "mail")
+                 if isinstance(item.get(k), str)),
+                None,
+            )
+            labels.append(attendee_label(name, address))
+
+    return clean_attendees(labels)
+
+
 @dataclass(frozen=True, slots=True)
 class EventCandidate:
     """A calendar event, in the shape the matching pipeline and DB expect."""
@@ -45,6 +135,9 @@ class EventCandidate:
     location: str | None = None
     start: str | None = None
     end: str | None = None
+    # Display names, organizer first. Prefilled as speaker names when a meeting
+    # is created from the event; never an address list to send anything to.
+    attendees: tuple[str, ...] = ()
     calendar_name: str | None = None
     account: str | None = None
     type: str | None = None

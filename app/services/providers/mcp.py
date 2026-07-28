@@ -20,6 +20,7 @@ from app.services.providers.base import (
     Check,
     EmailCandidate,
     EventCandidate,
+    coerce_attendees,
     test_result,
 )
 from app.services.providers.query import build_gmail_query, iso_date
@@ -118,6 +119,11 @@ class McpCalendarProvider(_McpBase):
             location=item.get("location"),
             start=item.get("start"),
             end=item.get("end"),
+            # Servers vary: a list of addresses, of names, or of objects. Any
+            # entry that fits none of those shapes is dropped, not guessed at.
+            attendees=coerce_attendees(
+                [item.get("organizer"), *(item.get("attendees") or [])]
+            ),
             calendar_name=item.get("calendar_name"),
             account=item.get("account"),
             type=item.get("type"),

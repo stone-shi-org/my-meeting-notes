@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { api, uploadMeeting } from '@/lib/api';
 import { watchJob } from '@/hooks/useJob';
+import { localDatetimeValue } from '@/lib/calendar';
 import { cn } from '@/lib/cn';
 import type { Paginated, Thread } from '@/types/api';
 
@@ -17,11 +18,6 @@ function fmtBytes(bytes: number): string {
   if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
   if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
   return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
-
-function localDatetimeValue(date = new Date()): string {
-  const offset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }
 
 export function NewMeetingPage() {

@@ -2,6 +2,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tansta
 import { CalendarDays, Layers, Mail, Mic, Plus, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
+import { UpcomingPanel } from '@/components/calendar/UpcomingPanel';
 import { Button } from '@/components/ui/Button';
 import {
   Badge,
@@ -238,6 +239,10 @@ export function ThreadsPage() {
           </Button>
         </div>
       </div>
+
+      {/* Above the thread list: what is coming up is the more time-sensitive of
+          the two, and it is where a new meeting usually starts. */}
+      <UpcomingPanel />
 
       <Card className="p-3">
         <div className="flex flex-wrap items-center gap-3">

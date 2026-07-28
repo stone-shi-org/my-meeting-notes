@@ -232,7 +232,7 @@ async def gather_candidates(
         bucket = events if kind == "calendar" else emails
         bucket.extend(candidate.to_dict() for candidate in result)
 
-    events = _dedupe_events(events, attached_uids)
+    events = dedupe_events(events, attached_uids)
     emails = _dedupe_emails(emails, attached_msgs)
 
     # Nearest-in-time first, so the cap keeps what is most likely to matter.
@@ -257,8 +257,8 @@ async def gather_candidates(
     # only when a kind had sources and every one of them failed -- a kind with no
     # sources at all is a configuration choice, not an error, and reporting it
     # would make every search 'partial' for a user who only connected email.
-    calendar_error = _aggregate_error(source_errors, "calendar", calendar_sources, failures)
-    email_error = _aggregate_error(source_errors, "email", email_sources, failures)
+    calendar_error = aggregate_error(source_errors, "calendar", calendar_sources, failures)
+    email_error = aggregate_error(source_errors, "email", email_sources, failures)
 
     status = "ok"
     if calendar_error and email_error:
@@ -297,9 +297,15 @@ async def gather_candidates(
     }
 
 
-def _aggregate_error(
+def aggregate_error(
     source_errors: list[dict], kind: str, sources: list, failures: dict[str, int]
 ) -> str | None:
+    """The banner-level error for one kind of source, or None.
+
+    Public because the upcoming-events listing fans out the same way and has to
+    apply the same rule: set it only when *every* account of that kind failed,
+    or adding a second calendar makes every search look broken.
+    """
     if not sources or failures[kind] < len(sources):
         return None
     messages = [e["error"] for e in source_errors if e["kind"] == kind]
@@ -312,13 +318,16 @@ def _aggregate_error(
     )
 
 
-def _dedupe_events(events: list[dict], attached_uids: set[str]) -> list[dict]:
+def dedupe_events(events: list[dict], attached_uids: set[str]) -> list[dict]:
     """Drop already-attached events, then collapse the same event seen twice.
 
     Two providers can surface one real event (a Google account connected both
     directly and through the calendar MCP server). They agree on the provider's
     own ``source_uid`` but not on ``uid``, which is namespaced per integration --
     so the cross-provider key is (source_uid, start).
+
+    Pass an empty ``attached_uids`` to get the collapse without the filtering:
+    the upcoming-events list shows attached events rather than hiding them.
     """
     seen: set[tuple[str, str]] = set()
     out: list[dict] = []
@@ -590,6 +599,47 @@ def attached_context(conn: sqlite3.Connection, meeting_id: int) -> dict:
     }
 
 
+def attach_event(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: int,
+    meeting_id: int,
+    event: dict,
+    user_id: int,
+) -> None:
+    """Write one calendar event onto a thread. Idempotent per (thread, uid).
+
+    The single place that knows this column list: the match-confirm flow and the
+    "create a meeting from an upcoming event" flow both land here, and a column
+    added in one but not the other is exactly how ``attached_context`` -- and so
+    the summarizer -- ends up reading a NULL.
+    """
+    conn.execute(
+        """
+        INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, url, summary,
+            description, location, start_at, end_at, calendar_name, account,
+            event_type, raw_json, relevance_score, relevance_reason,
+            source_uid, provider, attached_by, attached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id, uid) DO UPDATE SET
+            meeting_id = excluded.meeting_id,
+            relevance_score = excluded.relevance_score,
+            relevance_reason = excluded.relevance_reason
+        """,
+        (
+            thread_id, meeting_id, event.get("uid"), event.get("url"),
+            event.get("summary"), event.get("description"), event.get("location"),
+            normalize_timestamp(event.get("start")),
+            normalize_timestamp(event.get("end")),
+            event.get("calendar_name"), event.get("account"),
+            event.get("type"), json.dumps(event),
+            event.get("relevance_score"), event.get("relevance_reason"),
+            event.get("source_uid"), event.get("provider"),
+            user_id, utcnow(),
+        ),
+    )
+
+
 def attach_selected(
     conn: sqlite3.Connection,
     *,
@@ -617,29 +667,12 @@ def attach_selected(
         if event is None:
             continue
         chosen_event = chosen_event or event
-        conn.execute(
-            """
-            INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, url, summary,
-                description, location, start_at, end_at, calendar_name, account,
-                event_type, raw_json, relevance_score, relevance_reason,
-                source_uid, provider, attached_by, attached_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(thread_id, uid) DO UPDATE SET
-                meeting_id = excluded.meeting_id,
-                relevance_score = excluded.relevance_score,
-                relevance_reason = excluded.relevance_reason
-            """,
-            (
-                thread_id, meeting_id, uid, event.get("url"), event.get("summary"),
-                event.get("description"), event.get("location"),
-                normalize_timestamp(event.get("start")),
-                normalize_timestamp(event.get("end")),
-                event.get("calendar_name"), event.get("account"),
-                event.get("type"), json.dumps(event),
-                event.get("relevance_score"), event.get("relevance_reason"),
-                event.get("source_uid"), event.get("provider"),
-                user_id, utcnow(),
-            ),
+        attach_event(
+            conn,
+            thread_id=thread_id,
+            meeting_id=meeting_id,
+            event=event,
+            user_id=user_id,
         )
         attached_events += 1
 

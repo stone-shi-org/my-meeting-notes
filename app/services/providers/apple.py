@@ -100,6 +100,7 @@ class AppleProvider(BaseProvider):
             location=event.get("location"),
             start=event.get("start"),
             end=event.get("end"),
+            attendees=tuple(event.get("attendees") or ()),
             calendar_name=calendar_name,
             account=self.ref.account_label,
             type="caldav",

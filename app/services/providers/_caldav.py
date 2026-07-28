@@ -25,6 +25,7 @@ import httpx
 
 from app.errors import IntegrationAuthError, ProviderError
 from app.logging_config import get_logger
+from app.services.providers.base import attendee_label, clean_attendees
 
 log = get_logger("providers.caldav")
 
@@ -219,6 +220,32 @@ def _stamp(event, key: str) -> str | None:
     return value.isoformat()
 
 
+def _people(event) -> tuple[str, ...]:
+    """ORGANIZER and ATTENDEE as display names, organizer first.
+
+    Both properties are ``CAL-ADDRESS`` values -- "mailto:jane@x.com" -- with the
+    human name hanging off the ``CN`` parameter, and either can appear once or
+    many times, so icalendar hands back a bare value or a list depending on the
+    event. Rooms and declined invitees are skipped: neither is a speaker.
+    """
+    labels: list[str | None] = []
+    for key in ("ORGANIZER", "ATTENDEE"):
+        node = event.get(key)
+        if node is None:
+            continue
+        for entry in node if isinstance(node, list) else [node]:
+            params = getattr(entry, "params", None) or {}
+            if str(params.get("CUTYPE") or "").upper() in {"ROOM", "RESOURCE"}:
+                continue
+            if str(params.get("PARTSTAT") or "").upper() == "DECLINED":
+                continue
+            address = str(entry)
+            if address.lower().startswith("mailto:"):
+                address = address[len("mailto:"):]
+            labels.append(attendee_label(params.get("CN"), address))
+    return clean_attendees(labels)
+
+
 def _to_dict(event) -> dict:
     return {
         "uid": _value(event, "UID"),
@@ -227,6 +254,7 @@ def _to_dict(event) -> dict:
         "location": _value(event, "LOCATION"),
         "start": _stamp(event, "DTSTART"),
         "end": _stamp(event, "DTEND"),
+        "attendees": _people(event),
         # Distinguishes one occurrence of a series from another; the app-level
         # uid is built from it.
         "recurrence_id": _stamp(event, "RECURRENCE-ID"),
