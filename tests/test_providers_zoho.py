@@ -289,3 +289,74 @@ class TestConnectionTest:
         checks = {c["name"]: c["ok"] for c in result["checks"]}
         assert checks == {"authorisation": True, "calendar": True, "mail": False}
         assert result["ok"] is False
+
+
+class TestIdentity:
+    """Regression cover for a live failure: the first real connect attempt got a
+    401 from /oauth/user/info and surfaced as a bare 500."""
+
+    def test_the_profile_scope_is_requested(self):
+        """Zoho has no "email" scope, and /oauth/user/info needs this one. A
+        grant is fixed at consent time, so getting it wrong here cannot be
+        repaired later in the flow."""
+        from app.services.providers.zoho import SCOPES
+
+        assert "AaaServer.profile.READ" in SCOPES
+        assert "email" not in SCOPES
+
+    @pytest.mark.parametrize(
+        "server,expected",
+        [
+            ("https://accounts.zoho.com", "com"),
+            ("https://accounts.zoho.eu", "eu"),
+            ("https://accounts.zoho.com.au", "com.au"),
+            ("accounts.zoho.in", "in"),
+            ("", None),
+            (None, None),
+            ("https://example.test", None),
+        ],
+    )
+    def test_the_data_centre_is_read_off_the_callback(self, server, expected):
+        """Zoho appends accounts-server to the redirect, and a token is only
+        valid in the DC that issued it -- more trustworthy than a config field."""
+        from app.services.providers.zoho import dc_from_accounts_server
+
+        assert dc_from_accounts_server(server) == expected
+
+    def test_the_callback_hint_beats_the_configured_default(self):
+        from app.services.providers.zoho import resolve_dc
+
+        assert resolve_dc(None, {"accounts_server": "https://accounts.zoho.eu"}) == "eu"
+        assert resolve_dc(None, {}) == "com"
+
+    @respx.mock
+    def test_a_401_becomes_a_readable_error_not_a_500(self):
+        """What the user actually hit. httpx's raise_for_status here escaped as
+        an unhandled exception and the browser got "internal error"."""
+        from app.services.providers.zoho import fetch_identity
+
+        respx.get("https://accounts.zoho.com/oauth/user/info").mock(
+            return_value=httpx.Response(401, json={})
+        )
+        with pytest.raises(IntegrationAuthError) as exc:
+            fetch_identity("at-1")
+
+        message = str(exc.value)
+        assert "AaaServer.profile.READ" in message
+        assert "data centre" in message
+
+    @respx.mock
+    def test_identity_uses_the_zoho_header_and_reports_the_dc(self):
+        from app.services.providers.zoho import fetch_identity
+
+        route = respx.get("https://accounts.zoho.eu/oauth/user/info").mock(
+            return_value=httpx.Response(
+                200, json={"ZUID": "778899", "Email": "me@zoho.eu"}
+            )
+        )
+        identity = fetch_identity(
+            "at-1", None, hints={"accounts_server": "https://accounts.zoho.eu"}
+        )
+
+        assert route.calls[0].request.headers["authorization"] == "Zoho-oauthtoken at-1"
+        assert identity == {"account_key": "778899", "email": "me@zoho.eu", "dc": "eu"}

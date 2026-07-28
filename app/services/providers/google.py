@@ -81,11 +81,11 @@ def client_for(conn) -> oauth.OAuthClient:
     )
 
 
-def fetch_identity(access_token: str, conn=None) -> dict:
+def fetch_identity(access_token: str, conn=None, *, hints: dict | None = None) -> dict:
     """Who just authorised us. Called in the callback, before any row exists.
 
-    ``conn`` is unused here but keeps the signature uniform across providers;
-    Zoho needs it to know which data centre to ask.
+    ``conn`` and ``hints`` are unused here but keep the signature uniform across
+    providers; Zoho needs both to know which data centre to ask.
     """
     with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as http:
         response = http.get(

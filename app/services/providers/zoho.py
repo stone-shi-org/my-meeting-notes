@@ -44,7 +44,10 @@ DEFAULT_DC = "com"
 MAX_RANGE_DAYS = 31
 
 SCOPES = (
-    "email",
+    # Zoho has no "email" scope. /oauth/user/info -- the only way to learn which
+    # account just authorised us -- requires this one, and a grant is fixed at
+    # consent time, so omitting it here cannot be repaired at the token step.
+    "AaaServer.profile.READ",
     "ZohoMail.accounts.READ",
     "ZohoMail.messages.READ",
     "ZohoCalendar.calendar.READ",
@@ -54,6 +57,22 @@ SCOPES = (
 
 def data_centre(conn) -> str:
     return (effective(conn, "zoho_dc") or DEFAULT_DC).strip().lstrip(".") or DEFAULT_DC
+
+
+def dc_from_accounts_server(url: str | None) -> str | None:
+    """Read the data centre out of the ``accounts-server`` the callback carries.
+
+    Zoho appends ``location`` and ``accounts-server`` to the redirect, and a token
+    is only valid in the DC that issued it. Trusting that beats trusting a
+    configured default, which is exactly the thing a user gets wrong.
+    """
+    if not url:
+        return None
+    host = str(url).split("://")[-1].strip("/")
+    prefix = "accounts.zoho."
+    if prefix not in host:
+        return None
+    return host.split(prefix, 1)[1] or None
 
 
 def accounts_host(dc: str) -> str:
@@ -81,19 +100,37 @@ def client_for(conn) -> oauth.OAuthClient:
     )
 
 
-def fetch_identity(access_token: str, conn=None) -> dict:
-    dc = data_centre(conn) if conn is not None else DEFAULT_DC
+def resolve_dc(conn=None, hints: dict | None = None) -> str:
+    """Prefer what Zoho told us on the redirect over what anyone configured."""
+    from_callback = dc_from_accounts_server((hints or {}).get("accounts_server"))
+    if from_callback:
+        return from_callback
+    return data_centre(conn) if conn is not None else DEFAULT_DC
+
+
+def fetch_identity(access_token: str, conn=None, *, hints: dict | None = None) -> dict:
+    dc = resolve_dc(conn, hints)
     with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as http:
         response = http.get(
             f"{accounts_host(dc)}/oauth/user/info",
             headers={"Authorization": f"Zoho-oauthtoken {access_token}"},
         )
-    response.raise_for_status()
+
+    if response.status_code >= 400:
+        # Typed, so the callback can redirect with something readable instead of
+        # letting an httpx error surface as a bare 500.
+        raise IntegrationAuthError(
+            f"Zoho would not identify the account (HTTP {response.status_code} from "
+            f"accounts.zoho.{dc}). Usually the AaaServer.profile.READ scope was not "
+            "granted, or the account lives in a different data centre."
+        )
+
     body = response.json()
-    # Zoho's OIDC payload capitalises its keys.
+    # Zoho capitalises its keys.
     return {
         "account_key": str(body.get("ZUID") or body.get("Email") or ""),
         "email": body.get("Email"),
+        "dc": dc,
     }
 
 

@@ -9,14 +9,15 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import datetime, timedelta, timezone
+from urllib.parse import quote
 
-from fastapi import APIRouter, Cookie, Depends, Response
+from fastapi import APIRouter, Cookie, Depends, Query, Response
 from fastapi.responses import RedirectResponse
 
 from app.config import get_settings
 from app.db import utcnow
 from app.deps import CurrentUser, active_user, get_db
-from app.errors import ValidationError
+from app.errors import IntegrationAuthError, ValidationError
 from app.logging_config import get_logger
 from app.schemas import (
     CreateIntegrationRequest,
@@ -71,11 +72,12 @@ def my_summary(
 # anything the account needs remembering at connect time -- Zoho's data centre,
 # for instance, which is a property of the account rather than of the app.
 OAUTH_CLIENTS = {
-    "google": (google.client_for, google.fetch_identity, lambda conn: {}),
+    "google": (google.client_for, google.fetch_identity, lambda conn, hints: {}),
     "zoho": (
         zoho.client_for,
         zoho.fetch_identity,
-        lambda conn: {"dc": zoho.data_centre(conn)},
+        # Pinned from what Zoho reported on the redirect, falling back to config.
+        lambda conn, hints: {"dc": zoho.resolve_dc(conn, hints)},
     ),
 }
 
@@ -116,6 +118,8 @@ def oauth_callback(
     state: str = "",
     code: str = "",
     error: str = "",
+    location: str = "",
+    accounts_server: str = Query(default="", alias="accounts-server"),
     mmn_oauth_nonce: str | None = Cookie(default=None),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> RedirectResponse:
@@ -137,9 +141,23 @@ def oauth_callback(
     payload = oauth.parse_state(state, mmn_oauth_nonce)
     user_id = payload["u"]
 
+    # Some providers report which region issued the token; a token is only valid
+    # in the data centre that minted it.
+    hints = {"location": location, "accounts_server": accounts_server}
+
     client = build_client(conn)
-    granted = oauth.exchange_code(client, code, oauth.redirect_uri(conn, provider))
-    identity = fetch_identity(granted["access_token"], conn)
+    try:
+        granted = oauth.exchange_code(client, code, oauth.redirect_uri(conn, provider))
+        identity = fetch_identity(granted["access_token"], conn, hints=hints)
+    except (oauth.OAuthError, IntegrationAuthError) as exc:
+        # The browser is mid-redirect; a 500 here reads as "the app is broken"
+        # when the actual problem is a scope or a data centre.
+        log.warning("%s connect failed for user %s: %s", provider, user_id, exc)
+        return RedirectResponse(
+            f"{settings_url}?error={quote(str(getattr(exc, 'message', exc))[:300])}",
+            status_code=303,
+        )
+
     if not identity.get("account_key"):
         return RedirectResponse(f"{settings_url}?error=no_identity", status_code=303)
 
@@ -184,7 +202,7 @@ def oauth_callback(
             provider=provider,
             account_key=identity["account_key"],
             account_label=identity.get("email") or identity["account_key"],
-            config=initial_config(conn),
+            config=initial_config(conn, hints),
             secret=secret,
             status="ok",
             scopes=granted.get("scope"),
