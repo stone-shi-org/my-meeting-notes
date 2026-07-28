@@ -84,6 +84,32 @@ Users then click **Add integration → Google → Continue**. The app asks for r
 Gmail access. `gmail.readonly` is a *restricted* scope; there is no lighter alternative, because the
 metadata-only scope forbids the search query the feature is built on.
 
+#### Apple iCloud (Calendar + Mail)
+
+Apple offers no OAuth for iCloud, so this uses your Apple ID with an
+**app-specific password** — generate one at [appleid.apple.com](https://appleid.apple.com/account/manage)
+under *Sign-In and Security*. Your actual Apple ID password will be rejected.
+
+Add it under **Add integration → Apple iCloud**. Calendar goes over CalDAV and mail over IMAP, and
+the Test button reports each leg separately, because one commonly works while the other does not.
+
+Two limits worth knowing: iCloud has no per-message or per-event web URL, so attached items are not
+clickable through to a web UI, and mail is fetched headers-only, so emails have no snippet.
+
+#### Zoho (Mail + Calendar)
+
+Like Google, an admin registers one client and each user authorises their own account.
+
+1. Create a client at [api-console.zoho.com](https://api-console.zoho.com/) of type
+   *Server-based Application*, with the callback
+   `<public base url>/api/integrations/oauth/zoho/callback`.
+2. Paste the client ID and secret into **Settings → Integrations → Zoho sign-in**, and set the
+   **data centre** to match where the accounts live — `com`, `eu`, `in`, `com.au` or `jp`. Getting
+   this wrong is unhelpfully quiet: requests authenticate fine and simply return nothing.
+
+Zoho caps how many refresh tokens a client may hold at once, so repeatedly disconnecting and
+reconnecting eventually invalidates the oldest ones silently.
+
 #### MCP calendar/email servers
 
 If you run the calendarmcp / email-triage MCP servers, add them under **Add integration → Calendar

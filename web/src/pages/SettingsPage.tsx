@@ -648,6 +648,82 @@ function AddMcpForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }
   );
 }
 
+/** Apple ID + app-specific password. iCloud offers no OAuth, so this is the
+ *  only route available, not a shortcut. */
+function AddAppleForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post<Integration>('/integrations', {
+        provider: spec.id,
+        account_label: username.trim(),
+        config: { username: username.trim() },
+        secret: { username: username.trim(), password },
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      void queryClient.invalidateQueries({ queryKey: ['integrations', 'summary'] });
+      onDone();
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      <div>
+        <Label htmlFor="apple-user">Apple ID</Label>
+        <Input
+          id="apple-user"
+          className="mt-1.5"
+          value={username}
+          onChange={(e) => setUsername(e.target.value)}
+          placeholder="you@icloud.com"
+        />
+      </div>
+      <div>
+        <Label htmlFor="apple-pw">App-specific password</Label>
+        <Input
+          id="apple-pw"
+          className="mt-1.5"
+          type="password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+          placeholder="xxxx-xxxx-xxxx-xxxx"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Not your Apple ID password — iCloud rejects that. Generate one at{' '}
+          <a
+            href={spec.docs_url || 'https://appleid.apple.com/account/manage'}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="text-primary hover:underline"
+          >
+            appleid.apple.com
+          </a>{' '}
+          under Sign-In and Security.
+        </p>
+      </div>
+      {create.error && <p className="text-sm text-danger-ink">{(create.error as Error).message}</p>}
+      <div className="flex items-center gap-2">
+        <Button
+          variant="primary"
+          size="sm"
+          loading={create.isPending}
+          disabled={!username.trim() || !password}
+          onClick={() => create.mutate()}
+        >
+          Connect
+        </Button>
+        <Button variant="ghost" size="sm" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 /** Hand off to the provider's consent screen. */
 function ConnectOAuth({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }) {
   const start = useMutation({
@@ -728,6 +804,8 @@ function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
         <div className="mt-3">
           {picked.auth_type === 'oauth2' ? (
             <ConnectOAuth spec={picked} onDone={close} />
+          ) : picked.auth_type === 'password' ? (
+            <AddAppleForm spec={picked} onDone={close} />
           ) : (
             <AddMcpForm spec={picked} onDone={close} />
           )}
@@ -758,6 +836,28 @@ function OAuthClientSettings() {
         },
         { key: 'google_client_id', label: 'Google client ID' },
         { key: 'google_client_secret', label: 'Google client secret' },
+      ]}
+    />
+  );
+}
+
+function ZohoClientSettings() {
+  return (
+    <SettingsForm
+      title="Zoho sign-in (admin)"
+      description={
+        'Register a client at api-console.zoho.com with the same callback path. ' +
+        'Zoho is regional — the data centre must match where the accounts live, or ' +
+        'requests authenticate fine and return nothing.'
+      }
+      keys={[
+        { key: 'zoho_client_id', label: 'Zoho client ID' },
+        { key: 'zoho_client_secret', label: 'Zoho client secret' },
+        {
+          key: 'zoho_dc',
+          label: 'Data centre',
+          hint: 'The suffix of your Zoho domain: com, eu, in, com.au or jp.',
+        },
       ]}
     />
   );
@@ -805,6 +905,7 @@ export function IntegrationsSettingsPage() {
       <AddIntegration providers={providers.data ?? []} />
 
       {isAdmin && <OAuthClientSettings />}
+      {isAdmin && <ZohoClientSettings />}
     </div>
   );
 }

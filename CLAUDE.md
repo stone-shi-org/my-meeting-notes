@@ -122,6 +122,48 @@ first-class `reauth_required` handling.
 Gmail is an N+1: `messages.list` returns bare ids. Bound it at the *list* call (`maxResults`), fetch
 `format=metadata` with a `fields` mask, and cap concurrency at 8.
 
+### Apple
+
+No OAuth exists for iCloud — Apple ID plus an app-specific password is the only route, and it is the
+overwhelmingly common support question when someone uses their account password instead.
+
+CalDAV needs **two** discovery hops: `PROPFIND` for `current-user-principal`, then `PROPFIND` for
+`calendar-home-set`, which points at a *different* shard host (`p34-caldav…`). Everything after that
+goes to the shard.
+
+**Recurrence is expanded locally, on purpose.** iCloud's `<C:expand>` support is erratic — the same
+request has been reported returning expanded instances sometimes and the bare master other times.
+What iCloud does honour is RFC 4791 §9.9: a `time-range` filter is evaluated against the *expanded*
+set, so a series whose master `DTSTART` is a year earlier still comes back, just unexpanded with its
+`RECURRENCE-ID` overrides alongside. `recurring-ical-events` does the expansion, including in the
+event's own TZID — expanding in UTC drifts every instance by an hour after a DST change.
+
+`tests/fixtures/icloud_recurring.ics` is the highest-value fixture in the suite: a weekly series
+starting six months before the window, one `EXDATE`, one moved `RECURRENCE-ID` override, and an
+all-day `VALUE=DATE` event. All-day events keep a bare date — coercing to midnight puts them on the
+wrong day.
+
+IMAP is stdlib `imaplib` behind `asyncio.to_thread` (it blocks), opened read-only so searching never
+marks mail as read. `OR` in IMAP SEARCH is **binary and prefix**, so three terms nest as
+`OR t1 (OR t2 t3)`; a flat `OR a b c` is not an error, it just returns the wrong set.
+
+### Zoho
+
+Three quirks, all of which fail quietly rather than loudly:
+
+- The auth header is `Zoho-oauthtoken`, **not** `Bearer`.
+- Mail has no `me` alias; every path needs a numeric `accountId` fetched first.
+- `Accept: application/json+large` is required or event descriptions come back empty.
+
+`range` is mandatory on the events call and capped at 31 days — we clamp with a `ValidationError`
+rather than chunking, since the default window is ten days. Zoho is regional (`.com`/`.eu`/`.in`/
+`.com.au`/`.jp`) and the wrong data centre authenticates fine and returns nothing, so the DC is
+pinned onto the integration row at connect time. Mail search takes only an upper time bound, so the
+lower edge of the window is enforced client-side.
+
+Watch `parse_stamp`: an all-day `20260318` is *all digits*, so it must not be mistaken for an epoch
+millisecond stamp — that bug lands the event in 1970.
+
 ## Jobs
 
 In-process `asyncio.Queue` plus N workers, started in the FastAPI lifespan. No broker: Redis would
