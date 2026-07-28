@@ -240,10 +240,6 @@ export function ThreadsPage() {
         </div>
       </div>
 
-      {/* Above the thread list: what is coming up is the more time-sensitive of
-          the two, and it is where a new meeting usually starts. */}
-      <UpcomingPanel />
-
       <Card className="p-3">
         <div className="flex flex-wrap items-center gap-3">
           <form
@@ -369,6 +365,11 @@ export function ThreadsPage() {
           />
         </>
       )}
+
+      {/* Below the threads: this page is titled "Threads" and its search and
+          paging belong to that list, so the calendar sits after it rather than
+          between the heading and the thing the heading names. */}
+      <UpcomingPanel />
     </div>
   );
 }
