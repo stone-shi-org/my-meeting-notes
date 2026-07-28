@@ -101,6 +101,29 @@ class LLMReasoningTruncatedError(LLMError):
     code = "LLM_REASONING_TRUNCATED"
 
 
+class ProviderError(AppError):
+    """A connected calendar or inbox failed.
+
+    The generic case. ``MCPError`` below predates the provider abstraction and is
+    kept distinct because the SPA deep-links off its code, but a CalDAV or IMAP
+    failure is not an MCP failure and should not claim to be one.
+    """
+
+    status_code = 502
+    code = "provider_error"
+
+    def __init__(self, message: str, *, provider: str = "", kind: str = "", code: str | None = None):
+        super().__init__(message, code=code)
+        self.provider = provider
+        self.kind = kind
+
+    def to_dict(self) -> dict:
+        payload = super().to_dict()
+        payload["error"]["provider"] = self.provider
+        payload["error"]["kind"] = self.kind
+        return payload
+
+
 class MCPError(AppError):
     status_code = 502
     code = "mcp_error"

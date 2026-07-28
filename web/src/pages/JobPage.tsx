@@ -11,7 +11,7 @@ import {
   JobLogStream,
   JobStageStepper,
 } from '@/components/jobs/JobProgress';
-import { McpMatchPanel } from '@/components/mcp/McpMatchPanel';
+import { MatchPanel } from '@/components/match/MatchPanel';
 import { api } from '@/lib/api';
 import { unwatchJob, useJob } from '@/hooks/useJob';
 import type { Meeting } from '@/types/api';
@@ -170,7 +170,7 @@ export function JobPage() {
           <h2 className="mb-3 font-display text-lg font-semibold">
             {done ? 'Related items' : 'While you wait'}
           </h2>
-          <McpMatchPanel meeting={meeting.data} onAttached={() => meeting.refetch()} />
+          <MatchPanel meeting={meeting.data} onAttached={() => meeting.refetch()} />
         </div>
       )}
     </div>

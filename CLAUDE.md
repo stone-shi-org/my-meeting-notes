@@ -183,8 +183,10 @@ Progress is polled via `GET /api/jobs/{id}/events?after_id=` — works through e
 
 - Timestamps: ISO-8601 UTC `TEXT` via `db.utcnow()`. Never `datetime.now()` bare.
 - Errors: subclass `AppError`; everything renders as `{"error": {"code", "message"}}`.
-  `DIARIZATION_UNREACHABLE`, `LLM_AUTH_FAILED` and `MCP_TIMEOUT` make the SPA deep-link to the
-  relevant settings tab.
+  `DIARIZATION_UNREACHABLE`, `LLM_AUTH_FAILED`, `NO_INTEGRATIONS`, `NEEDS_REAUTH`, `provider_error`
+  and `MCP_TIMEOUT` make the SPA deep-link to the relevant settings tab. A failing account raises
+  `ProviderError` (with `kind`); `MCPError` is only for the MCP transport, since a CalDAV problem
+  reported as `mcp_error` misleads both the user and whoever debugs it next.
 - Ownership: `owner_scope()` in every list query, `assert_can_access()` on every object route.
   Someone else's row is **404, not 403** — a 403 confirms it exists.
 - Secrets are masked to `••••1234` on read; sending a masked value back means "leave unchanged".

@@ -17,7 +17,7 @@ import imaplib
 from datetime import datetime
 from email.header import decode_header, make_header
 
-from app.errors import IntegrationAuthError, MCPError
+from app.errors import IntegrationAuthError, ProviderError
 from app.logging_config import get_logger
 from app.services.providers.query import imap_date
 
@@ -66,11 +66,11 @@ def _decode(raw: str | None) -> str | None:
 def _search_sync(client, criteria: list[str], limit: int, mailbox: str) -> list[dict]:
     typ, _ = client.select(mailbox, readonly=True)
     if typ != "OK":
-        raise MCPError(f"Could not open mailbox {mailbox!r}")
+        raise ProviderError(f"Could not open mailbox {mailbox!r}", kind="email")
 
     typ, data = client.search(None, *criteria)
     if typ != "OK":
-        raise MCPError("IMAP search was rejected")
+        raise ProviderError("IMAP search was rejected", kind="email")
 
     ids = (data[0].split() if data and data[0] else [])
     # Newest first, then bound: the window can hold far more than we can show.

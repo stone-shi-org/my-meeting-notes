@@ -23,7 +23,7 @@ from xml.etree import ElementTree as ET
 
 import httpx
 
-from app.errors import IntegrationAuthError, MCPError
+from app.errors import IntegrationAuthError, ProviderError
 from app.logging_config import get_logger
 
 log = get_logger("providers.caldav")
@@ -76,7 +76,9 @@ def _parse(body: str) -> ET.Element:
     try:
         return ET.fromstring(body)
     except ET.ParseError as exc:
-        raise MCPError(f"CalDAV returned unparseable XML: {exc}") from exc
+        raise ProviderError(
+            f"CalDAV returned unparseable XML: {exc}", kind="calendar"
+        ) from exc
 
 
 async def _request(http: httpx.AsyncClient, method: str, url: str, body: str, depth: str) -> str:
@@ -92,7 +94,9 @@ async def _request(http: httpx.AsyncClient, method: str, url: str, body: str, de
             "Note it must be an app-specific password, not your account password."
         )
     if response.status_code >= 400:
-        raise MCPError(f"CalDAV {method} failed: HTTP {response.status_code}")
+        raise ProviderError(
+            f"CalDAV {method} failed: HTTP {response.status_code}", kind="calendar"
+        )
     return response.text
 
 
@@ -106,13 +110,17 @@ async def discover_calendar_home(http: httpx.AsyncClient, base_url: str) -> str:
     body = await _request(http, "PROPFIND", base_url, PROPFIND_PRINCIPAL, "0")
     node = _parse(body).find(".//d:current-user-principal/d:href", NS)
     if node is None or not node.text:
-        raise MCPError("iCloud did not return a principal for these credentials")
+        raise ProviderError(
+            "iCloud did not return a principal for these credentials", kind="calendar"
+        )
     principal_url = urljoin(base_url, node.text.strip())
 
     body = await _request(http, "PROPFIND", principal_url, PROPFIND_HOME, "0")
     home = _parse(body).find(".//c:calendar-home-set/d:href", NS)
     if home is None or not home.text:
-        raise MCPError("iCloud did not return a calendar home for this principal")
+        raise ProviderError(
+            "iCloud did not return a calendar home for this principal", kind="calendar"
+        )
     return urljoin(principal_url, home.text.strip())
 
 

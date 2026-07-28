@@ -39,8 +39,9 @@ export class ApiError extends Error {
         return '/settings/llm';
       case 'NO_INTEGRATIONS':
       case 'NEEDS_REAUTH':
-      // Still mapped after the rename: a cached bundle can raise these, and
-      // /settings/mcp redirects to the same place.
+      case 'provider_error':
+      // MCP codes stay mapped: they are still raised by the MCP provider, and a
+      // cached bundle can surface them too.
       case 'MCP_TIMEOUT':
       case 'mcp_error':
         return '/settings/integrations';

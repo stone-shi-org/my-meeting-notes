@@ -9,7 +9,7 @@ import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives
 import { ErrorState } from '@/components/ui/states';
 import { PlayerBar } from '@/components/transcript/PlayerBar';
 import { TranscriptView } from '@/components/transcript/TranscriptView';
-import { McpMatchPanel } from '@/components/mcp/McpMatchPanel';
+import { MatchPanel } from '@/components/match/MatchPanel';
 import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
 import { usePlayerStore } from '@/player/playerStore';
 import { api } from '@/lib/api';
@@ -565,7 +565,7 @@ export function TranscriptPage() {
               </Card>
             </div>
 
-            <McpMatchPanel meeting={m} onAttached={() => meeting.refetch()} />
+            <MatchPanel meeting={m} onAttached={() => meeting.refetch()} />
           </div>
 
           {showTranscript && (

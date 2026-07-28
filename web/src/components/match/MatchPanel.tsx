@@ -115,7 +115,7 @@ function CandidateRow({
  * minutes, so the user reviews matches during exactly the window they would
  * otherwise sit idle.
  */
-export function McpMatchPanel({
+export function MatchPanel({
   meeting,
   onAttached,
 }: {

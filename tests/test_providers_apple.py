@@ -309,3 +309,43 @@ class TestAppleEmail:
         assert mail.rfc_message_id == "<stable@acme.com>"
         assert mail.snippet is None, "header-only fetch has no body to snippet"
         assert mail.url is None
+
+
+class TestErrorTyping:
+    """An iCloud failure is not an MCP failure and must not claim to be one.
+
+    The SPA branches on `error.code`, and `mcp_error` also carries `server` and
+    `transport` fields that are meaningless for CalDAV -- so a CalDAV problem
+    reported as `mcp_error` is both misleading to a user and misleading to
+    whoever debugs it next.
+    """
+
+    async def test_a_caldav_failure_is_a_provider_error(self, provider):
+        from app.errors import MCPError, ProviderError
+
+        with respx.mock:
+            respx.request("PROPFIND", CALDAV).mock(return_value=httpx.Response(500))
+            with pytest.raises(ProviderError) as exc:
+                await provider.search_events(query=None, start=START, end=END)
+
+        assert not isinstance(exc.value, MCPError)
+        body = exc.value.to_dict()["error"]
+        assert body["code"] == "provider_error"
+        assert body["kind"] == "calendar"
+
+    async def test_an_imap_failure_is_a_provider_error(self):
+        from app.errors import MCPError, ProviderError
+
+        class Rejecting(FakeIMAP):
+            def search(self, charset, *criteria):
+                return "NO", [b"rejected"]
+
+        with pytest.raises(ProviderError) as exc:
+            await _imap.search(
+                host="imap.test", username="u", password="p",
+                keywords=[], start=START, end=END,
+                connect_fn=lambda host, port=993: Rejecting(host, port),
+            )
+
+        assert not isinstance(exc.value, MCPError)
+        assert exc.value.to_dict()["error"]["kind"] == "email"

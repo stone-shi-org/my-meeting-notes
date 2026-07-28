@@ -365,6 +365,12 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT
     )
     """,
+    # ------------------------------------------- legacy MCP config (unread)
+    # Superseded by `integrations`. Nothing but the one-time migration in
+    # services/integrations.py reads these now, and they are kept rather than
+    # dropped for two reasons: the migration has to keep working for anyone
+    # upgrading from before the provider refactor, and DROP buys nothing on a
+    # single-file SQLite database while costing the rollback path.
     # ---------------------------------------------------- user_mcp_profiles
     # Per-user override of *which account* a shared MCP server searches.
     # profile/auth_token here take precedence over mcp_servers.default_profile
