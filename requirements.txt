@@ -10,6 +10,13 @@ mcp>=1.0.0
 # Fernet, for encrypting integration credentials at rest. Already arrives as an
 # mcp transitive dep, but pinned here because we now import it directly.
 cryptography>=42.0.0
+# iCalendar parsing and recurrence expansion for CalDAV. icalendar alone does not
+# expand RRULEs -- upstream calls it out of scope -- and hand-rolling EXDATE,
+# RECURRENCE-ID overrides and DST-correct expansion is where the bugs live.
+# Deliberately NOT the `caldav` package: it is built on requests, which respx
+# cannot intercept, so it would take the test suite offline-unsafe.
+icalendar>=6.0
+recurring-ical-events>=3.0
 pytest>=7.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.10.0
