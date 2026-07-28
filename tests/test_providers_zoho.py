@@ -211,7 +211,7 @@ class TestMail:
         assert mail.subject == "Re: cutover"
         assert mail.snippet == "rollback rehearsal"
         assert mail.message_id == "zoho:5:m-1"
-        assert mail.url == "https://mail.zoho.com/zm/#mail/folder/f-9/m-1"
+        assert mail.url == "https://mail.zoho.com/zm/#mail/folder/f-9/p/m-1"
         # Zoho's search payload has no RFC 2822 header, so the Gmail-style
         # fallback link must not be attempted for it.
         assert mail.rfc_message_id is None
@@ -381,7 +381,7 @@ class TestEmailPresentation:
             {"messageId": "msg-1001", "folderId": "folder-2002", "subject": "S"}
         )
         assert mail.url == (
-            "https://mail.zoho.com/zm/#mail/folder/folder-2002/msg-1001"
+            "https://mail.zoho.com/zm/#mail/folder/folder-2002/p/msg-1001"
         )
 
     def test_no_folder_means_no_link_rather_than_a_broken_one(self):
@@ -409,3 +409,27 @@ class TestEmailPresentation:
             {"messageId": "1", "folderId": "2"}
         )
         assert mail.url.startswith("https://mail.zoho.eu/")
+
+
+class TestMessageUrlShape:
+    """Pinned against a URL copied from a real Zoho webmail address bar:
+    /zm/#mail/folder/inbox/p/<messageId> -- note the /p/ segment,
+    without which the folder opens but the message does not."""
+
+    def _provider(self, config=None):
+        ref = IntegrationRef(id=4, provider="zoho", account_label="x", email_enabled=True)
+        return ZohoProvider(ref, {"dc": "com", **(config or {})}, {})
+
+    def test_the_p_segment_is_present(self):
+        url = self._provider()._message_url("msg-1", "fld-1")
+        assert "/folder/fld-1/p/msg-1" in url
+
+    def test_a_known_folder_name_is_preferred_over_the_id(self):
+        """Zoho's own URLs use the folder name; reading names needs a scope
+        existing grants lack, so the id is the fallback rather than the target."""
+        p = self._provider({"folder_names": {"fld-1": "inbox"}})
+        assert p._message_url("msg-1", "fld-1").endswith("/folder/inbox/p/msg-1")
+
+    def test_an_unmapped_folder_falls_back_to_the_id(self):
+        p = self._provider({"folder_names": {"other": "archive"}})
+        assert p._message_url("msg-1", "fld-1").endswith("/folder/fld-1/p/msg-1")

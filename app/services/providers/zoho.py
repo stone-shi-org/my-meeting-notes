@@ -321,15 +321,27 @@ class ZohoProvider(BaseProvider):
     def _message_url(self, message_id: str, folder_id: str | None) -> str | None:
         """Deep link into Zoho webmail.
 
-        The hash route is ``#mail/folder/<folder>/<messageId>`` and the folder
-        segment has to be a real folder -- a placeholder there loads the mailbox
-        but resolves to no message. Zoho's search response carries the numeric
-        folderId, so use it; without one there is nothing to link to, and a link
-        that lands on the wrong screen is worse than no link.
+        The route, taken from a real webmail address bar, is::
+
+            /zm/#mail/folder/<folder>/p/<messageId>
+
+        Note the ``/p/`` -- without it the folder opens but no message does.
+
+        Zoho's own UI puts a folder *name* there ("inbox"), while the search
+        response only gives us the numeric folderId, and reading names would need
+        ``ZohoMail.folders.READ`` -- a scope existing grants lack and which cannot
+        be added without the user reconnecting. Verified against a live account
+        that the router accepts the **id** in that slot too, so no reconnect is
+        required. ``folder_names`` remains as an override if that ever changes.
+
+        No folder means no link: one that lands on the wrong screen is worse
+        than none.
         """
         if not (message_id and folder_id):
             return None
-        return f"https://mail.zoho.{self._dc()}/zm/#mail/folder/{folder_id}/{message_id}"
+        names = self.config.get("folder_names") or {}
+        folder = names.get(str(folder_id)) or folder_id
+        return f"https://mail.zoho.{self._dc()}/zm/#mail/folder/{folder}/p/{message_id}"
 
     def _to_email(self, item: dict) -> EmailCandidate:
         native = str(item.get("messageId") or "")
