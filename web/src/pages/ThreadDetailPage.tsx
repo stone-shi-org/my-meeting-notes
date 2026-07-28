@@ -10,6 +10,7 @@ import {
   Mic,
   Plus,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -99,24 +100,79 @@ function MeetingTimelineCard({ meeting }: { meeting: Meeting }) {
   );
 }
 
-function EventTimelineCard({ event }: { event: CalendarEvent }) {
+/** Detach an attached item from its thread.
+ *
+ * Only the copy on the thread goes; nothing is touched in the actual calendar or
+ * mailbox, which is why this needs no confirmation dialog -- re-running the match
+ * offers it straight back. */
+function useDetach(threadId: string, kind: 'emails' | 'calendar-events') {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.del(`/threads/${threadId}/${kind}/${id}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+    },
+  });
+}
+
+function DetachButton({
+  onClick,
+  pending,
+  label,
+}: {
+  onClick: () => void;
+  pending: boolean;
+  label: string;
+}) {
   return (
-    <div className="rounded-md border-l-2 border-entity-event bg-surface-2/50 py-2 pl-3 pr-3">
-      <p className="text-sm font-medium">
-        {event.url ? (
-          <a
-            href={event.url}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-primary hover:underline"
-          >
-            {event.summary || 'Untitled event'}
-            <ExternalLink className="size-3" aria-hidden />
-          </a>
-        ) : (
-          event.summary || 'Untitled event'
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={pending}
+      aria-label={label}
+      title={label}
+      // Revealed on hover, but always reachable by keyboard -- hover-only
+      // controls are invisible to anyone tabbing through.
+      className={cn(
+        'shrink-0 rounded p-1 text-fg-faint transition-opacity',
+        'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
+        'hover:text-danger-ink disabled:opacity-50',
+      )}
+    >
+      <X className="size-3.5" aria-hidden />
+    </button>
+  );
+}
+
+function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId: string }) {
+  const detach = useDetach(threadId, 'calendar-events');
+  return (
+    <div className="group rounded-md border-l-2 border-entity-event bg-surface-2/50 py-2 pl-3 pr-3">
+      <div className="flex items-start gap-2">
+        <p className="min-w-0 flex-1 text-sm font-medium">
+          {event.url ? (
+            <a
+              href={event.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-primary hover:underline"
+            >
+              {event.summary || 'Untitled event'}
+              <ExternalLink className="size-3" aria-hidden />
+            </a>
+          ) : (
+            event.summary || 'Untitled event'
+          )}
+        </p>
+        {event.id !== undefined && (
+          <DetachButton
+            onClick={() => detach.mutate(event.id as number)}
+            pending={detach.isPending}
+            label="Remove this event from the thread"
+          />
         )}
-      </p>
+      </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
         {event.calendar_name && <span>{event.calendar_name}</span>}
         {event.location && (
@@ -133,25 +189,35 @@ function EventTimelineCard({ event }: { event: CalendarEvent }) {
   );
 }
 
-function EmailTimelineCard({ email }: { email: Email }) {
+function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string }) {
   const href = emailLink(email);
+  const detach = useDetach(threadId, 'emails');
   return (
-    <div className="py-1.5 pl-3">
-      <p className="text-sm">
-        {href ? (
-          <a
-            href={href}
-            target="_blank"
-            rel="noopener noreferrer"
-            className="inline-flex items-center gap-1 text-primary hover:underline"
-          >
-            {email.subject || '(no subject)'}
-            <ExternalLink className="size-3" aria-hidden />
-          </a>
-        ) : (
-          email.subject || '(no subject)'
+    <div className="group py-1.5 pl-3">
+      <div className="flex items-start gap-2">
+        <p className="min-w-0 flex-1 text-sm">
+          {href ? (
+            <a
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1 text-primary hover:underline"
+            >
+              {email.subject || '(no subject)'}
+              <ExternalLink className="size-3" aria-hidden />
+            </a>
+          ) : (
+            email.subject || '(no subject)'
+          )}
+        </p>
+        {typeof email.id === 'number' && (
+          <DetachButton
+            onClick={() => detach.mutate(email.id as number)}
+            pending={detach.isPending}
+            label="Remove this email from the thread"
+          />
         )}
-      </p>
+      </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-fg-subtle">
         <span className="truncate">{email.sender}</span>
         {email.tag && <Badge variant="outline" size="sm">{email.tag}</Badge>}
@@ -365,10 +431,13 @@ export function ThreadDetailPage() {
                             <MeetingTimelineCard meeting={item.payload as Meeting} />
                           )}
                           {item.kind === 'event' && (
-                            <EventTimelineCard event={item.payload as CalendarEvent} />
+                            <EventTimelineCard
+                              event={item.payload as CalendarEvent}
+                              threadId={threadId!}
+                            />
                           )}
                           {item.kind === 'email' && (
-                            <EmailTimelineCard email={item.payload as Email} />
+                            <EmailTimelineCard email={item.payload as Email} threadId={threadId!} />
                           )}
                         </div>
                       </div>

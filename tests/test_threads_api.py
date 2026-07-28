@@ -313,3 +313,53 @@ def test_attachment_listing_and_detach(user_client, isolated_settings):
 def test_detaching_something_not_attached_is_404(user_client):
     t = make_thread(user_client)
     assert user_client.delete(f"/api/threads/{t['id']}/emails/999").status_code == 404
+
+
+def _attach_event(db_path, thread_id: int, uid: str = "evt-1") -> int:
+    from app.db import get_conn, utcnow
+
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO thread_calendar_events (thread_id, uid, summary, start_at, "
+            "raw_json, attached_at) VALUES (?, ?, 'Standup', ?, '{}', ?)",
+            (thread_id, uid, "2026-03-18T09:00:00+00:00", utcnow()),
+        )
+        return cur.lastrowid
+
+
+def test_detaching_a_calendar_event(user_client, isolated_settings):
+    """The other half of the Remove button on the timeline."""
+    t = make_thread(user_client)
+    event_id = _attach_event(isolated_settings.db_path, t["id"])
+
+    assert len(user_client.get(f"/api/threads/{t['id']}/calendar-events").json()) == 1
+    assert user_client.delete(
+        f"/api/threads/{t['id']}/calendar-events/{event_id}"
+    ).status_code == 200
+    assert user_client.get(f"/api/threads/{t['id']}/calendar-events").json() == []
+
+
+def test_detaching_removes_it_from_the_timeline(user_client, isolated_settings):
+    """What the user actually sees disappear."""
+    t = make_thread(user_client)
+    event_id = _attach_event(isolated_settings.db_path, t["id"])
+
+    timeline = user_client.get(f"/api/threads/{t['id']}/timeline").json()
+    assert [i["kind"] for i in timeline] == ["event"]
+
+    user_client.delete(f"/api/threads/{t['id']}/calendar-events/{event_id}")
+    assert user_client.get(f"/api/threads/{t['id']}/timeline").json() == []
+
+
+def test_another_user_cannot_detach_your_attachments(
+    user_client, other_user_client, isolated_settings
+):
+    """404 rather than 403 -- a 403 would confirm the thread exists."""
+    t = make_thread(user_client)
+    event_id = _attach_event(isolated_settings.db_path, t["id"])
+
+    assert other_user_client.delete(
+        f"/api/threads/{t['id']}/calendar-events/{event_id}"
+    ).status_code == 404
+    # And it is still there afterwards.
+    assert len(user_client.get(f"/api/threads/{t['id']}/calendar-events").json()) == 1
