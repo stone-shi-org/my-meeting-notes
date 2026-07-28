@@ -13,8 +13,23 @@ THREAD_COUNTS_SQL = """
     (SELECT COUNT(*) FROM meetings m WHERE m.thread_id = t.id)                AS meeting_count,
     (SELECT MAX(m.meeting_at) FROM meetings m WHERE m.thread_id = t.id)       AS last_meeting_at,
     (SELECT COUNT(*) FROM thread_emails e WHERE e.thread_id = t.id)           AS email_count,
-    (SELECT COUNT(*) FROM thread_calendar_events c WHERE c.thread_id = t.id)  AS event_count
+    (SELECT COUNT(*) FROM thread_calendar_events c WHERE c.thread_id = t.id)  AS event_count,
+    (
+      (SELECT COUNT(*) FROM thread_emails e
+        WHERE e.thread_id = t.id AND e.auto_attached = 1 AND e.seen_at IS NULL)
+      +
+      (SELECT COUNT(*) FROM thread_calendar_events c
+        WHERE c.thread_id = t.id AND c.auto_attached = 1 AND c.seen_at IS NULL)
+    )                                                                         AS unread_count
 """
+
+# Attachment tables that carry the unread mark, keyed by the URL segment the
+# thread routes already use. A map rather than an f-string: the segment comes
+# from the request path, and it is about to be interpolated into SQL.
+UNREAD_TABLES: dict[str, str] = {
+    "emails": "thread_emails",
+    "calendar-events": "thread_calendar_events",
+}
 
 SORTABLE = {
     "updated_at": "t.updated_at",
@@ -118,7 +133,33 @@ def row_to_thread(row: sqlite3.Row) -> dict:
         "last_meeting_at": row["last_meeting_at"] if "last_meeting_at" in row.keys() else None,
         "email_count": row["email_count"] if "email_count" in row.keys() else 0,
         "event_count": row["event_count"] if "event_count" in row.keys() else 0,
+        # Drives the blue dot on the thread card. Zero for every thread until
+        # the sweep attaches something nobody has opened yet.
+        "unread_count": row["unread_count"] if "unread_count" in row.keys() else 0,
+        "auto_match_at": row["auto_match_at"] if "auto_match_at" in row.keys() else None,
+        "auto_match_error": (
+            row["auto_match_error"] if "auto_match_error" in row.keys() else None
+        ),
     }
+
+
+def mark_seen(
+    conn: sqlite3.Connection, *, thread_id: int, kind: str, item_id: int | None = None
+) -> int:
+    """Clear the unread mark on one attachment, or on all of a thread's.
+
+    Returns how many rows changed, which is what lets the caller tell "already
+    read" from "no such row" without a second query. ``seen_at`` is only ever
+    written once: re-reading an item must not move the timestamp, or "attached
+    while you were away, first opened at 09:14" stops being true.
+    """
+    table = UNREAD_TABLES[kind]
+    sql = f"UPDATE {table} SET seen_at = ? WHERE thread_id = ? AND seen_at IS NULL"
+    params: list = [utcnow(), thread_id]
+    if item_id is not None:
+        sql += " AND id = ?"
+        params.append(item_id)
+    return conn.execute(sql, params).rowcount
 
 
 # --------------------------------------------------------------------------- #

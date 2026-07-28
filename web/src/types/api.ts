@@ -74,6 +74,18 @@ export interface Thread {
   last_meeting_at: string | null;
   email_count: number;
   event_count: number;
+  /** Auto-attached items nobody has opened. Non-zero lights the dot. */
+  unread_count: number;
+  /** When the periodic sweep last looked at this thread. */
+  auto_match_at: string | null;
+  auto_match_error: string | null;
+}
+
+/** Attached by the sweep rather than by a person, and whether it is still new. */
+export interface Attached {
+  auto_attached?: boolean;
+  seen_at?: string | null;
+  unread?: boolean;
 }
 
 export interface Meeting {
@@ -235,7 +247,7 @@ export interface JobEvent {
   progress: number | null;
 }
 
-export interface CalendarEvent {
+export interface CalendarEvent extends Attached {
   id?: number;
   uid: string;
   url: string | null;
@@ -294,7 +306,7 @@ export interface UpcomingList {
   }[];
 }
 
-export interface Email {
+export interface Email extends Attached {
   id?: number | string;
   message_id: string;
   sender: string | null;
@@ -343,6 +355,16 @@ export interface MatchRun {
   }[];
   error: string | null;
   created_at: string;
+}
+
+/** One run of the periodic sweep, returned by "Check now". */
+export interface FollowUpResult {
+  thread_id: number;
+  skipped: 'no_integrations' | 'nothing_new' | null;
+  candidates: number;
+  attached_events: number;
+  attached_emails: number;
+  error: string | null;
 }
 
 export interface TimelineItem {

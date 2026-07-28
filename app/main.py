@@ -15,6 +15,7 @@ from app.db import get_conn, init_db
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging, get_logger
 from app.jobs.queue import JobQueue, set_queue
+from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
 from app.routers import (
     auth,
     calendar,
@@ -67,8 +68,17 @@ async def lifespan(app: FastAPI):
     await queue.recover()
     await queue.start()
 
+    # Always started, even with auto-match switched off: the loop asks the
+    # setting on every tick, so an admin turning it on in the UI takes effect
+    # within one tick rather than at the next restart.
+    scheduler = AutoMatchScheduler()
+    set_scheduler(scheduler)
+    scheduler.start()
+
     yield
 
+    await scheduler.stop()
+    set_scheduler(None)
     await queue.stop()
     set_queue(None)
     log.info("shutdown complete")

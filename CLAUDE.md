@@ -17,9 +17,10 @@ app/
   routers/       auth users integrations threads meetings transcripts summaries matching jobs
                  calendar settings_api system
   services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
-                 threads users integrations secretstore mcpclient
+                 threads users integrations secretstore mcpclient followups
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
+                 scheduler.py (the auto-match timer)
   prompts/       summary_prompt.md · match_rank_prompt.md   <- EDITABLE, no deploy needed
 web/src/         types api lib hooks player components pages routes
 ```
@@ -192,6 +193,35 @@ lower edge of the window is enforced client-side.
 
 Watch `parse_stamp`: an all-day `20260318` is *all digits*, so it must not be mistaken for an epoch
 millisecond stamp — that bug lands the event in 1970.
+
+### Automatic follow-ups (the sweep)
+
+`jobs/scheduler.py` ticks every minute and hands due threads to `services/followups.py`, which is
+the same match pipeline pointed at a thread instead of a meeting. Off unless
+`auto_match_enabled` is set. Everything it does that is *not* obvious:
+
+**It attaches with `meeting_id = NULL`, deliberately.** `attached_context` is scoped to one meeting
+and is what the summarizer reads. An item nobody confirmed must never become an input to the next
+summary of a meeting that has already been written up — so a sweep result belongs to the thread
+until a human moves it.
+
+**`rank_sync` returning `relevance_score = None` is the safety interlock, not a degradation.** None
+never clears the threshold, so "the LLM is down" and "attach nothing" are the same code path. Do not
+"fix" this by falling back to the keyword score.
+
+**Only the sweep can create an unread row.** `seen_at` is stamped at write time for anything a
+person attached (`matching._unread_flags`), so `auto_attached = 1 AND seen_at IS NULL` is the whole
+definition of unread and the thread's `unread_count` is derived from it. `mark_seen` only ever
+writes `seen_at` where it is still NULL: re-reading must not move the timestamp.
+
+**Threads are swept sequentially and stamped even on failure.** Concurrency here competes with the
+interactive match the user is waiting on, for work nobody is waiting on; and a thread whose provider
+is down still gets `auto_match_at` written, or it is due again on every tick and one broken account
+becomes a request storm.
+
+**It does not use the job queue.** A sweep per thread per half hour would bury the user's own
+uploads in the progress dock, and restart survival — the other reason to use the queue — buys
+nothing for work that is due again in thirty minutes anyway.
 
 ## Jobs
 

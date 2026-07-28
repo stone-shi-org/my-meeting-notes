@@ -106,6 +106,10 @@ class ThreadOut(BaseModel):
     last_meeting_at: str | None = None
     email_count: int = 0
     event_count: int = 0
+    unread_count: int = 0
+    """Auto-attached items nobody has opened. Non-zero puts the dot on the card."""
+    auto_match_at: str | None = None
+    auto_match_error: str | None = None
 
 
 class ThreadCreateRequest(BaseModel):

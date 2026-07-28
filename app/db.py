@@ -451,6 +451,19 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # Per-source failures, one entry per integration that errored. The older
     # calendar_error/email_error columns remain as derived aggregates.
     ("match_runs", "source_errors_json", "TEXT"),
+    # Attached by the periodic sweep rather than by a person, and not yet opened.
+    # Only an auto-attached row can be unread: anything a user ticked themselves
+    # they have by definition already seen, so seen_at is stamped on write there.
+    # The pair is what the blue dot on a thread and the bold row inside it read.
+    ("thread_emails", "auto_attached", "INTEGER NOT NULL DEFAULT 0"),
+    ("thread_emails", "seen_at", "TEXT"),
+    ("thread_calendar_events", "auto_attached", "INTEGER NOT NULL DEFAULT 0"),
+    ("thread_calendar_events", "seen_at", "TEXT"),
+    # When the sweep last looked at this thread, and why it last failed. Kept on
+    # the thread rather than in match_runs because that table is keyed to a
+    # meeting (NOT NULL) and a sweep belongs to the whole thread.
+    ("threads", "auto_match_at", "TEXT"),
+    ("threads", "auto_match_error", "TEXT"),
 )
 
 

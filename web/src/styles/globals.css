@@ -193,6 +193,23 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* "This arrived while you were away."
+   *
+   * A halo rather than a bigger dot: 8px reads across a grid of cards without
+   * competing with the title beside it. Blue is deliberately not one of the
+   * three entity accents -- it says "new", not "email" or "event".
+   *
+   * Decoration only. Every place this appears also carries a count in text and
+   * an accessible name, because a coloured dot is not information on its own,
+   * and the reduced-motion block at the end of this file stops the pulse. */
+  .glow-dot {
+    background: var(--info);
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--info) 26%, transparent),
+      0 0 10px 2px color-mix(in srgb, var(--info) 45%, transparent);
+    animation: glow-pulse 2.4s ease-in-out infinite;
+  }
+
   .sr-only-focusable:not(:focus):not(:focus-within) {
     position: absolute;
     width: 1px;
@@ -203,6 +220,20 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border-width: 0;
+  }
+}
+
+@keyframes glow-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 3px color-mix(in srgb, var(--info) 26%, transparent),
+      0 0 10px 2px color-mix(in srgb, var(--info) 45%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 5px color-mix(in srgb, var(--info) 14%, transparent),
+      0 0 14px 3px color-mix(in srgb, var(--info) 30%, transparent);
   }
 }
 

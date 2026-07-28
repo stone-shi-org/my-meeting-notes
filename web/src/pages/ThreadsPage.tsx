@@ -16,20 +16,8 @@ import {
 import { EmptyState, ErrorState, Pagination } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { fmtRelative } from '@/lib/time';
 import type { Paginated, Thread } from '@/types/api';
-
-function relative(iso: string | null): string {
-  if (!iso) return '—';
-  const then = new Date(iso).getTime();
-  const mins = Math.round((Date.now() - then) / 60000);
-  if (mins < 1) return 'just now';
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.round(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.round(hours / 24);
-  if (days < 30) return `${days}d ago`;
-  return new Date(iso).toLocaleDateString();
-}
 
 function StatPill({
   icon: Icon,
@@ -52,15 +40,33 @@ function StatPill({
 }
 
 function ThreadCard({ thread }: { thread: Thread }) {
+  const unread = thread.unread_count > 0;
   return (
     <Card interactive className="relative overflow-hidden">
       {/* 3px identity rail: the app's own objects are indigo. */}
       <span className="absolute inset-y-0 left-0 w-[3px] bg-entity-meeting" aria-hidden />
       <Link to={`/threads/${thread.id}`} className="block p-5 pl-6">
         <div className="flex items-start justify-between gap-3">
-          <h3 className="font-display text-lg font-semibold leading-snug">{thread.title}</h3>
+          <h3 className="font-display text-lg font-semibold leading-snug">
+            {unread && (
+              // Inline rather than absolutely positioned so it pushes the title
+              // instead of sitting over it at long titles.
+              <span
+                className="mr-2 inline-block size-2 shrink-0 rounded-full glow-dot align-middle"
+                aria-hidden
+              />
+            )}
+            {thread.title}
+          </h3>
           {thread.archived && <Badge variant="neutral">Archived</Badge>}
         </div>
+
+        {/* The dot is decoration; this is the part a screen reader gets. */}
+        {unread && (
+          <p className="mt-1 text-xs font-medium text-info-ink">
+            {thread.unread_count} new item{thread.unread_count === 1 ? '' : 's'} found for you
+          </p>
+        )}
 
         {thread.description && (
           <p className="mt-1.5 line-clamp-2 text-sm text-fg-subtle">{thread.description}</p>
@@ -74,7 +80,7 @@ function ThreadCard({ thread }: { thread: Thread }) {
 
         <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
           <span className="text-xs text-fg-subtle">
-            Updated <time dateTime={thread.updated_at}>{relative(thread.updated_at)}</time>
+            Updated <time dateTime={thread.updated_at}>{fmtRelative(thread.updated_at)}</time>
           </span>
         </div>
       </Link>
@@ -217,6 +223,11 @@ export function ThreadsPage() {
       }),
     // No layout jump when paging.
     placeholderData: keepPreviousData,
+    // The sweep attaches things while this page is just sitting open, and a dot
+    // that only appears on reload is not a notification. One list query a minute
+    // is cheap; it is the same query the page already runs.
+    refetchInterval: 60_000,
+    refetchOnWindowFocus: true,
   });
 
   return (

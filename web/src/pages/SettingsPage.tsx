@@ -31,6 +31,7 @@ const TABS = [
   { to: '/settings/llm', label: 'LLM' },
   { to: '/settings/diarization', label: 'Diarization' },
   { to: '/settings/integrations', label: 'Integrations' },
+  { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/users', label: 'Users', adminOnly: true },
 ];
@@ -108,7 +109,7 @@ function SettingsForm({
 }: {
   title: string;
   description: string;
-  keys: { key: string; label: string; hint?: string; type?: string }[];
+  keys: { key: string; label: string; hint?: string; type?: string; step?: string }[];
   modelsPath?: string;
   modelKey?: string;
   /** Endpoint that tests the connection this form configures. */
@@ -170,7 +171,7 @@ function SettingsForm({
       <p className="mt-1 text-sm text-fg-subtle">{description}</p>
 
       <div className="mt-5 space-y-4">
-        {keys.map(({ key, label, hint, type }) => {
+        {keys.map(({ key, label, hint, type, step }) => {
           const entry = entries[key];
           if (!entry) return null;
           const value = draft[key] ?? (entry.value ?? '');
@@ -180,7 +181,20 @@ function SettingsForm({
             <div key={key}>
               <Label htmlFor={key}>{label}</Label>
 
-              {isModelField && models.data?.models?.length ? (
+              {entry.type === 'bool' ? (
+                // A select rather than a checkbox: the rest of this form is a
+                // draft you save, and a checkbox reads as taking effect on click.
+                <Select
+                  id={key}
+                  className="mt-1.5"
+                  value={String(value) === 'true' ? 'true' : 'false'}
+                  disabled={!isAdmin}
+                  onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
+                >
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </Select>
+              ) : isModelField && models.data?.models?.length ? (
                 <div className="mt-1.5 flex gap-2">
                   <Select
                     id={key}
@@ -206,6 +220,7 @@ function SettingsForm({
                   id={key}
                   className="mt-1.5"
                   type={entry.is_secret ? 'password' : (type ?? 'text')}
+                  step={step}
                   value={String(value)}
                   disabled={!isAdmin}
                   placeholder={entry.is_secret ? 'unchanged' : undefined}
@@ -354,6 +369,75 @@ export function DiarizationSettingsPage() {
         },
       ]}
     />
+  );
+}
+
+export function MatchingSettingsPage() {
+  return (
+    <div className="space-y-4">
+      <SettingsForm
+        title="Matching"
+        description="How far around a meeting the search for related events and email reaches."
+        keys={[
+          {
+            key: 'match_window_days_before',
+            label: 'Days before',
+            type: 'number',
+            hint: 'How far back from the meeting to search.',
+          },
+          { key: 'match_window_days_after', label: 'Days after', type: 'number' },
+          {
+            key: 'match_max_candidates',
+            label: 'Maximum candidates',
+            type: 'number',
+            hint: 'Per kind, nearest in time first. Everything found is ranked, so a big number costs LLM tokens on every match.',
+          },
+          { key: 'match_max_keywords', label: 'Maximum keywords', type: 'number' },
+        ]}
+      />
+
+      <SettingsForm
+        title="Automatic follow-ups"
+        description={
+          'On a timer, every thread is re-searched and anything the ranker is confident ' +
+          'about is attached on its own, marked unread until someone opens it. It never ' +
+          'attaches to a meeting, so a summary is never rewritten by something nobody ' +
+          'confirmed — and when the language model is unavailable it attaches nothing at all.'
+        }
+        keys={[
+          {
+            key: 'auto_match_enabled',
+            label: 'Watch threads for follow-ups',
+            hint: 'Off by default. It spends language-model and provider quota on its own schedule.',
+          },
+          {
+            key: 'auto_match_interval_minutes',
+            label: 'Check each thread every (minutes)',
+            type: 'number',
+            hint: 'Per thread, not globally. 30 means each thread is looked at twice an hour.',
+          },
+          {
+            key: 'auto_match_threshold',
+            label: 'Confidence to attach (0–1)',
+            type: 'number',
+            step: '0.05',
+            hint: 'Deliberately above the 0.6 used to *suggest* a match. Attaching while nobody is watching deserves a higher bar. Below about 0.7 expect noise.',
+          },
+          {
+            key: 'auto_match_max_threads_per_cycle',
+            label: 'Threads per cycle',
+            type: 'number',
+            hint: 'Bounds one sweep. Whatever is skipped is first in line next time, so nothing is starved.',
+          },
+          {
+            key: 'auto_match_idle_days',
+            label: 'Stop watching after (days idle)',
+            type: 'number',
+            hint: 'A thread nobody has touched in this long has no follow-ups coming.',
+          },
+        ]}
+      />
+    </div>
   );
 }
 

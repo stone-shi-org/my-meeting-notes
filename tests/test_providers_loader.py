@@ -98,7 +98,7 @@ async def _gather(db, user_id):
 
     return await matching_svc.gather_candidates(
         conn_factory,
-        meeting_id=1,
+        thread_id=1,
         keywords=["atlas"],
         start=START,
         end=END,

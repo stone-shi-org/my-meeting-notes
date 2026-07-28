@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   ArrowLeft,
   CalendarDays,
+  CheckCheck,
   CheckSquare,
   Clock,
   ExternalLink,
@@ -9,6 +10,7 @@ import {
   MapPin,
   Mic,
   Plus,
+  RefreshCw,
   Trash2,
   X,
 } from 'lucide-react';
@@ -20,10 +22,11 @@ import { EmptyState, ErrorState } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { emailLink } from '@/lib/links';
-import { fmtClock } from '@/lib/time';
+import { fmtClock, fmtRelative } from '@/lib/time';
 import type {
   CalendarEvent,
   Email,
+  FollowUpResult,
   Meeting,
   Thread,
   TimelineItem,
@@ -100,12 +103,14 @@ function MeetingTimelineCard({ meeting }: { meeting: Meeting }) {
   );
 }
 
+type Kind = 'emails' | 'calendar-events';
+
 /** Detach an attached item from its thread.
  *
  * Only the copy on the thread goes; nothing is touched in the actual calendar or
  * mailbox, which is why this needs no confirmation dialog -- re-running the match
  * offers it straight back. */
-function useDetach(threadId: string, kind: 'emails' | 'calendar-events') {
+function useDetach(threadId: string, kind: Kind) {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (id: number) => api.del(`/threads/${threadId}/${kind}/${id}`),
@@ -114,6 +119,44 @@ function useDetach(threadId: string, kind: 'emails' | 'calendar-events') {
       void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
     },
   });
+}
+
+/** Clear the "arrived while you were away" mark on one item.
+ *
+ * Fired on the link the user actually clicks, which is the moment the mark stops
+ * being true. Harmless to repeat: the backend only stamps a row that is still
+ * unread, so a second click is a 200 with nothing changed. */
+function useMarkRead(threadId: string, kind: Kind) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.post(`/threads/${threadId}/${kind}/${id}/read`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['threads'] });
+    },
+  });
+}
+
+/** The unread mark on one row. Paired with bold text and a "New" label, never
+ *  the only thing saying so. */
+function UnreadDot() {
+  return (
+    <span className="mt-1.5 size-2 shrink-0 rounded-full glow-dot" aria-hidden />
+  );
+}
+
+function MarkReadButton({ onClick, pending }: { onClick: () => void; pending: boolean }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={pending}
+      className="shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium text-info-ink hover:bg-info-soft disabled:opacity-50"
+    >
+      Mark read
+    </button>
+  );
 }
 
 function DetachButton({
@@ -147,15 +190,28 @@ function DetachButton({
 
 function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId: string }) {
   const detach = useDetach(threadId, 'calendar-events');
+  const markRead = useMarkRead(threadId, 'calendar-events');
+  const unread = !!event.unread && event.id !== undefined;
+  const read = () => {
+    if (unread) markRead.mutate(event.id as number);
+  };
+
   return (
-    <div className="group rounded-md border-l-2 border-entity-event bg-surface-2/50 py-2 pl-3 pr-3">
+    <div
+      className={cn(
+        'group rounded-md border-l-2 bg-surface-2/50 py-2 pl-3 pr-3',
+        unread ? 'border-info bg-info-soft/30' : 'border-entity-event',
+      )}
+    >
       <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 text-sm font-medium">
+        {unread && <UnreadDot />}
+        <p className={cn('min-w-0 flex-1 text-sm', unread ? 'font-semibold' : 'font-medium')}>
           {event.url ? (
             <a
               href={event.url}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={read}
               className="inline-flex items-center gap-1 text-primary hover:underline"
             >
               {event.summary || 'Untitled event'}
@@ -165,6 +221,7 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
             event.summary || 'Untitled event'
           )}
         </p>
+        {unread && <MarkReadButton onClick={read} pending={markRead.isPending} />}
         {event.id !== undefined && (
           <DetachButton
             onClick={() => detach.mutate(event.id as number)}
@@ -174,6 +231,7 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
         )}
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
+        {unread && <span className="font-medium text-info-ink">New · added for you</span>}
         {event.calendar_name && <span>{event.calendar_name}</span>}
         {event.location && (
           <span className="inline-flex items-center gap-1">
@@ -192,15 +250,28 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
 function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string }) {
   const href = emailLink(email);
   const detach = useDetach(threadId, 'emails');
+  const markRead = useMarkRead(threadId, 'emails');
+  const unread = !!email.unread && typeof email.id === 'number';
+  const read = () => {
+    if (unread) markRead.mutate(email.id as number);
+  };
+
   return (
-    <div className="group py-1.5 pl-3">
+    <div
+      className={cn(
+        'group py-1.5 pl-3',
+        unread && 'rounded-md border-l-2 border-info bg-info-soft/30 pr-3',
+      )}
+    >
       <div className="flex items-start gap-2">
-        <p className="min-w-0 flex-1 text-sm">
+        {unread && <UnreadDot />}
+        <p className={cn('min-w-0 flex-1 text-sm', unread && 'font-semibold')}>
           {href ? (
             <a
               href={href}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={read}
               className="inline-flex items-center gap-1 text-primary hover:underline"
             >
               {email.subject || '(no subject)'}
@@ -210,6 +281,7 @@ function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string
             email.subject || '(no subject)'
           )}
         </p>
+        {unread && <MarkReadButton onClick={read} pending={markRead.isPending} />}
         {typeof email.id === 'number' && (
           <DetachButton
             onClick={() => detach.mutate(email.id as number)}
@@ -219,11 +291,21 @@ function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string
         )}
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-fg-subtle">
+        {unread && <span className="font-medium text-info-ink">New · added for you</span>}
         <span className="truncate">{email.sender}</span>
         {email.tag && <Badge variant="outline" size="sm">{email.tag}</Badge>}
       </div>
       {email.snippet && (
-        <p className="mt-1 line-clamp-1 text-xs text-fg-faint">{email.snippet}</p>
+        <p
+          className={cn(
+            'mt-1 line-clamp-1 text-xs',
+            // Unread rows read as a headline, so the preview steps up from the
+            // decorative faint token to one that is legal for text.
+            unread ? 'text-fg-muted' : 'text-fg-faint',
+          )}
+        >
+          {email.snippet}
+        </p>
       )}
     </div>
   );
@@ -255,6 +337,24 @@ export function ThreadDetailPage() {
       void queryClient.invalidateQueries({ queryKey: ['threads'] });
       navigate('/');
     },
+  });
+
+  const refresh = () => {
+    void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+    void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+    void queryClient.invalidateQueries({ queryKey: ['threads'] });
+  };
+
+  const markAllRead = useMutation({
+    mutationFn: () => api.post(`/threads/${threadId}/read`),
+    onSuccess: refresh,
+  });
+
+  // The same sweep the scheduler runs, on demand. Same confidence threshold:
+  // asking for it sooner is not asking for it to attach more freely.
+  const checkNow = useMutation({
+    mutationFn: () => api.post<FollowUpResult>(`/threads/${threadId}/follow-ups`),
+    onSuccess: refresh,
   });
 
   const grouped = useMemo(() => {
@@ -308,10 +408,30 @@ export function ThreadDetailPage() {
                 <span>{thread.data.event_count} events</span>
                 <span>·</span>
                 <span>{thread.data.email_count} emails</span>
+                {thread.data.auto_match_at && (
+                  <>
+                    <span>·</span>
+                    <span title={thread.data.auto_match_error ?? undefined}>
+                      Checked for follow-ups{' '}
+                      <time dateTime={thread.data.auto_match_at}>
+                        {fmtRelative(thread.data.auto_match_at)}
+                      </time>
+                    </span>
+                  </>
+                )}
               </p>
             </div>
 
             <div className="flex gap-2">
+              <Button
+                variant="secondary"
+                loading={checkNow.isPending}
+                onClick={() => checkNow.mutate()}
+                title="Search your calendar and email for anything new on this thread"
+              >
+                <RefreshCw />
+                Check now
+              </Button>
               <Button variant="primary" asChild>
                 <Link to={`/meetings/new?threadId=${thread.data.id}`}>
                   <Plus />
@@ -337,6 +457,44 @@ export function ThreadDetailPage() {
             </div>
           </div>
         )
+      )}
+
+      {thread.data && thread.data.unread_count > 0 && (
+        <div className="flex flex-wrap items-center gap-3 rounded-lg border border-info/40 bg-info-soft/40 p-3">
+          <span className="size-2 shrink-0 rounded-full glow-dot" aria-hidden />
+          <p className="min-w-0 flex-1 text-sm text-fg">
+            <span className="font-semibold">
+              {thread.data.unread_count} new item{thread.data.unread_count === 1 ? '' : 's'}
+            </span>{' '}
+            {thread.data.unread_count === 1 ? 'was' : 'were'} added to this thread for you.
+            Opening one clears its mark.
+          </p>
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={markAllRead.isPending}
+            onClick={() => markAllRead.mutate()}
+          >
+            <CheckCheck />
+            Mark all read
+          </Button>
+        </div>
+      )}
+
+      {checkNow.isSuccess && (
+        <p className="text-sm text-fg-subtle" role="status">
+          {checkNow.data.skipped === 'no_integrations'
+            ? 'No calendar or inbox is connected to your account yet.'
+            : checkNow.data.error
+              ? `Checked, but ranking was unavailable — nothing was attached (${checkNow.data.error}).`
+              : checkNow.data.attached_events + checkNow.data.attached_emails > 0
+                ? `Attached ${checkNow.data.attached_events} event(s) and ${checkNow.data.attached_emails} email(s).`
+                : `Nothing new confident enough to attach (${checkNow.data.candidates} candidate(s) looked at).`}
+        </p>
+      )}
+
+      {checkNow.error && (
+        <p className="text-sm text-danger-ink">{(checkNow.error as Error).message}</p>
       )}
 
       <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter timeline">

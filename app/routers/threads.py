@@ -9,7 +9,7 @@ import sqlite3
 from fastapi import APIRouter, Depends, Query
 
 from app.config import get_settings
-from app.db import utcnow
+from app.db import get_conn, utcnow
 from app.deps import (
     CurrentUser,
     active_user,
@@ -28,6 +28,7 @@ from app.schemas import (
     ThreadUpdateRequest,
     TimelineItem,
 )
+from app.services import followups as followups_svc
 from app.services import matching as matching_svc
 from app.services import threads as threads_svc
 
@@ -219,12 +220,25 @@ def _row_to_email(row: sqlite3.Row) -> dict:
         "url": _optional(row, "url"),
         "rfc_message_id": _optional(row, "rfc_message_id"),
         "provider": _optional(row, "provider"),
+        **_unread(row),
     }
 
 
 def _optional(row: sqlite3.Row, column: str):
     """Read a column that may predate this row, without raising."""
     return row[column] if column in row.keys() else None
+
+
+def _unread(row: sqlite3.Row) -> dict:
+    """The unread mark, derived once so both attachment kinds agree on it.
+
+    ``unread`` is the only thing the SPA branches on; the two columns behind it
+    are returned as well because "the app attached this for you" is worth saying
+    in the UI even after it has been read.
+    """
+    auto = bool(_optional(row, "auto_attached"))
+    seen_at = _optional(row, "seen_at")
+    return {"auto_attached": auto, "seen_at": seen_at, "unread": auto and seen_at is None}
 
 
 def _row_to_event(row: sqlite3.Row) -> dict:
@@ -246,6 +260,7 @@ def _row_to_event(row: sqlite3.Row) -> dict:
         "attached_at": row["attached_at"],
         "source_uid": _optional(row, "source_uid"),
         "provider": _optional(row, "provider"),
+        **_unread(row),
     }
 
 
@@ -308,6 +323,90 @@ def detach_event(
     if cur.rowcount == 0:
         raise NotFoundError("Event not attached to this thread")
     return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# The unread mark
+#
+# Only the periodic sweep creates unread rows, and reading is one-way: there is
+# no "mark as unread". The point of the mark is "this arrived without you", and
+# that stops being true the moment you look at it.
+# --------------------------------------------------------------------------- #
+
+
+def _mark_read(conn, thread_id: int, user, kind: str, item_id: int) -> dict:
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    changed = threads_svc.mark_seen(conn, thread_id=thread_id, kind=kind, item_id=item_id)
+    if changed == 0:
+        # Zero rows means "already read" as often as it means "no such row", and
+        # the SPA fires this on every click of an item's link -- including the
+        # second one. 404ing that would put an error toast on a working link.
+        exists = conn.execute(
+            f"SELECT 1 FROM {threads_svc.UNREAD_TABLES[kind]} WHERE id = ? AND thread_id = ?",
+            (item_id, thread_id),
+        ).fetchone()
+        if exists is None:
+            raise NotFoundError("Not attached to this thread")
+    return {"ok": True, "marked": changed}
+
+
+@router.post("/{thread_id}/emails/{email_id}/read")
+def mark_email_read(
+    thread_id: int,
+    email_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    return _mark_read(conn, thread_id, user, "emails", email_id)
+
+
+@router.post("/{thread_id}/calendar-events/{event_id}/read")
+def mark_event_read(
+    thread_id: int,
+    event_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    return _mark_read(conn, thread_id, user, "calendar-events", event_id)
+
+
+@router.post("/{thread_id}/read")
+def mark_thread_read(
+    thread_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Clear every unread mark on the thread at once."""
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    marked = sum(
+        threads_svc.mark_seen(conn, thread_id=thread_id, kind=kind)
+        for kind in threads_svc.UNREAD_TABLES
+    )
+    return {"ok": True, "marked": marked}
+
+
+@router.post("/{thread_id}/follow-ups")
+async def check_follow_ups(
+    thread_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Run the periodic sweep for this thread now, without waiting for its turn.
+
+    Same code path as the scheduler, including the confidence threshold: this is
+    "look now", not "attach more freely". It takes its own short-lived
+    connections for the same reason the upcoming list does -- there are provider
+    round trips in the middle, and the request connection would sit inside them.
+    """
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    result = await followups_svc.sweep_thread(
+        get_conn, thread_id=thread_id, user_id=user.id
+    )
+    log.info(
+        "user %s swept thread %s: %d event(s), %d email(s) attached",
+        user.username, thread_id, result["attached_events"], result["attached_emails"],
+    )
+    return result
 
 
 @router.get("/{thread_id}/timeline", response_model=list[TimelineItem])

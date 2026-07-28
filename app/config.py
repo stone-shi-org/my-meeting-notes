@@ -38,6 +38,14 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "match_window_days_after": ("int", False),
     "match_max_candidates": ("int", False),
     "match_max_keywords": ("int", False),
+    # Periodic re-matching. Off by default: it spends LLM budget and provider
+    # quota on its own schedule, which is not something to switch on for an
+    # operator without them asking for it.
+    "auto_match_enabled": ("bool", False),
+    "auto_match_interval_minutes": ("int", False),
+    "auto_match_threshold": ("float", False),
+    "auto_match_max_threads_per_cycle": ("int", False),
+    "auto_match_idle_days": ("int", False),
     "page_size_default": ("int", False),
     # Where this app is reachable, used to build OAuth redirect URIs. Google
     # only accepts https:// or http://localhost, so a LAN address here will be
@@ -114,6 +122,22 @@ class Settings(BaseSettings):
     match_window_days_after: int = 3
     match_max_candidates: int = 25
     match_max_keywords: int = 8
+
+    # --- automatic re-matching ----------------------------------------------
+    auto_match_enabled: bool = False
+    auto_match_interval_minutes: int = 30
+    # Deliberately well above SUGGEST_THRESHOLD (0.6). Suggesting is reversible
+    # with a glance; attaching without being asked is not, so the bar is higher.
+    auto_match_threshold: float = 0.8
+    # Bounds one sweep: with many threads the rest simply wait for the next tick,
+    # rather than every provider seeing a burst of N searches at once.
+    auto_match_max_threads_per_cycle: int = 20
+    # A thread nobody has touched in this long stops being watched. Without it
+    # the sweep grows forever and spends its whole budget on dead work.
+    auto_match_idle_days: int = 30
+    # How often the loop wakes to look for due threads. Process-lifetime, not
+    # runtime-editable: it only bounds the granularity of the interval above.
+    auto_match_tick_seconds: int = 60
 
     # --- jobs ---------------------------------------------------------------
     job_concurrency: int = 2

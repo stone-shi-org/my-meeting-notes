@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtClock, fmtDurationHuman, fmtElapsed, fmtVtt } from '../time';
+import { fmtClock, fmtDurationHuman, fmtElapsed, fmtRelative, fmtVtt } from '../time';
 
 describe('fmtClock', () => {
   it('formats under an hour without an hour component', () => {
@@ -45,6 +45,28 @@ describe('fmtDurationHuman', () => {
   it('handles zero and negatives', () => {
     expect(fmtDurationHuman(0)).toBe('0 sec');
     expect(fmtDurationHuman(-1)).toBe('0 sec');
+  });
+});
+
+describe('fmtRelative', () => {
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  it('counts up through minutes, hours and days', () => {
+    expect(fmtRelative(ago(0))).toBe('just now');
+    expect(fmtRelative(ago(12 * 60_000))).toBe('12m ago');
+    expect(fmtRelative(ago(3 * 3_600_000))).toBe('3h ago');
+    expect(fmtRelative(ago(4 * 86_400_000))).toBe('4d ago');
+  });
+
+  it('gives the date once "N days ago" stops being useful', () => {
+    const old = new Date(Date.now() - 90 * 86_400_000).toISOString();
+    expect(fmtRelative(old)).toBe(new Date(old).toLocaleDateString());
+  });
+
+  it('renders a missing or unparseable stamp as a dash', () => {
+    expect(fmtRelative(null)).toBe('—');
+    expect(fmtRelative(undefined)).toBe('—');
+    expect(fmtRelative('not a date')).toBe('—');
   });
 });
 

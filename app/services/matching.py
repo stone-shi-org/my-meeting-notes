@@ -143,8 +143,8 @@ def _truncate(value: str | None, limit: int) -> str:
 
 async def gather_candidates(
     conn_factory,
-    meeting_id: int,
     *,
+    thread_id: int,
     keywords: list[str],
     start: datetime,
     end: datetime,
@@ -160,6 +160,10 @@ async def gather_candidates(
 
     Integrations are per-user, so this searches the requesting user's own accounts
     and nobody else's.
+
+    Scoped to a thread, not a meeting: what has already been attached is a
+    property of the thread, and the periodic sweep in ``followups`` has a thread
+    but no meeting to anchor on.
     """
     with conn_factory() as conn:
         calendar_sources = providers_svc.load_for_user(conn, user_id, kind="calendar")
@@ -168,17 +172,15 @@ async def gather_candidates(
         attached_uids = {
             r["uid"]
             for r in conn.execute(
-                "SELECT uid FROM thread_calendar_events WHERE thread_id = "
-                "(SELECT thread_id FROM meetings WHERE id = ?)",
-                (meeting_id,),
+                "SELECT uid FROM thread_calendar_events WHERE thread_id = ?",
+                (thread_id,),
             )
         }
         attached_msgs = {
             r["message_id"]
             for r in conn.execute(
-                "SELECT message_id FROM thread_emails WHERE thread_id = "
-                "(SELECT thread_id FROM meetings WHERE id = ?)",
-                (meeting_id,),
+                "SELECT message_id FROM thread_emails WHERE thread_id = ?",
+                (thread_id,),
             )
         }
 
@@ -437,32 +439,47 @@ def apply_ranking(
     return out
 
 
-def rank_candidates_sync(
-    db_path, meeting_id: int, gathered: dict, model: str | None = None
-) -> dict:
-    """One LLM call. On failure the candidates come back unranked, not lost."""
-    with get_conn(db_path) as conn:
-        meeting = threads_svc.require_meeting(conn, meeting_id)
-        thread = threads_svc.require_thread(conn, meeting["thread_id"])
-        config = llm_svc.LLMConfig.from_db(conn, model_override=model)
-        tldr = conn.execute(
-            "SELECT tldr FROM summaries WHERE meeting_id = ? AND is_current = 1",
-            (meeting_id,),
-        ).fetchone()
+def meeting_context(conn: sqlite3.Connection, meeting_id: int, keywords: list[str]) -> dict:
+    """What the ranking prompt is told about the thing being matched."""
+    meeting = threads_svc.require_meeting(conn, meeting_id)
+    thread = threads_svc.require_thread(conn, meeting["thread_id"])
+    tldr = conn.execute(
+        "SELECT tldr FROM summaries WHERE meeting_id = ? AND is_current = 1",
+        (meeting_id,),
+    ).fetchone()
 
-    events, emails = gathered["events"], gathered["emails"]
-    if not events and not emails:
-        return {"events": [], "emails": [], "model": None, "prompt_sha256": None,
-                "error": None, "notes": ""}
-
-    context = {
+    return {
         "thread_title": thread["title"],
         "thread_description": thread["description"] or "",
         "meeting_title": meeting["title"],
         "meeting_datetime": meeting["meeting_at"],
         "meeting_tldr": (tldr["tldr"] if tldr else "") or "",
-        "keywords": gathered["query"]["keywords"],
+        "keywords": keywords,
     }
+
+
+def rank_candidates_sync(
+    db_path, meeting_id: int, gathered: dict, model: str | None = None
+) -> dict:
+    """Rank a meeting's candidates. Thin wrapper: the work is in :func:`rank_sync`."""
+    with get_conn(db_path) as conn:
+        context = meeting_context(conn, meeting_id, gathered["query"]["keywords"])
+    return rank_sync(db_path, context, gathered, model)
+
+
+def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) -> dict:
+    """One LLM call. On failure the candidates come back unranked, not lost.
+
+    Takes the context rather than a meeting id so the periodic thread sweep can
+    reuse it: same prompt, same scores, same "unranked beats nothing" fallback.
+    """
+    with get_conn(db_path) as conn:
+        config = llm_svc.LLMConfig.from_db(conn, model_override=model)
+
+    events, emails = gathered["events"], gathered["emails"]
+    if not events and not emails:
+        return {"events": [], "emails": [], "model": None, "prompt_sha256": None,
+                "error": None, "notes": ""}
 
     prompt = prompts_svc.load("match_rank_prompt")
     if prompt.temperature is not None:
@@ -599,28 +616,44 @@ def attached_context(conn: sqlite3.Connection, meeting_id: int) -> dict:
     }
 
 
+def _unread_flags(auto: bool) -> tuple[int, str | None]:
+    """``(auto_attached, seen_at)`` for a newly attached row.
+
+    Anything a person ticked is seen the moment it lands -- they were looking at
+    it. Only the sweep leaves ``seen_at`` NULL, which is what makes the blue dot
+    and the bold row mean "the app did this while you were away".
+    """
+    return (1, None) if auto else (0, utcnow())
+
+
 def attach_event(
     conn: sqlite3.Connection,
     *,
     thread_id: int,
-    meeting_id: int,
+    meeting_id: int | None,
     event: dict,
     user_id: int,
+    auto: bool = False,
 ) -> None:
     """Write one calendar event onto a thread. Idempotent per (thread, uid).
 
-    The single place that knows this column list: the match-confirm flow and the
-    "create a meeting from an upcoming event" flow both land here, and a column
-    added in one but not the other is exactly how ``attached_context`` -- and so
-    the summarizer -- ends up reading a NULL.
+    The single place that knows this column list: the match-confirm flow, the
+    "create a meeting from an upcoming event" flow and the periodic sweep all
+    land here, and a column added in one but not the other is exactly how
+    ``attached_context`` -- and so the summarizer -- ends up reading a NULL.
+
+    ``meeting_id`` is None for a sweep: ``attached_context`` is per-meeting, so a
+    follow-up nobody has confirmed must not silently become an input to an
+    existing meeting's next summary.
     """
+    auto_attached, seen_at = _unread_flags(auto)
     conn.execute(
         """
         INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, url, summary,
             description, location, start_at, end_at, calendar_name, account,
             event_type, raw_json, relevance_score, relevance_reason,
-            source_uid, provider, attached_by, attached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            source_uid, provider, auto_attached, seen_at, attached_by, attached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id, uid) DO UPDATE SET
             meeting_id = excluded.meeting_id,
             relevance_score = excluded.relevance_score,
@@ -635,6 +668,51 @@ def attach_event(
             event.get("type"), json.dumps(event),
             event.get("relevance_score"), event.get("relevance_reason"),
             event.get("source_uid"), event.get("provider"),
+            auto_attached, seen_at,
+            user_id, utcnow(),
+        ),
+    )
+
+
+def attach_email(
+    conn: sqlite3.Connection,
+    *,
+    thread_id: int,
+    meeting_id: int | None,
+    email: dict,
+    user_id: int,
+    auto: bool = False,
+) -> None:
+    """Write one email onto a thread. Idempotent per (thread, message_id).
+
+    The counterpart to :func:`attach_event`, and for the same reason: two callers
+    writing this column list independently is how one of them starts leaving a
+    column NULL.
+    """
+    auto_attached, seen_at = _unread_flags(auto)
+    conn.execute(
+        """
+        INSERT INTO thread_emails (thread_id, meeting_id, mcp_id, message_id, sender,
+            subject, date, snippet, account, triage_level, tag, reason, summary,
+            score, raw_json, relevance_score, relevance_reason,
+            url, rfc_message_id, provider, auto_attached, seen_at,
+            attached_by, attached_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id, message_id) DO UPDATE SET
+            meeting_id = excluded.meeting_id,
+            relevance_score = excluded.relevance_score,
+            relevance_reason = excluded.relevance_reason
+        """,
+        (
+            thread_id, meeting_id, email.get("id"), email.get("message_id"),
+            email.get("sender"), email.get("subject"),
+            normalize_timestamp(email.get("date")), email.get("snippet"),
+            email.get("account"), email.get("triage_level"), email.get("tag"),
+            email.get("reason"), email.get("summary"), email.get("score"),
+            json.dumps(email), email.get("relevance_score"),
+            email.get("relevance_reason"),
+            email.get("url"), email.get("rfc_message_id"), email.get("provider"),
+            auto_attached, seen_at,
             user_id, utcnow(),
         ),
     )
@@ -681,29 +759,12 @@ def attach_selected(
         email = emails_by_id.get(message_id)
         if email is None:
             continue
-        conn.execute(
-            """
-            INSERT INTO thread_emails (thread_id, meeting_id, mcp_id, message_id, sender,
-                subject, date, snippet, account, triage_level, tag, reason, summary,
-                score, raw_json, relevance_score, relevance_reason,
-                url, rfc_message_id, provider, attached_by, attached_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(thread_id, message_id) DO UPDATE SET
-                meeting_id = excluded.meeting_id,
-                relevance_score = excluded.relevance_score,
-                relevance_reason = excluded.relevance_reason
-            """,
-            (
-                thread_id, meeting_id, email.get("id"), message_id, email.get("sender"),
-                email.get("subject"), normalize_timestamp(email.get("date")),
-                email.get("snippet"),
-                email.get("account"), email.get("triage_level"), email.get("tag"),
-                email.get("reason"), email.get("summary"), email.get("score"),
-                json.dumps(email), email.get("relevance_score"),
-                email.get("relevance_reason"),
-                email.get("url"), email.get("rfc_message_id"), email.get("provider"),
-                user_id, utcnow(),
-            ),
+        attach_email(
+            conn,
+            thread_id=thread_id,
+            meeting_id=meeting_id,
+            email=email,
+            user_id=user_id,
         )
         attached_emails += 1
 
@@ -772,7 +833,7 @@ async def run_match(ctx) -> dict:
 
     gathered = await gather_candidates(
         conn_factory,
-        meeting_id,
+        thread_id=meeting["thread_id"],
         keywords=keywords,
         start=start,
         end=end,

@@ -44,10 +44,32 @@ Everything below is editable at runtime from **Settings**; `.env` only supplies 
 | `MMN_PUBLIC_BASE_URL` | Where the app is reachable, used to build OAuth redirect URIs. |
 | `MMN_GOOGLE_CLIENT_ID` / `_SECRET` | Google OAuth client, if you want Gmail/Calendar. |
 | `MMN_JOB_CONCURRENCY` | Background workers. Default 2. |
+| `MMN_AUTO_MATCH_ENABLED` | Watch threads for follow-ups on a timer. Off by default — see below. |
 
 Each connected account has a **Test** button in **Settings → Integrations**. It reports each leg
 separately — an account can reach a calendar while its mailbox login is rejected — and names the
 failure you actually hit rather than a generic error.
+
+### Automatic follow-ups
+
+Matching is normally something you ask for: upload a recording, press **Find matches**, tick what
+belongs. With **Settings → Matching → Watch threads for follow-ups** switched on, the app also does
+it on a timer — every 30 minutes by default, per thread — and attaches anything it is confident
+about without asking. A thread that gained something shows a blue dot; inside it, the new email or
+event is bold and marked *New* until you open it, and opening the link clears both.
+
+Three properties make that safe to leave on:
+
+- **It attaches at 0.8, not the 0.6 it suggests at.** The threshold is configurable; below about 0.7
+  expect noise.
+- **It never touches a meeting.** Auto-attached items belong to the thread, so a summary is never
+  regenerated from something nobody confirmed.
+- **No language model, no attaching.** If the LLM is unavailable the sweep finds candidates, cannot
+  score them, and does nothing.
+
+It is off by default because it spends LLM tokens and provider quota on its own schedule. Threads
+that are archived, or that nobody has touched in 30 days, stop being watched. **Check now** on a
+thread runs exactly the same sweep immediately.
 
 ### Connecting a calendar and inbox
 

@@ -1,4 +1,4 @@
-/** Time formatting. Everything here takes seconds and returns a display string. */
+/** Time formatting. Durations take seconds; :func:`fmtRelative` takes an ISO stamp. */
 
 function pad(n: number): string {
   return n < 10 ? `0${n}` : String(n);
@@ -33,6 +33,27 @@ export function fmtDurationHuman(seconds: number): string {
   const m = Math.round((total % 3600) / 60);
   if (h === 0) return `${m} min`;
   return m === 0 ? `${h} hr` : `${h} hr ${m} min`;
+}
+
+/**
+ * How long ago, for a timestamp the backend produced: `just now`, `12m ago`.
+ *
+ * Past a month it gives the date instead -- "63d ago" is arithmetic the reader
+ * has to do, and by then the exact day is what they wanted anyway.
+ */
+export function fmtRelative(iso: string | null | undefined): string {
+  if (!iso) return '—';
+  const then = new Date(iso).getTime();
+  if (Number.isNaN(then)) return '—';
+
+  const mins = Math.round((Date.now() - then) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 30) return `${days}d ago`;
+  return new Date(iso).toLocaleDateString();
 }
 
 /** WebVTT cue timestamp: `HH:MM:SS.mmm`. Hours are mandatory in VTT. */
