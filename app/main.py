@@ -11,7 +11,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app import __version__
 from app.config import get_settings
-from app.db import get_conn, init_db, seed_mcp_servers
+from app.db import get_conn, init_db
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging, get_logger
 from app.jobs.queue import JobQueue, set_queue
@@ -43,7 +43,6 @@ async def lifespan(app: FastAPI):
     settings.audio_dir.mkdir(parents=True, exist_ok=True)
 
     init_db()
-    seed_mcp_servers()
     with get_conn() as conn:
         users_svc.seed_admin(conn)
         purged = users_svc.purge_expired_sessions(conn)

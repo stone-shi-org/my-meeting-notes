@@ -11,10 +11,11 @@ import json
 
 import pytest
 
-from app.db import get_conn, seed_mcp_servers, utcnow
+from app.db import get_conn, utcnow
 from app.errors import ConflictError, NotFoundError, ValidationError
 from app.services import integrations as svc
 from app.services import secretstore
+from tests.conftest import seed_legacy_mcp_servers
 
 
 def _add_users(db_path, *names: str) -> None:
@@ -31,7 +32,7 @@ def _add_users(db_path, *names: str) -> None:
 @pytest.fixture
 def db(initialised_db):
     """A database with the two seeded MCP servers and two users."""
-    seed_mcp_servers(initialised_db)
+    seed_legacy_mcp_servers(initialised_db)
     _add_users(initialised_db, "alice", "bob")
     return initialised_db
 
@@ -255,7 +256,7 @@ class TestMigration:
         assert config["base_url"]
         assert config["tool_name"] == "search_events"
         assert config["transport"] == "sse"
-        assert secretstore.decrypt(row["secret_json"])["auth_token"] == "test-calendar-token"
+        assert secretstore.decrypt(row["secret_json"])["auth_token"] == "legacy-cal-token"
 
     def test_a_users_own_override_wins_over_the_shared_account(self, db):
         with get_conn(db) as conn:
@@ -279,7 +280,7 @@ class TestMigration:
         assert json.loads(bob["config_json"])["profile"] == "bob-profile"
         assert secretstore.decrypt(bob["secret_json"])["auth_token"] == "bobs-own-token"
         # Alice had no override, so she keeps the shared account.
-        assert secretstore.decrypt(alice["secret_json"])["auth_token"] == "test-calendar-token"
+        assert secretstore.decrypt(alice["secret_json"])["auth_token"] == "legacy-cal-token"
 
     def test_a_profile_only_override_still_uses_the_shared_token(self, db):
         """Matches the pre-refactor resolution rule exactly."""
@@ -298,7 +299,7 @@ class TestMigration:
             ).fetchone()
 
         assert json.loads(bob["config_json"])["profile"] == "bob-inbox"
-        assert secretstore.decrypt(bob["secret_json"])["auth_token"] == "test-email-token"
+        assert secretstore.decrypt(bob["secret_json"])["auth_token"] == "legacy-mail-token"
 
     def test_running_it_twice_creates_nothing_extra(self, db):
         assert svc.migrate_mcp_servers(db) == 4

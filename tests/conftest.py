@@ -23,8 +23,6 @@ def isolated_settings(tmp_path, monkeypatch):
     """Point the app at a throwaway data dir and reset the Settings cache."""
     monkeypatch.setenv("MMN_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MMN_JOB_CONCURRENCY", "0")
-    monkeypatch.setenv("MMN_MCP_CALENDAR_TOKEN", "test-calendar-token")
-    monkeypatch.setenv("MMN_MCP_EMAIL_TOKEN", "test-email-token")
     monkeypatch.setenv("MMN_LLM_API_KEY", "test-llm-key")
     # Pinned so no test generates (and leaves behind) a data/secret.key, and so
     # the key does not change between tests that share encrypted fixtures.
@@ -56,6 +54,33 @@ def conn(initialised_db):
 @pytest.fixture
 def sample_diarization() -> dict:
     return json.loads((FIXTURES / "diarization_sample.json").read_text())
+
+
+# Values the app no longer writes: shared MCP config was replaced by per-user
+# integrations, and this shape only exists on databases created before that.
+LEGACY_MCP_SERVERS = (
+    ("calendar", "calendar", "http://calendar-mcp.test:4006", "search_events", "legacy-cal-token"),
+    ("email", "email", "http://email-mcp.test:4003", "search_emails", "legacy-mail-token"),
+)
+
+
+def seed_legacy_mcp_servers(db_path, *, profile: str = "shared-account") -> None:
+    """Recreate the pre-integrations ``mcp_servers`` rows.
+
+    Only the migration path still cares about this table, so the fixture data
+    lives here rather than in application code.
+    """
+    from app.db import utcnow
+
+    with get_conn(db_path) as conn:
+        now = utcnow()
+        for name, kind, base_url, tool, token in LEGACY_MCP_SERVERS:
+            conn.execute(
+                "INSERT INTO mcp_servers (name, kind, transport, enabled, base_url, "
+                "auth_token, tool_name, default_profile, timeout_sec, created_at, updated_at) "
+                "VALUES (?, ?, 'sse', 1, ?, ?, ?, ?, 60, ?, ?)",
+                (name, kind, base_url, token, tool, profile, now, now),
+            )
 
 
 # --------------------------------------------------------------------------- #

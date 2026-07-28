@@ -11,7 +11,7 @@ threads that surround them, on a single timeline.
 ## Quick start
 
 ```bash
-cp .env.example .env      # fill in the API key and MCP tokens
+cp .env.example .env      # fill in the diarization + LLM endpoints
 mkdir -p data
 docker compose up -d --build
 ```
@@ -27,7 +27,7 @@ new password immediately; nothing else in the app is reachable until you do.
 | **Diarize** | Posts to an OpenAI-compatible `/v1/audio/diarization` endpoint and stores the response **verbatim**. |
 | **Summarize** | An LLM writes a summary, decisions, open questions and action items. Runs automatically, and can be regenerated at any time. |
 | **Rename speakers** | `SPEAKER_00` → `Donna`, applied at render time. The stored diarization is never rewritten. |
-| **Match** | Searches your calendar and email over MCP, has the LLM rank what comes back, and you tick what to attach. |
+| **Match** | Searches the calendar and email accounts *you* connected, has the LLM rank what comes back, and you tick what to attach. |
 
 ## Configuration
 
@@ -39,45 +39,57 @@ Everything below is editable at runtime from **Settings**; `.env` only supplies 
 | `MMN_SESSION_COOKIE_SECURE` | Leave `false` on plain HTTP. Set `true` behind an HTTPS proxy — otherwise the browser will not send the cookie and login silently fails. |
 | `MMN_DIARIZATION_URL` / `_MODEL` / `_API_KEY` | The transcription service. |
 | `MMN_LLM_BASE_URL` / `_MODEL` / `_API_KEY` | Any OpenAI-compatible endpoint. |
-| `MMN_MCP_CALENDAR_URL` / `_TOKEN` | Calendar MCP server (SSE). |
-| `MMN_MCP_EMAIL_URL` / `_TOKEN` | Email MCP server (SSE). |
-| `MMN_MCP_PROFILE` | Account profile passed to both MCP tools. |
+| `MMN_SECRET_KEY` | Encrypts connected-account credentials. Optional: one is generated into `data/secret.key` on first boot. |
+| `MMN_PUBLIC_BASE_URL` | Where the app is reachable, used to build OAuth redirect URIs. |
+| `MMN_GOOGLE_CLIENT_ID` / `_SECRET` | Google OAuth client, if you want Gmail/Calendar. |
 | `MMN_JOB_CONCURRENCY` | Background workers. Default 2. |
 
-Use **Settings → Integrations → Test connection** to verify each MCP server. It reports the failure
-you actually hit — wrong token, wrong port, unreachable host, or a live server exposing the wrong
-tools — rather than a generic error.
+Each connected account has a **Test** button in **Settings → Integrations**. It reports each leg
+separately — an account can reach a calendar while its mailbox login is rejected — and names the
+failure you actually hit rather than a generic error.
 
-### Configuring per-user accounts
+### Connecting a calendar and inbox
 
-`MMN_MCP_PROFILE` / `MMN_MCP_CALENDAR_TOKEN` / `MMN_MCP_EMAIL_TOKEN` set the **shared** account —
-what everyone searches by default. That's the right setup for a single-household deployment where
-one set of real accounts sits behind many app logins.
+Calendars and inboxes are **per-user**. Nothing is connected by default and no account is shared:
+each person adds their own under **Settings → Integrations**, and one user can never see or search
+another's. A user with nothing connected simply has the match feature greyed out.
 
-If different app users have their own calendar/email accounts (e.g. each person runs their own
-profile on the calendarmcp / email-triage servers), each of them can point their own meetings at
-their own account instead:
+Credentials are encrypted at rest with the key in `MMN_SECRET_KEY`, or one generated into
+`data/secret.key` on first boot. **Back that file up.** Losing it does not break the app, but every
+connected account flips to "reconnect needed". Be clear-eyed about what it buys you: unless you set
+`MMN_SECRET_KEY` yourself, the key sits in the same `data/` volume as the database, so it protects a
+stolen database copy and not much else. The app refuses to start if both exist and disagree, rather
+than silently picking one and making every stored credential unreadable.
 
-1. Sign in as that user and go to **Settings → Integrations**.
-2. Under **Your account**, click **Use my own account** next to Calendar or Email.
-3. Enter the **profile name** your MCP administrator assigned you (e.g. your username on the
-   calendarmcp/email-triage server).
-4. If your profile also has its own bearer token (a separate `CALENDAR_PROFILE_TOKEN` /
-   `X-Profile-Token` from the shared one), paste it too. Leave it blank to authenticate with the
-   shared server token and only switch which account is searched.
-5. Click **Test** to confirm before saving.
+#### Google (Gmail + Calendar)
 
-With no override, a user's meetings search the shared account. Clicking **Use shared account
-instead** removes the override entirely.
+An admin registers one OAuth client for the whole app; each user then authorises their own Google
+account against it.
 
-An admin can also set this up on a user's behalf — useful since the profile/token usually has to be
-provisioned first by whoever administers the calendarmcp/email-triage servers:
+1. In [Google Cloud Console](https://console.cloud.google.com/apis/credentials), create an **OAuth
+   client ID** of type *Web application*.
+2. Add an authorised redirect URI of `<public base url>/api/integrations/oauth/google/callback`.
+   Google accepts `https://` or `http://localhost` only — a LAN address like
+   `http://10.0.0.5:4020` is **rejected**, so either reach the app over localhost (an SSH tunnel is
+   fine) or put it behind HTTPS.
+3. Enable the **Google Calendar API** and the **Gmail API** for the project.
+4. Set the OAuth consent screen's publishing status to **In production**. This matters: while it is
+   in *Testing*, Google expires refresh tokens after 7 days and everyone has to reconnect weekly.
+   Publishing unverified is enough to stop that clock — you will click past an "unverified app"
+   warning when connecting, which is expected for a self-hosted tool.
+5. Paste the client ID and secret into **Settings → Integrations → Google sign-in**, along with the
+   public base URL.
 
-```bash
-curl -X PUT http://localhost:4020/api/users/<user_id>/mcp-profiles/calendar \
-  -H 'Content-Type: application/json' -H "Cookie: mmn_session=<admin session cookie>" \
-  -d '{"profile": "jenny", "auth_token": "jenny-profile-token-or-omit-for-shared"}'
-```
+Users then click **Add integration → Google → Continue**. The app asks for read-only Calendar and
+Gmail access. `gmail.readonly` is a *restricted* scope; there is no lighter alternative, because the
+metadata-only scope forbids the search query the feature is built on.
+
+#### MCP calendar/email servers
+
+If you run the calendarmcp / email-triage MCP servers, add them under **Add integration → Calendar
+MCP server** (or Email). Each user supplies the server URL, their own profile name on it, and a
+token. Upgrading from a version before per-user integrations migrates existing shared config onto
+every existing account automatically, so nothing stops working.
 
 ## Development
 

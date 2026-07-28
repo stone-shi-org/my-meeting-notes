@@ -7,7 +7,7 @@ import sqlite3
 
 import pytest
 
-from app.db import get_conn, init_db, seed_mcp_servers, utcnow
+from app.db import get_conn, init_db, utcnow
 
 EXPECTED_TABLES = {
     "users",
@@ -319,44 +319,6 @@ def test_username_is_case_insensitively_unique(conn):
 # --------------------------------------------------------------------------- #
 # MCP server seeding
 # --------------------------------------------------------------------------- #
-
-
-def test_seed_mcp_servers_inserts_both_over_sse(initialised_db):
-    seed_mcp_servers(initialised_db)
-    with get_conn(initialised_db) as conn:
-        rows = {r["name"]: r for r in conn.execute("SELECT * FROM mcp_servers")}
-
-    assert set(rows) == {"calendar", "email"}
-    assert rows["calendar"]["transport"] == "sse"
-    assert rows["calendar"]["tool_name"] == "search_events"
-    assert rows["calendar"]["base_url"].endswith(":4006")
-    assert rows["email"]["transport"] == "sse"
-    assert rows["email"]["tool_name"] == "search_emails"
-    assert rows["email"]["base_url"].endswith(":4003")
-
-
-def test_seed_mcp_servers_takes_tokens_from_environment(initialised_db):
-    seed_mcp_servers(initialised_db)
-    with get_conn(initialised_db) as conn:
-        rows = {r["name"]: r for r in conn.execute("SELECT * FROM mcp_servers")}
-    assert rows["calendar"]["auth_token"] == "test-calendar-token"
-    assert rows["email"]["auth_token"] == "test-email-token"
-
-
-def test_seed_mcp_servers_does_not_clobber_user_edits(initialised_db):
-    seed_mcp_servers(initialised_db)
-    with get_conn(initialised_db) as conn:
-        conn.execute(
-            "UPDATE mcp_servers SET auth_token = 'edited-in-settings' WHERE name = 'email'"
-        )
-
-    seed_mcp_servers(initialised_db)  # e.g. a container restart
-
-    with get_conn(initialised_db) as conn:
-        token = conn.execute(
-            "SELECT auth_token FROM mcp_servers WHERE name = 'email'"
-        ).fetchone()[0]
-    assert token == "edited-in-settings"
 
 
 def test_utcnow_is_iso8601_utc():

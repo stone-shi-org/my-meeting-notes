@@ -41,12 +41,18 @@ def test_lifespan_creates_data_directories(client, isolated_settings):
     assert isolated_settings.db_path.exists()
 
 
-def test_lifespan_seeds_mcp_servers(client, isolated_settings):
+def test_lifespan_seeds_no_shared_server_config(client, isolated_settings):
+    """Nothing is connected on a fresh install any more.
+
+    Calendars and inboxes are per-user, so a new deployment starts empty and each
+    person connects their own in Settings -- rather than everyone inheriting one
+    account seeded from the environment.
+    """
     from app.db import get_conn
 
     with get_conn(isolated_settings.db_path) as conn:
-        names = {r["name"] for r in conn.execute("SELECT name FROM mcp_servers")}
-    assert names == {"calendar", "email"}
+        assert conn.execute("SELECT COUNT(*) FROM mcp_servers").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM integrations").fetchone()[0] == 0
 
 
 def test_unknown_api_route_returns_json_not_the_spa(client):

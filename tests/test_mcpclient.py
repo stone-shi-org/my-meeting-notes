@@ -331,46 +331,6 @@ class TestTestConnection:
         assert result["tools"] == []
 
 
-# --------------------------------------------------------------------------- #
-# Config loading
-# --------------------------------------------------------------------------- #
-
-
-class TestConfigFromRow:
-    def test_seeded_rows_load(self, conn):
-        from app.db import seed_mcp_servers
-
-        seed_mcp_servers(conn.execute("PRAGMA database_list").fetchone()[2])
-
-        calendar = mcp.load_config(conn, "calendar")
-        assert calendar.transport == "sse"
-        assert calendar.tool_name == "search_events"
-        assert calendar.base_url.endswith(":4006")
-
-        email = mcp.load_config(conn, "email")
-        assert email.tool_name == "search_emails"
-
-    def test_an_unknown_server_is_404(self, conn):
-        from app.errors import NotFoundError
-
-        with pytest.raises(NotFoundError):
-            mcp.load_config(conn, "slack")
-
-    def test_json_columns_are_decoded(self, conn):
-        from app.db import utcnow
-
-        conn.execute(
-            """
-            INSERT INTO mcp_servers (name, kind, transport, tool_name, args_json,
-                                     env_json, created_at, updated_at)
-            VALUES ('x', 'calendar', 'stdio', 'search_events', ?, ?, ?, ?)
-            """,
-            (
-                json.dumps(["mcp_server.py"]),
-                json.dumps({"CALENDAR_MCP_TRANSPORT": "stdio"}),
-                utcnow(), utcnow(),
-            ),
-        )
-        config = mcp.load_config(conn, "x")
-        assert config.args == ["mcp_server.py"]
-        assert config.env == {"CALENDAR_MCP_TRANSPORT": "stdio"}
+# Config loading moved out of this module: which server to reach and whose
+# account to search now comes from a per-user integrations row, covered by
+# tests/test_providers_loader.py and tests/test_integrations.py.

@@ -14,8 +14,11 @@ app/
   db.py          THE WHOLE SCHEMA in one idempotent init_db()
   deps.py        current_user / active_user / require_admin / owner_scope
   security.py    stdlib scrypt + opaque session tokens
-  routers/       auth users threads meetings transcripts summaries matching jobs settings_api system
-  services/      audio diarize llm prompts summarize transcript mcpclient matching pipeline threads users
+  routers/       auth users integrations threads meetings transcripts summaries matching jobs
+                 settings_api system
+  services/      audio diarize llm prompts summarize transcript matching pipeline threads users
+                 integrations secretstore mcpclient
+  services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
   prompts/       summary_prompt.md · match_rank_prompt.md   <- EDITABLE, no deploy needed
 web/src/         types api lib hooks player components pages routes
@@ -55,9 +58,43 @@ enqueue onto an `asyncio.Queue` whose waiter belongs to a different loop, and ba
 queued forever. `tests/conftest.py` shares one client and authenticates alternate users with a
 Bearer header instead.
 
-## MCP servers
+## Integrations (calendar + email)
 
-Both are SSE and both are deployed:
+Per-user, never shared. `app/services/providers/` holds one module per backend behind the protocol
+in `base.py`; `matching.py` talks to exactly one thing — `providers.loader.load_for_user` — so adding
+a provider means writing a module and a registry entry and touching nothing in the pipeline.
+
+Providers take **structured intent** (keywords + a window) and build their own native query. The old
+design handed everyone a pre-built Gmail query string, which cannot work for IMAP or Zoho. Results
+come back as frozen dataclasses, not free-form dicts: candidates get persisted three times per run
+(`candidates_json`, `ranked_json`, `raw_json`), so a raw provider payload would be stored three times
+over, and the fixed field set is what guarantees `attached_context` — and therefore the summarizer —
+always sees populated columns.
+
+**`uid` is app-owned, not the provider's.** Google with `singleEvents=true` returns the *same*
+`iCalUID` for every occurrence of a recurrence, and CalDAV shares one `UID` across a recurrence set,
+so keying on it collapses a weekly standup into one candidate. `uid` is
+`{provider}:{integration_id}:{instance}`; the provider's own series identity lives in `source_uid`,
+which is what cross-provider dedup keys on. Same rule for `message_id` vs `rfc_message_id`.
+
+**The MCP adapter is the deliberate exception** — it emits `uid`/`message_id` verbatim. Everything
+attached before the migration is stored under the bare MCP uid, so namespacing it would make each one
+fail the already-attached check and re-attach as a duplicate.
+
+**Aggregate errors only when every account of a kind failed.** `match_runs.calendar_error` /
+`email_error` are derived; per-account detail is in `source_errors_json`. Setting the aggregate on any
+single failure would put a warning banner on a healthy search, more often the more accounts you add.
+
+Credentials are Fernet-encrypted (`services/secretstore.py`). Refresh has exactly one owner
+(`providers/tokens.py`): per-integration `asyncio.Lock`, a double-checked re-read inside it, a DB
+lease, and a `secret_version` CAS on write-back — **if the CAS is lost the new token is discarded**,
+because writing it would orphan whichever token the database already holds.
+
+### MCP servers
+
+Still supported, now as two providers (`mcp_calendar`, `mcp_email`) configured per user.
+`services/mcpclient.py` is only the wire protocol; which server and whose account comes from the
+integration row.
 
 | | URL | Tool |
 |---|---|---|
@@ -74,14 +111,16 @@ Handshake, if you need to reproduce it by hand: `GET {base}/sse` → first event
 `event: endpoint` / `data: /messages/?session_id=…`; POST JSON-RPC there; replies come back on the
 SSE stream, not the POST response.
 
-### Per-user profiles
+### Google
 
-`mcp_servers` is shared config — how the app *reaches* a server. `user_mcp_profiles` is per-user —
-*whose* calendar/inbox on that server a given app user searches. Resolution is
-`mcpclient.resolve_effective_config(conn, server_name, user_id)`: no row means everyone shares
-`mcp_servers.default_profile`/`auth_token`; a row overrides the profile and, if it carries its own
-token, the token too — a profile-only row still authenticates with the shared token. See "Configuring
-per-user accounts" in README.md.
+`gmail.readonly` is a **restricted** scope and `gmail.metadata` is not a lighter substitute — it
+forbids the `q` parameter the whole feature depends on. An OAuth app left in *Testing* status issues
+refresh tokens that expire after **7 days**; setting the consent screen to "In production"
+(unverified is enough) is the fix, and it is an operator action the code cannot enforce — hence
+first-class `reauth_required` handling.
+
+Gmail is an N+1: `messages.list` returns bare ids. Bound it at the *list* call (`maxResults`), fetch
+`format=metadata` with a `fields` mask, and cap concurrency at 8.
 
 ## Jobs
 
@@ -118,8 +157,14 @@ Progress is polled via `GET /api/jobs/{id}/events?after_id=` — works through e
 run must still leave its report on disk, or Bamboo says "no test results" instead of naming the
 failure. `test-reports/` is wiped first, because Bamboo fails builds on stale result files.
 
-Everything network-facing is faked at two seams: `respx` for `httpx` (diarizer, LLM) and a
-monkeypatched `MCPClient`. The suite runs offline.
+Everything network-facing is faked at two seams: `respx` for `httpx` (diarizer, LLM, Google, and
+CalDAV once it lands — respx routes arbitrary methods, which is why CalDAV must go over httpx rather
+than the `requests`-based `caldav` package) and a monkeypatched provider. The suite runs offline.
+
+Provider fakes go in at `providers.loader.load_for_user`, one level above the transport — so
+`test_matching.py` describes "a calendar account failed" rather than "an SSE handshake failed" and
+stays true whichever backend the account uses. `test_providers_loader.py` deliberately fakes lower,
+at `MCPClient`, to exercise the real loader → registry → provider → config chain.
 
 `tests/fixtures/diarization_sample.json` is a real captured response — 79 segments, two speakers,
 and three non-speech markers (two `[Music]`, one `[Environmental Sounds]`).

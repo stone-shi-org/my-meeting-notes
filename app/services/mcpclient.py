@@ -1,4 +1,4 @@
-"""MCP client for the calendar and email servers.
+"""MCP transport for the calendar and email servers.
 
 One class, two transports. SSE is the deployed path for both servers; stdio is
 kept for host-side debugging and cannot work inside the container (calendarmcp's
@@ -6,7 +6,12 @@ venv pins the host's /usr/bin/python3.14).
 
 Sessions are per-call rather than pooled: matching runs a couple of times per
 meeting, the handshake is ~200 ms against a diarization that takes minutes, and
-a Settings edit then takes effect immediately with no cache to invalidate.
+an edited integration then takes effect immediately with no cache to invalidate.
+
+Scope note: this module is *only* the wire protocol now. Which server to reach
+and whose account to search comes from a per-user ``integrations`` row, assembled
+in ``providers/mcp.py`` -- the shared-config and per-user-override plumbing that
+used to live here went with the tables it read.
 """
 
 from __future__ import annotations
@@ -14,14 +19,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import sqlite3
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, AsyncIterator
 
-from app.db import utcnow
-from app.errors import MCPError, MCPTimeoutError, NotFoundError
+from app.errors import MCPError, MCPTimeoutError
 from app.logging_config import get_logger
 
 log = get_logger("mcp")
@@ -47,166 +50,7 @@ class MCPServerConfig:
     default_profile: str | None = None
     timeout_sec: int = 60
 
-    @classmethod
-    def from_row(cls, row: sqlite3.Row) -> "MCPServerConfig":
-        return cls(
-            name=row["name"],
-            kind=row["kind"],
-            transport=row["transport"],
-            tool_name=row["tool_name"],
-            enabled=bool(row["enabled"]),
-            base_url=row["base_url"],
-            auth_token=row["auth_token"],
-            command=row["command"],
-            args=json.loads(row["args_json"] or "[]"),
-            cwd=row["cwd"],
-            env=json.loads(row["env_json"] or "{}"),
-            default_profile=row["default_profile"],
-            timeout_sec=row["timeout_sec"] or 60,
-        )
 
-
-def load_config(conn: sqlite3.Connection, name: str) -> MCPServerConfig:
-    row = conn.execute("SELECT * FROM mcp_servers WHERE name = ?", (name,)).fetchone()
-    if row is None:
-        raise NotFoundError(f"MCP server {name!r} is not configured")
-    return MCPServerConfig.from_row(row)
-
-
-def list_configs(conn: sqlite3.Connection) -> list[MCPServerConfig]:
-    rows = conn.execute("SELECT * FROM mcp_servers ORDER BY name").fetchall()
-    return [MCPServerConfig.from_row(r) for r in rows]
-
-
-# --------------------------------------------------------------------------- #
-# Per-user account overrides
-#
-# A shared mcp_servers row describes how to *reach* a server (transport, URL,
-# tool name). A user_mcp_profiles row says *which account on that server*
-# this particular app user should be searched against -- e.g. so Jenny's
-# meetings search her calendar/inbox rather than the admin's.
-# --------------------------------------------------------------------------- #
-
-
-def get_user_override(
-    conn: sqlite3.Connection, user_id: int, server_name: str
-) -> sqlite3.Row | None:
-    return conn.execute(
-        "SELECT * FROM user_mcp_profiles WHERE user_id = ? AND server_name = ?",
-        (user_id, server_name),
-    ).fetchone()
-
-
-def set_user_override(
-    conn: sqlite3.Connection,
-    user_id: int,
-    server_name: str,
-    *,
-    profile: str,
-    auth_token: str | None = None,
-    clear_token: bool = False,
-) -> None:
-    """Set or update a user's profile for a server.
-
-    ``auth_token=None`` leaves an existing personal token untouched (so saving
-    just a profile change doesn't blank out a token set earlier);
-    ``clear_token=True`` explicitly reverts to the server's shared token.
-    """
-    load_config(conn, server_name)  # 404s if the server doesn't exist
-    existing = get_user_override(conn, user_id, server_name)
-    now = utcnow()
-
-    token = None if clear_token else auth_token
-    if not clear_token and auth_token is None and existing is not None:
-        token = existing["auth_token"]
-
-    conn.execute(
-        """
-        INSERT INTO user_mcp_profiles (user_id, server_name, profile, auth_token, updated_at)
-        VALUES (?, ?, ?, ?, ?)
-        ON CONFLICT(user_id, server_name) DO UPDATE SET
-            profile = excluded.profile, auth_token = excluded.auth_token,
-            updated_at = excluded.updated_at
-        """,
-        (user_id, server_name, profile, token, now),
-    )
-
-
-def resolve_token_update(auth_token: str | None) -> tuple[str | None, bool]:
-    """Interpret the tri-state token field shared by the self-service and
-    admin endpoints: unset (leave alone), cleared (empty string), a masked
-    echo of what was displayed (leave alone), or a genuinely new value.
-
-    Returns ``(auth_token, clear_token)`` ready for :func:`set_user_override`.
-    """
-    if auth_token == "":
-        return None, True
-    if auth_token is not None and auth_token.startswith("••••"):
-        return None, False
-    return auth_token, False
-
-
-def delete_user_override(conn: sqlite3.Connection, user_id: int, server_name: str) -> bool:
-    """Remove the override entirely, reverting both profile and token to shared."""
-    cur = conn.execute(
-        "DELETE FROM user_mcp_profiles WHERE user_id = ? AND server_name = ?",
-        (user_id, server_name),
-    )
-    return cur.rowcount > 0
-
-
-def resolve_effective_config(
-    conn: sqlite3.Connection, server_name: str, user_id: int | None
-) -> MCPServerConfig:
-    """The config to actually connect with: shared server settings, with this
-    user's profile/token overlaid if they have one.
-
-    ``user_id=None`` (e.g. an admin testing the shared config) returns the
-    shared config unchanged.
-    """
-    base = load_config(conn, server_name)
-    if user_id is None:
-        return base
-
-    override = get_user_override(conn, user_id, server_name)
-    if override is None:
-        return base
-
-    return replace(
-        base,
-        default_profile=override["profile"],
-        auth_token=override["auth_token"] or base.auth_token,
-    )
-
-
-def _mask(value: str | None) -> str | None:
-    if not value:
-        return None
-    return f"••••{value[-4:]}" if len(value) > 4 else "••••"
-
-
-def describe_user_profile(conn: sqlite3.Connection, user_id: int, server_name: str) -> dict:
-    """Shape consumed by ``UserMcpProfileOut`` -- the resolved account plus
-    enough of the shared config to explain where a fallback would come from."""
-    base = load_config(conn, server_name)
-    override = get_user_override(conn, user_id, server_name)
-
-    return {
-        "server_name": base.name,
-        "kind": base.kind,
-        "enabled": base.enabled,
-        "tool_name": base.tool_name,
-        "shared_profile": base.default_profile,
-        "profile": (override["profile"] if override is not None else base.default_profile),
-        "has_override": override is not None,
-        "has_personal_token": bool(override is not None and override["auth_token"]),
-        "auth_token": (
-            _mask(override["auth_token"])
-            if override is not None and override["auth_token"]
-            else None
-        ),
-        "last_test": None,
-    }
 
 
 def parse_tool_result(result: Any) -> list[dict]:
@@ -452,20 +296,3 @@ class MCPClient:
         )
 
 
-def record_test_result(conn: sqlite3.Connection, name: str, result: dict) -> None:
-    conn.execute(
-        """
-        UPDATE mcp_servers
-           SET last_test_at = ?, last_test_ok = ?, last_test_error = ?,
-               last_test_tools_json = ?, updated_at = ?
-         WHERE name = ?
-        """,
-        (
-            utcnow(),
-            int(bool(result.get("ok"))),
-            result.get("error"),
-            json.dumps(result.get("tools") or []),
-            utcnow(),
-            name,
-        ),
-    )
