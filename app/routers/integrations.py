@@ -26,7 +26,7 @@ from app.schemas import (
     UpdateIntegrationRequest,
 )
 from app.services import integrations as svc
-from app.services.providers import google, loader, oauth, registry
+from app.services.providers import google, loader, oauth, registry, zoho
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 log = get_logger("integrations_api")
@@ -66,8 +66,17 @@ def my_summary(
 
 # Only OAuth providers appear here; token/password providers are created
 # directly through POST /api/integrations.
+#
+# Each entry is (build_client, fetch_identity, initial_config). The third pins
+# anything the account needs remembering at connect time -- Zoho's data centre,
+# for instance, which is a property of the account rather than of the app.
 OAUTH_CLIENTS = {
-    "google": (google.client_for, google.fetch_identity),
+    "google": (google.client_for, google.fetch_identity, lambda conn: {}),
+    "zoho": (
+        zoho.client_for,
+        zoho.fetch_identity,
+        lambda conn: {"dc": zoho.data_centre(conn)},
+    ),
 }
 
 
@@ -82,7 +91,7 @@ def oauth_start(
     if provider not in OAUTH_CLIENTS:
         raise ValidationError(f"{provider} is not connected by authorising it")
 
-    build_client, _ = OAUTH_CLIENTS[provider]
+    build_client, _, _initial = OAUTH_CLIENTS[provider]
     client = build_client(conn)
     redirect = oauth.redirect_uri(conn, provider)
     nonce = oauth.new_nonce()
@@ -124,13 +133,13 @@ def oauth_callback(
     if provider not in OAUTH_CLIENTS:
         return RedirectResponse(f"{settings_url}?error=unknown_provider", status_code=303)
 
-    build_client, fetch_identity = OAUTH_CLIENTS[provider]
+    build_client, fetch_identity, initial_config = OAUTH_CLIENTS[provider]
     payload = oauth.parse_state(state, mmn_oauth_nonce)
     user_id = payload["u"]
 
     client = build_client(conn)
     granted = oauth.exchange_code(client, code, oauth.redirect_uri(conn, provider))
-    identity = fetch_identity(granted["access_token"])
+    identity = fetch_identity(granted["access_token"], conn)
     if not identity.get("account_key"):
         return RedirectResponse(f"{settings_url}?error=no_identity", status_code=303)
 
@@ -175,7 +184,7 @@ def oauth_callback(
             provider=provider,
             account_key=identity["account_key"],
             account_label=identity.get("email") or identity["account_key"],
-            config={},
+            config=initial_config(conn),
             secret=secret,
             status="ok",
             scopes=granted.get("scope"),

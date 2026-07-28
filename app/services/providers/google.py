@@ -81,8 +81,12 @@ def client_for(conn) -> oauth.OAuthClient:
     )
 
 
-def fetch_identity(access_token: str) -> dict:
-    """Who just authorised us. Called in the callback, before any row exists."""
+def fetch_identity(access_token: str, conn=None) -> dict:
+    """Who just authorised us. Called in the callback, before any row exists.
+
+    ``conn`` is unused here but keeps the signature uniform across providers;
+    Zoho needs it to know which data centre to ask.
+    """
     with httpx.Client(timeout=REQUEST_TIMEOUT_SEC) as http:
         response = http.get(
             USERINFO_URL, headers={"Authorization": f"Bearer {access_token}"}

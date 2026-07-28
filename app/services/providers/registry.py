@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.errors import NotFoundError
-from app.services.providers import google, mcp
+from app.services.providers import apple, google, mcp, zoho
 
 CALENDAR = "calendar"
 EMAIL = "email"
@@ -44,6 +44,24 @@ REGISTRY: dict[str, ProviderSpec] = {
         auth_type="oauth2",
         factory=google.GoogleProvider,
         docs_url="https://console.cloud.google.com/apis/credentials",
+    ),
+    "apple": ProviderSpec(
+        id="apple",
+        label="Apple iCloud",
+        kinds=frozenset({CALENDAR, EMAIL}),
+        # Apple offers no OAuth for iCloud; an app-specific password is the only
+        # supported route, not a shortcut we chose.
+        auth_type="password",
+        factory=apple.AppleProvider,
+        docs_url="https://appleid.apple.com/account/manage",
+    ),
+    "zoho": ProviderSpec(
+        id="zoho",
+        label="Zoho",
+        kinds=frozenset({CALENDAR, EMAIL}),
+        auth_type="oauth2",
+        factory=zoho.ZohoProvider,
+        docs_url="https://api-console.zoho.com/",
     ),
     "mcp_calendar": ProviderSpec(
         id="mcp_calendar",

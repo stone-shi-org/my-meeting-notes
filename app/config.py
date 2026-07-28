@@ -48,6 +48,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # own account, and their tokens are per-user.
     "google_client_id": ("str", False),
     "google_client_secret": ("str", True),
+    "zoho_client_id": ("str", False),
+    "zoho_client_secret": ("str", True),
+    # Zoho is regional: an account lives in one data centre and its API hosts
+    # carry that suffix. The wrong one authenticates fine and returns nothing.
+    "zoho_dc": ("str", False),
 }
 
 
@@ -130,6 +135,9 @@ class Settings(BaseSettings):
     public_base_url: str = "http://localhost:4020"
     google_client_id: str = ""
     google_client_secret: str = ""
+    zoho_client_id: str = ""
+    zoho_client_secret: str = ""
+    zoho_dc: str = "com"
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20
