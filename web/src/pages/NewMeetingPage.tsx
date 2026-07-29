@@ -1,7 +1,8 @@
 import { useQuery } from '@tanstack/react-query';
-import { FileAudio, Upload, X } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { FileAudio, Mic, Upload, X } from 'lucide-react';
+import { useCallback, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
+import { RecorderPanel } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { api, uploadMeeting } from '@/lib/api';
@@ -25,6 +26,7 @@ export function NewMeetingPage() {
   const [params] = useSearchParams();
   const presetThread = params.get('threadId');
 
+  const [mode, setMode] = useState<'upload' | 'record'>('upload');
   const [file, setFile] = useState<File | null>(null);
   const [dragging, setDragging] = useState(false);
   const [title, setTitle] = useState('');
@@ -56,10 +58,33 @@ export function NewMeetingPage() {
     }
   }
 
+  /** Take the finished clip from the recorder as if it had been dropped here.
+   *
+   * Its generated filename is a timestamp, which makes a poor meeting title, so
+   * this one titles from the clock instead of from the name. */
+  const takeRecording = useCallback((next: File | null, durationSec: number) => {
+    setFile(next);
+    setError(null);
+    if (!next) return;
+    setTitle((current) =>
+      current
+        ? current
+        : `Recording ${new Date(next.lastModified).toLocaleString(undefined, {
+            day: 'numeric',
+            month: 'short',
+            hour: '2-digit',
+            minute: '2-digit',
+          })}`,
+    );
+    if (durationSec < 1) {
+      setError('That recording is under a second long — it will not transcribe to much.');
+    }
+  }, []);
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
-      setError('Choose an audio file first');
+      setError(mode === 'record' ? 'Record something first' : 'Choose an audio file first');
       return;
     }
     if (creatingNewThread && !newThreadTitle.trim()) {
@@ -107,12 +132,52 @@ export function NewMeetingPage() {
       <div>
         <h1 className="font-display text-2xl font-semibold">New meeting</h1>
         <p className="mt-1 text-sm text-fg-subtle">
-          Upload a recording. We convert it, transcribe it with speaker labels, and summarize it.
+          Record it here or upload a file. We convert it, transcribe it with speaker labels, and
+          summarize it.
         </p>
       </div>
 
       <form onSubmit={submit} className="space-y-5">
-        {!file ? (
+        <div
+          role="tablist"
+          aria-label="Where the audio comes from"
+          className="inline-flex rounded-lg border border-border bg-surface-2/60 p-1"
+        >
+          {([
+            { id: 'upload', label: 'Upload a file', icon: Upload },
+            { id: 'record', label: 'Record now', icon: Mic },
+          ] as const).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              role="tab"
+              aria-selected={mode === id}
+              disabled={uploading}
+              onClick={() => {
+                setMode(id);
+                // Switching away drops whatever was staged: the two modes each
+                // own their own source, and a stale file behind the other tab
+                // is how you upload the wrong thing.
+                pick(null);
+              }}
+              className={cn(
+                'inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-fast',
+                mode === id
+                  ? 'bg-surface text-fg shadow-xs'
+                  : 'text-fg-muted hover:text-fg disabled:opacity-60',
+              )}
+            >
+              <Icon className="size-4" aria-hidden />
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {mode === 'record' && (
+          <RecorderPanel onRecorded={takeRecording} disabled={uploading} />
+        )}
+
+        {mode === 'upload' && !file ? (
           <div
             onDragOver={(e) => {
               e.preventDefault();
@@ -152,7 +217,10 @@ export function NewMeetingPage() {
               Browse files
             </Button>
           </div>
-        ) : (
+        ) : // In record mode the panel shows its own player and Discard, so the
+        // file card would say it twice -- except while uploading, when it is
+        // the only thing carrying the progress bar.
+        file && (mode === 'upload' || uploading) ? (
           <Card className="flex items-center gap-3 p-4">
             <div className="grid size-10 shrink-0 place-items-center rounded-md bg-primary-soft">
               <FileAudio className="size-5 text-primary-soft-fg" aria-hidden />
@@ -186,7 +254,7 @@ export function NewMeetingPage() {
               </Button>
             )}
           </Card>
-        )}
+        ) : null}
 
         <Card className="space-y-4 p-5">
           <div>

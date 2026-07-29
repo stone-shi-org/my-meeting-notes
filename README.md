@@ -24,6 +24,7 @@ new password immediately; nothing else in the app is reachable until you do.
 | | |
 |---|---|
 | **Upload** | Any audio ffmpeg can read. Already-conformant 16 kHz mono WAV is used as-is; anything else is converted. Both the original and the converted file are kept. |
+| **Record** | Record straight into the page instead — microphone, or the audio of a browser tab with your own mic mixed in. See below for what each browser can actually capture. |
 | **Diarize** | Posts to an OpenAI-compatible `/v1/audio/diarization` endpoint and stores the response **verbatim**. |
 | **Summarize** | An LLM writes a summary, decisions, open questions and action items. Runs automatically, and can be regenerated at any time. |
 | **Rename speakers** | `SPEAKER_00` → `Donna`, applied at render time. The stored diarization is never rewritten. |
@@ -49,6 +50,32 @@ Everything below is editable at runtime from **Settings**; `.env` only supplies 
 Each connected account has a **Test** button in **Settings → Integrations**. It reports each leg
 separately — an account can reach a calendar while its mailbox login is rejected — and names the
 failure you actually hit rather than a generic error.
+
+### Recording in the browser
+
+**New meeting → Record now.** The clip goes through exactly the same pipeline as an upload.
+
+What you can capture depends on the browser and the OS, and not in an obvious way:
+
+| Source | Chrome / Edge | Firefox | Safari |
+|---|---|---|---|
+| **Microphone**, with a device picker | ✅ | ✅ | ✅ |
+| **A browser tab's audio** — the Meet/Zoom/Teams web call | ✅ **including macOS** | ✕ video only | ✕ video only |
+| **Whole desktop audio** | ✅ Windows, ChromeOS · **✕ macOS** | ✕ | ✕ |
+| **One native app's audio** | ✕ nowhere — no web API exists for it | ✕ | ✕ |
+
+Two consequences worth knowing:
+
+- **On a Mac, tab audio is the one screen-share audio that works.** Chrome gets nothing from macOS for
+  "Entire screen" or a single window, so those record silence. Tab capture is unaffected, and it is
+  what you want for a browser-based call anyway.
+- **To record a native app on macOS** — the desktop Zoom or Teams client — install a loopback device
+  (BlackHole, Loopback, Audio Hijack), send the app's output to it, and select it under
+  **Microphone**. It shows up there like any other input.
+
+When capturing a tab, leave **Also record my microphone** ticked, or you capture everyone except
+yourself. Watch the level meter for the first few seconds: a flat meter means the share was set up
+without its audio, which is the usual mistake and produces a perfectly valid recording of silence.
 
 ### Automatic follow-ups
 

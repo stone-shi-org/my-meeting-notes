@@ -23,6 +23,7 @@ app/
                  scheduler.py (the auto-match timer)
   prompts/       summary_prompt.md · match_rank_prompt.md   <- EDITABLE, no deploy needed
 web/src/         types api lib hooks player components pages routes
+  lib/recording.ts + hooks/useRecorder.ts   <- what each browser can capture, and the capture itself
 ```
 
 ## Things that will bite you
@@ -51,6 +52,25 @@ frontend half of the same trap `_caldav._stamp` guards on the server.
 **Gmail returns RFC 2822 timestamps.** Stored raw they sort lexically above every ISO date, so a
 July 15 email lands above a July 20 meeting on the timeline. `matching.normalize_timestamp` coerces
 on write, and the timeline sort normalises again for older rows.
+
+**An AudioContext runs on the audio hardware's clock, not the wall clock.** With no usable output
+device it renders *behind* real time — measured at 2.5s per 3s on a box with no sound card — so
+anything recorded through the graph comes out silently time-compressed. `useRecorder` therefore
+hangs the analyser off the sources as a tap and hands `MediaRecorder` the **raw track**, building a
+mixed stream only when the user asked to mix their mic into a capture. Do not "simplify" it back to
+one uniform graph.
+
+**MediaRecorder writes WebM with no duration**, because a stream does not know how long it will be.
+ffprobe reports nothing for the source file, so `_convert_stage` re-probes the converted wav and
+backfills `audio_duration_sec`; without that every browser recording has a NULL length in the
+player, the meeting card and the diarizer's progress estimate.
+`tests/fixtures/browser_recording.webm` is a real one (`ffmpeg -f webm -live 1`), and a test asserts
+it still declares no duration — the backfill test is vacuous the day that changes.
+
+**A display capture stream carries a video track.** Handing it to `MediaRecorder` under an `audio/*`
+mimeType is a `NotSupportedError`, so the recorder wraps the audio tracks in a fresh `MediaStream`.
+The video track is deliberately left running: stopping it ends the share, and Chrome ends the audio
+with it.
 
 **`diarizations.raw_json` is never UPDATEd.** Speaker names live in `speaker_map` and are applied at
 render time in `transcript.py`. A byte-equality test guards this.

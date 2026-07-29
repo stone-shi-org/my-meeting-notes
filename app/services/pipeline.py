@@ -89,12 +89,28 @@ async def _convert_stage(ctx: JobContext, meeting_id: int, info: audio_svc.Audio
     dest = _meeting_dir(meeting_id) / "audio16k.wav"
     await asyncio.to_thread(audio_svc.convert_to_wav16k_mono, Path(original), dest)
 
+    # A browser recording has no duration in its header: MediaRecorder writes
+    # WebM as a stream, and a stream does not know how long it will be. The
+    # converted wav always does, so re-probe when the probe stage came back
+    # blank -- everything downstream (the progress estimate, the player, the
+    # meeting card) reads this column.
+    duration = info.duration_sec if info else None
+    if duration is None:
+        try:
+            duration = (await asyncio.to_thread(audio_svc.probe, dest)).duration_sec
+            if duration:
+                ctx.event(f"Length {duration:.0f}s (the source did not declare one)")
+        except AudioError as exc:
+            log.warning("could not read the length of the converted audio: %s", exc)
+
     with get_conn(ctx.db_path) as conn:
         conn.execute(
             "UPDATE meetings SET audio_path = ?, audio_converted = 1, "
-            "audio_sample_rate = ?, audio_channels = ?, updated_at = ? WHERE id = ?",
+            "audio_sample_rate = ?, audio_channels = ?, "
+            "audio_duration_sec = COALESCE(audio_duration_sec, ?), "
+            "updated_at = ? WHERE id = ?",
             (str(dest), audio_svc.TARGET_SAMPLE_RATE, audio_svc.TARGET_CHANNELS,
-             utcnow(), meeting_id),
+             duration, utcnow(), meeting_id),
         )
 
     ctx.event(f"Wrote {dest.name} ({dest.stat().st_size // 1024} KB)")

@@ -182,6 +182,41 @@ def test_probe_records_duration_on_the_meeting(user_client):
     assert meeting["audio_duration_sec"] == pytest.approx(0.5, abs=0.2)
 
 
+class TestBrowserRecording:
+    """A clip from the in-page recorder, which is a WebM with no header duration.
+
+    MediaRecorder writes WebM as a stream and a stream does not know how long it
+    will be, so ffprobe reports nothing for the source file. The fixture is a
+    real one built the same way (`ffmpeg -f webm -live 1`).
+    """
+
+    def test_the_source_really_has_no_duration(self):
+        """Guards the premise: if this ever starts reporting one, the backfill
+        below is testing nothing."""
+        from app.services import audio as audio_svc
+
+        assert audio_svc.probe(FIXTURES / "browser_recording.webm").duration_sec is None
+
+    def test_it_uploads_and_processes(self, user_client):
+        body = upload(
+            user_client, path=FIXTURES / "browser_recording.webm", title="Recorded here"
+        )
+        assert body.status_code == 202
+
+        job = wait_for_job(user_client, body.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+    def test_the_length_is_recovered_from_the_converted_wav(self, user_client):
+        """Or the player, the meeting card and the diarizer's progress estimate
+        all sit on a NULL for every recording made in the browser."""
+        body = upload(user_client, path=FIXTURES / "browser_recording.webm").json()
+        wait_for_job(user_client, body["job_id"])
+
+        meeting = user_client.get(f"/api/meetings/{body['meeting_id']}").json()
+        assert meeting["audio_converted"] is True
+        assert meeting["audio_duration_sec"] == pytest.approx(1.0, abs=0.2)
+
+
 def test_diarization_is_stored_verbatim_and_on_disk(
     user_client, isolated_settings, sample_diarization
 ):
