@@ -3,13 +3,15 @@ import DOMPurify from 'dompurify';
 import { CheckSquare, Download, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
 import { marked } from 'marked';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
 import { PlayerBar } from '@/components/transcript/PlayerBar';
 import { TranscriptView } from '@/components/transcript/TranscriptView';
 import { MatchPanel } from '@/components/match/MatchPanel';
+import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
+import { AddRecordingCard } from '@/components/record/AddRecordingCard';
 import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
 import { usePlayerStore } from '@/player/playerStore';
 import { api } from '@/lib/api';
@@ -377,6 +379,8 @@ function DeepLinkSeek() {
 export function TranscriptPage() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const speakersRef = useRef<HTMLDivElement>(null);
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
 
   // Collapsed by default -- the transcript is reference material, not the
   // headline. Remembered so anyone who does read along isn't re-opening it
@@ -414,19 +418,38 @@ export function TranscriptPage() {
   const m = meeting.data;
 
   if (!m.has_transcript) {
+    const processing = m.status === 'processing';
     return (
       <div className="mx-auto max-w-2xl space-y-4">
         <Link to={`/threads/${m.thread_id}`} className="text-sm text-fg-subtle hover:text-fg">
           ← Back to thread
         </Link>
         <Card className="p-6">
-          <h1 className="font-display text-xl font-semibold">{m.title}</h1>
-          <p className="mt-2 text-sm text-fg-subtle">
-            {m.status === 'processing'
-              ? 'This recording is still being processed.'
-              : 'This meeting has no transcript yet.'}
-          </p>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h1 className="font-display text-xl font-semibold">{m.title}</h1>
+              <p className="mt-2 text-sm text-fg-subtle">
+                {processing
+                  ? 'This recording is still being processed.'
+                  : m.has_audio
+                    ? 'This meeting has a recording but no transcript — the last run did not finish.'
+                    : 'No recording yet. Add one below and it will be transcribed and summarized.'}
+              </p>
+            </div>
+            <DeleteMeetingButton
+              meeting={m}
+              onDeleted={() => {
+                void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(m.thread_id)] });
+                void queryClient.invalidateQueries({ queryKey: ['threads'] });
+                navigate(`/threads/${m.thread_id}`, { replace: true });
+              }}
+            />
+          </div>
         </Card>
+
+        {/* The dead end this used to be: a meeting created from a calendar
+            event had no way to ever receive its audio. */}
+        {!processing && <AddRecordingCard meeting={m} />}
       </div>
     );
   }

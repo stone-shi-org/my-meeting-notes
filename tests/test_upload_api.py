@@ -182,6 +182,126 @@ def test_probe_records_duration_on_the_meeting(user_client):
     assert meeting["audio_duration_sec"] == pytest.approx(0.5, abs=0.2)
 
 
+class TestAudioOntoAnExistingMeeting:
+    """A meeting can exist before its recording does.
+
+    Creating one from an upcoming calendar event is exactly that case, and
+    before this route existed such a meeting could never get a transcript: the
+    only upload endpoint always created a *new* meeting, stranding the attached
+    event and the speaker hints on the old one.
+    """
+
+    def add_audio(self, client, meeting_id, path=None, **fields):
+        path = path or (FIXTURES / "tiny16k.wav")
+        with path.open("rb") as fh:
+            return client.post(
+                f"/api/meetings/{meeting_id}/audio",
+                data=fields,
+                files={"file": (path.name, fh, "audio/wav")},
+            )
+
+    def blank_meeting(self, client):
+        return client.post(
+            "/api/meetings",
+            json={"new_thread_title": "Atlas", "title": "Kickoff", "meeting_at": None},
+        ).json()
+
+    def test_a_meeting_with_no_audio_can_be_given_some(self, user_client):
+        meeting = self.blank_meeting(user_client)
+        assert meeting["has_audio"] is False
+
+        resp = self.add_audio(user_client, meeting["id"])
+        assert resp.status_code == 202, resp.text
+        assert resp.json()["meeting_id"] == meeting["id"], "the same meeting, not a new one"
+
+        job = wait_for_job(user_client, resp.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        after = user_client.get(f"/api/meetings/{meeting['id']}").json()
+        assert after["has_audio"] is True
+        assert after["has_transcript"] is True
+
+    def test_it_stays_on_its_thread_and_keeps_its_speaker_hints(self, user_client):
+        """The reason this is not "delete it and upload again"."""
+        meeting = self.blank_meeting(user_client)
+        thread_id = meeting["thread_id"]
+
+        self.add_audio(user_client, meeting["id"], speaker_names="Ada, Grace")
+        after = user_client.get(f"/api/meetings/{meeting['id']}").json()
+
+        assert after["thread_id"] == thread_id
+        assert after["speaker_count"] == 2
+
+    def test_only_one_meeting_exists_afterwards(self, user_client):
+        meeting = self.blank_meeting(user_client)
+        self.add_audio(user_client, meeting["id"])
+
+        listing = user_client.get(
+            "/api/meetings", params={"thread_id": meeting["thread_id"]}
+        ).json()
+        assert listing["total"] == 1
+
+    def test_a_failed_attempt_can_be_replaced(self, user_client):
+        """Otherwise a bad first upload is another dead end."""
+        meeting = self.blank_meeting(user_client)
+        bad = self.add_audio(user_client, meeting["id"], path=FIXTURES / "icloud_recurring.ics")
+        assert bad.status_code == 400
+
+        good = self.add_audio(user_client, meeting["id"])
+        assert good.status_code == 202
+
+    def test_it_refuses_to_overwrite_a_transcript(self, user_client):
+        meeting = self.blank_meeting(user_client)
+        first = self.add_audio(user_client, meeting["id"])
+        wait_for_job(user_client, first.json()["job_id"])
+
+        second = self.add_audio(user_client, meeting["id"])
+        assert second.status_code == 409
+        assert "transcript" in second.json()["error"]["message"].lower()
+
+    def test_the_rejected_extension_check_still_applies(self, user_client, tmp_path):
+        meeting = self.blank_meeting(user_client)
+        junk = tmp_path / "notes.txt"
+        junk.write_text("not audio")
+        assert self.add_audio(user_client, meeting["id"], path=junk).status_code == 400
+
+    def test_an_empty_file_is_rejected_without_touching_the_meeting(
+        self, user_client, tmp_path
+    ):
+        meeting = self.blank_meeting(user_client)
+        empty = tmp_path / "empty.wav"
+        empty.write_bytes(b"")
+
+        assert self.add_audio(user_client, meeting["id"], path=empty).status_code == 400
+        # The meeting predates the request, so a bad upload must not delete it.
+        assert user_client.get(f"/api/meetings/{meeting['id']}").status_code == 200
+
+    def test_someone_elses_meeting_is_404(self, user_client, other_user_client):
+        meeting = self.blank_meeting(user_client)
+        assert self.add_audio(other_user_client, meeting["id"]).status_code == 404
+
+
+class TestDeletingABlankMeeting:
+    def test_a_meeting_with_no_audio_can_be_deleted(self, user_client):
+        meeting = user_client.post(
+            "/api/meetings", json={"new_thread_title": "Atlas", "title": "Oops"}
+        ).json()
+
+        assert user_client.delete(f"/api/meetings/{meeting['id']}").status_code == 200
+        assert user_client.get(f"/api/meetings/{meeting['id']}").status_code == 404
+
+    def test_the_thread_survives_its_last_meeting(self, user_client):
+        """Deleting the meeting must not take the thread's attached email and
+        calendar with it."""
+        meeting = user_client.post(
+            "/api/meetings", json={"new_thread_title": "Atlas", "title": "Oops"}
+        ).json()
+        user_client.delete(f"/api/meetings/{meeting['id']}")
+
+        thread = user_client.get(f"/api/threads/{meeting['thread_id']}").json()
+        assert thread["meeting_count"] == 0
+
+
 class TestBrowserRecording:
     """A clip from the in-page recorder, which is a WebM with no header duration.
 

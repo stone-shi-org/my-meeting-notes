@@ -18,7 +18,7 @@ from app.deps import (
     owner_scope,
     paginate,
 )
-from app.errors import ValidationError
+from app.errors import ConflictError, ValidationError
 from app.jobs import queue as queue_mod
 from app.logging_config import get_logger
 from app.schemas import (
@@ -117,6 +117,73 @@ def create_meeting(
     return MeetingOut(**threads_svc.row_to_meeting(row))
 
 
+def _check_extension(filename: str) -> None:
+    if not audio_svc.is_allowed_extension(filename):
+        raise ValidationError(
+            f"Unsupported file type {Path(filename).suffix!r}. "
+            f"Accepted: {', '.join(sorted(audio_svc.ALLOWED_EXTENSIONS))}"
+        )
+
+
+async def _stream_to_disk(file: UploadFile, dest: Path) -> int:
+    """Write the upload out in chunks and return the byte count.
+
+    Chunked because these files run to 100 MB and reading one into memory would
+    be a self-inflicted OOM. Deletes the partial file on any failure; the caller
+    owns whatever database row it had already created.
+    """
+    settings = get_settings()
+    max_bytes = settings.max_upload_mb * 1024 * 1024
+    written = 0
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(UPLOAD_CHUNK):
+                written += len(chunk)
+                if written > max_bytes:
+                    raise ValidationError(
+                        f"File exceeds the {settings.max_upload_mb} MB limit"
+                    )
+                out.write(chunk)
+        if written == 0:
+            raise ValidationError("Uploaded file is empty")
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
+
+    return written
+
+
+async def _queue_ingest(
+    conn: sqlite3.Connection,
+    *,
+    meeting_id: int,
+    thread_id: int,
+    user_id: int,
+    diarization_model: str | None,
+    summary_model: str | None,
+    auto_summarize: bool,
+) -> str:
+    job_id = queue_mod.create_job(
+        conn,
+        job_type="ingest",
+        user_id=user_id,
+        meeting_id=meeting_id,
+        thread_id=thread_id,
+        payload={
+            "meeting_id": meeting_id,
+            "diarization_model": diarization_model,
+            "summary_model": summary_model,
+            "auto_summarize": auto_summarize,
+            "user_id": user_id,
+        },
+    )
+    conn.commit()
+    await queue_mod.get_queue().enqueue(job_id)
+    return job_id
+
+
 @router.post("/upload", status_code=202)
 async def upload_meeting(
     file: UploadFile = File(...),
@@ -140,12 +207,7 @@ async def upload_meeting(
     """
     settings = get_settings()
     filename = file.filename or "upload"
-
-    if not audio_svc.is_allowed_extension(filename):
-        raise ValidationError(
-            f"Unsupported file type {Path(filename).suffix!r}. "
-            f"Accepted: {', '.join(sorted(audio_svc.ALLOWED_EXTENSIONS))}"
-        )
+    _check_extension(filename)
 
     resolved_thread = resolve_thread(
         conn,
@@ -165,34 +227,15 @@ async def upload_meeting(
     )
     meeting_id = meeting["id"]
 
-    target_dir = settings.audio_dir / str(meeting_id)
-    target_dir.mkdir(parents=True, exist_ok=True)
-    dest = target_dir / f"original{Path(filename).suffix.lower()}"
-
-    # Stream to disk in chunks: these files run to 100 MB and reading one into
-    # memory would be a self-inflicted OOM.
-    max_bytes = settings.max_upload_mb * 1024 * 1024
-    written = 0
+    dest = settings.audio_dir / str(meeting_id) / f"original{Path(filename).suffix.lower()}"
     try:
-        with dest.open("wb") as out:
-            while chunk := await file.read(UPLOAD_CHUNK):
-                written += len(chunk)
-                if written > max_bytes:
-                    raise ValidationError(
-                        f"File exceeds the {settings.max_upload_mb} MB limit"
-                    )
-                out.write(chunk)
+        written = await _stream_to_disk(file, dest)
     except Exception:
-        dest.unlink(missing_ok=True)
+        # This route created the meeting, so a failed upload takes it with it --
+        # unlike POST /{id}/audio, where the meeting predates the request.
         conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
         conn.commit()
         raise
-
-    if written == 0:
-        dest.unlink(missing_ok=True)
-        conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
-        conn.commit()
-        raise ValidationError("Uploaded file is empty")
 
     conn.execute(
         "UPDATE meetings SET original_filename = ?, original_path = ?, "
@@ -204,23 +247,15 @@ async def upload_meeting(
     if speaker_names:
         threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
 
-    job_id = queue_mod.create_job(
+    job_id = await _queue_ingest(
         conn,
-        job_type="ingest",
-        user_id=user.id,
         meeting_id=meeting_id,
         thread_id=resolved_thread,
-        payload={
-            "meeting_id": meeting_id,
-            "diarization_model": diarization_model,
-            "summary_model": summary_model,
-            "auto_summarize": auto_summarize,
-            "user_id": user.id,
-        },
+        user_id=user.id,
+        diarization_model=diarization_model,
+        summary_model=summary_model,
+        auto_summarize=auto_summarize,
     )
-    conn.commit()
-
-    await queue_mod.get_queue().enqueue(job_id)
 
     log.info(
         "user %s uploaded %s (%d bytes) as meeting %s, job %s",
@@ -229,6 +264,89 @@ async def upload_meeting(
     return {
         "meeting_id": meeting_id,
         "thread_id": resolved_thread,
+        "job_id": job_id,
+        "bytes": written,
+    }
+
+
+@router.post("/{meeting_id}/audio", status_code=202)
+async def add_meeting_audio(
+    meeting_id: int,
+    file: UploadFile = File(...),
+    diarization_model: str | None = Form(None),
+    summary_model: str | None = Form(None),
+    auto_summarize: bool = Form(True),
+    speaker_names: str | None = Form(None, description="Comma-separated, optional"),
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Attach a recording to a meeting that has none, and run the pipeline.
+
+    A meeting can exist before its audio does: creating one from an upcoming
+    calendar event is exactly that, and it is the point of the feature. Without
+    this route the only way to get a transcript onto such a meeting is to delete
+    it and upload afresh, losing the attached event, the speaker hints and the
+    place on the thread's timeline along with it.
+
+    Re-uploading over a failed attempt is allowed -- the previous audio is
+    replaced. Re-uploading over a *transcript* is not: the diarization, its
+    speaker names and any summaries all belong to the old audio, and silently
+    stranding them is worse than making the caller decide.
+    """
+    row = threads_svc.get_meeting(conn, meeting_id)
+    assert_can_access(row, user)
+
+    if row["active_diarization_id"] is not None:
+        raise ConflictError(
+            "This meeting already has a transcript. Create a new meeting for a "
+            "different recording, or delete this one first."
+        )
+    if row["status"] == "processing":
+        raise ConflictError("This meeting is still processing its current recording.")
+
+    filename = file.filename or "upload"
+    _check_extension(filename)
+
+    # Clear out a previous failed attempt rather than leaving orphan files
+    # beside the new one; the directory is per-meeting.
+    target_dir = get_settings().audio_dir / str(meeting_id)
+    if target_dir.is_dir():
+        shutil.rmtree(target_dir, ignore_errors=True)
+
+    dest = target_dir / f"original{Path(filename).suffix.lower()}"
+    written = await _stream_to_disk(file, dest)
+
+    conn.execute(
+        "UPDATE meetings SET original_filename = ?, original_path = ?, "
+        "original_mime = ?, original_bytes = ?, status = 'processing', "
+        # Reset what described the audio that is no longer there.
+        "audio_path = NULL, audio_converted = 0, audio_duration_sec = NULL, "
+        "audio_sample_rate = NULL, audio_channels = NULL, updated_at = ? WHERE id = ?",
+        (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
+    )
+
+    if speaker_names:
+        threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
+
+    threads_svc.touch_thread(conn, row["thread_id"])
+
+    job_id = await _queue_ingest(
+        conn,
+        meeting_id=meeting_id,
+        thread_id=row["thread_id"],
+        user_id=user.id,
+        diarization_model=diarization_model,
+        summary_model=summary_model,
+        auto_summarize=auto_summarize,
+    )
+
+    log.info(
+        "user %s added %s (%d bytes) to existing meeting %s, job %s",
+        user.username, filename, written, meeting_id, job_id,
+    )
+    return {
+        "meeting_id": meeting_id,
+        "thread_id": row["thread_id"],
         "job_id": job_id,
         "bytes": written,
     }

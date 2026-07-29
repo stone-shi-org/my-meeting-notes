@@ -124,6 +124,12 @@ time and speaker names and attaches the event in the same transaction. It reuses
 between the two entry points, the last one because a column added to one INSERT and not the other is
 how `attached_context` starts feeding the summarizer NULLs.
 
+**A meeting can exist before its audio does**, which is what `POST /meetings/{id}/audio` is for.
+Uploading through `/meetings/upload` instead creates a *second* meeting and leaves the calendar
+event, the attendee-derived speaker hints and the timeline position on the empty one. That route
+replaces the audio of a failed attempt but refuses to overwrite a **transcript**, because the
+diarization, its speaker names and every summary belong to the audio being replaced.
+
 `MAX_DAYS` is **30, not 31**: the window starts at midnight this morning, so asking for 31 would push
 past Zoho's hard 31-day range cap and fail that one account.
 

@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
+import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
@@ -63,24 +64,46 @@ function timeOf(iso: string | null): string {
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
 }
 
-function MeetingTimelineCard({ meeting }: { meeting: Meeting }) {
+function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId: string }) {
+  const queryClient = useQueryClient();
+  // Created from a calendar event, or by hand, and still waiting for its audio.
+  const awaitingAudio = !meeting.has_audio && meeting.status !== 'processing';
+
   return (
-    <Card interactive className="p-4">
-      <Link to={`/meetings/${meeting.id}`} className="block">
+    <Card interactive className="group relative p-4">
+      {/* Stretched link: one anchor covering the card, so the delete button can
+          be a sibling rather than a button nested inside an anchor. The content
+          ignores pointer events so clicks land on the link underneath. */}
+      <Link
+        to={`/meetings/${meeting.id}`}
+        className="absolute inset-0 rounded-lg"
+        aria-label={`Open ${meeting.title}`}
+      />
+      <div className="pointer-events-none relative">
         <div className="flex items-start justify-between gap-3">
           <h4 className="font-medium leading-snug">{meeting.title}</h4>
-          <div className="flex shrink-0 items-center gap-2">
+          <div className="pointer-events-auto flex shrink-0 items-center gap-2">
             {meeting.status === 'processing' && (
               <Badge variant="info" dot>
                 Processing
               </Badge>
             )}
             {meeting.status === 'failed' && <Badge variant="danger">Failed</Badge>}
+            {awaitingAudio && <Badge variant="neutral">No recording</Badge>}
             {meeting.audio_duration_sec != null && (
               <span className="font-mono text-xs text-fg-subtle">
                 {fmtClock(meeting.audio_duration_sec)}
               </span>
             )}
+            <DeleteMeetingButton
+              meeting={meeting}
+              variant="icon"
+              onDeleted={() => {
+                void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+                void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+                void queryClient.invalidateQueries({ queryKey: ['threads'] });
+              }}
+            />
           </div>
         </div>
 
@@ -96,9 +119,14 @@ function MeetingTimelineCard({ meeting }: { meeting: Meeting }) {
               {meeting.open_action_items} open
             </span>
           )}
-          <span className="ml-auto text-primary">Open transcript →</span>
+          {/* The recording is what this meeting is missing, so that is what the
+              card offers -- not "open transcript", which leads to a page whose
+              only content is the same invitation. */}
+          <span className="ml-auto text-primary">
+            {awaitingAudio ? 'Add a recording →' : 'Open transcript →'}
+          </span>
         </div>
-      </Link>
+      </div>
     </Card>
   );
 }
@@ -586,7 +614,10 @@ export function ThreadDetailPage() {
                         </time>
                         <div className="min-w-0 flex-1">
                           {item.kind === 'meeting' && (
-                            <MeetingTimelineCard meeting={item.payload as Meeting} />
+                            <MeetingTimelineCard
+                              meeting={item.payload as Meeting}
+                              threadId={threadId!}
+                            />
                           )}
                           {item.kind === 'event' && (
                             <EventTimelineCard

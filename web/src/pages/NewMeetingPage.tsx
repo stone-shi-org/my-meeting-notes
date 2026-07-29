@@ -1,34 +1,20 @@
 import { useQuery } from '@tanstack/react-query';
-import { FileAudio, Mic, Upload, X } from 'lucide-react';
 import { useCallback, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { RecorderPanel } from '@/components/record/RecorderPanel';
+import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { api, uploadMeeting } from '@/lib/api';
 import { watchJob } from '@/hooks/useJob';
 import { localDatetimeValue } from '@/lib/calendar';
-import { cn } from '@/lib/cn';
 import type { Paginated, Thread } from '@/types/api';
-
-const ACCEPT =
-  '.wav,.mp3,.m4a,.mp4,.aac,.flac,.ogg,.oga,.opus,.wma,.webm,.qta,.mov,.caf,.aiff,.aif';
-
-function fmtBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 ** 2) return `${(bytes / 1024).toFixed(0)} KB`;
-  if (bytes < 1024 ** 3) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
-  return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
-}
 
 export function NewMeetingPage() {
   const navigate = useNavigate();
   const [params] = useSearchParams();
   const presetThread = params.get('threadId');
 
-  const [mode, setMode] = useState<'upload' | 'record'>('upload');
   const [file, setFile] = useState<File | null>(null);
-  const [dragging, setDragging] = useState(false);
   const [title, setTitle] = useState('');
   const [when, setWhen] = useState(localDatetimeValue());
   const [threadId, setThreadId] = useState(presetThread ?? '');
@@ -40,7 +26,6 @@ export function NewMeetingPage() {
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
 
   const threads = useQuery({
     queryKey: ['threads', 'picker'],
@@ -49,34 +34,29 @@ export function NewMeetingPage() {
 
   const creatingNewThread = threadId === '';
 
-  function pick(next: File | null) {
-    setFile(next);
-    setError(null);
-    if (next && !title) {
-      // A filename is a better starting point than an empty box.
-      setTitle(next.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' '));
-    }
-  }
-
-  /** Take the finished clip from the recorder as if it had been dropped here.
+  /** Take whichever source produced audio, and suggest a title from it.
    *
-   * Its generated filename is a timestamp, which makes a poor meeting title, so
-   * this one titles from the clock instead of from the name. */
-  const takeRecording = useCallback((next: File | null, durationSec: number) => {
+   * A dropped file names itself usefully; a recording's generated name is a
+   * timestamp, which makes a poor meeting title, so that one is titled from the
+   * clock instead. */
+  const pick = useCallback((next: File | null, meta: FileMeta) => {
     setFile(next);
     setError(null);
     if (!next) return;
-    setTitle((current) =>
-      current
-        ? current
-        : `Recording ${new Date(next.lastModified).toLocaleString(undefined, {
+
+    setTitle((current) => {
+      if (current) return current;
+      return meta.recorded
+        ? `Recording ${new Date(next.lastModified).toLocaleString(undefined, {
             day: 'numeric',
             month: 'short',
             hour: '2-digit',
             minute: '2-digit',
-          })}`,
-    );
-    if (durationSec < 1) {
+          })}`
+        : next.name.replace(/\.[^.]+$/, '').replace(/[-_]+/g, ' ');
+    });
+
+    if (meta.recorded && meta.durationSec < 1) {
       setError('That recording is under a second long — it will not transcribe to much.');
     }
   }, []);
@@ -84,7 +64,7 @@ export function NewMeetingPage() {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     if (!file) {
-      setError(mode === 'record' ? 'Record something first' : 'Choose an audio file first');
+      setError('Record something, or choose an audio file');
       return;
     }
     if (creatingNewThread && !newThreadTitle.trim()) {
@@ -125,7 +105,6 @@ export function NewMeetingPage() {
   }
 
   const uploading = progress !== null;
-  const pct = progress ? Math.round((progress.loaded / progress.total) * 100) : 0;
 
   return (
     <div className="mx-auto max-w-2xl space-y-6">
@@ -138,123 +117,7 @@ export function NewMeetingPage() {
       </div>
 
       <form onSubmit={submit} className="space-y-5">
-        <div
-          role="tablist"
-          aria-label="Where the audio comes from"
-          className="inline-flex rounded-lg border border-border bg-surface-2/60 p-1"
-        >
-          {([
-            { id: 'upload', label: 'Upload a file', icon: Upload },
-            { id: 'record', label: 'Record now', icon: Mic },
-          ] as const).map(({ id, label, icon: Icon }) => (
-            <button
-              key={id}
-              type="button"
-              role="tab"
-              aria-selected={mode === id}
-              disabled={uploading}
-              onClick={() => {
-                setMode(id);
-                // Switching away drops whatever was staged: the two modes each
-                // own their own source, and a stale file behind the other tab
-                // is how you upload the wrong thing.
-                pick(null);
-              }}
-              className={cn(
-                'inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-fast',
-                mode === id
-                  ? 'bg-surface text-fg shadow-xs'
-                  : 'text-fg-muted hover:text-fg disabled:opacity-60',
-              )}
-            >
-              <Icon className="size-4" aria-hidden />
-              {label}
-            </button>
-          ))}
-        </div>
-
-        {mode === 'record' && (
-          <RecorderPanel onRecorded={takeRecording} disabled={uploading} />
-        )}
-
-        {mode === 'upload' && !file ? (
-          <div
-            onDragOver={(e) => {
-              e.preventDefault();
-              setDragging(true);
-            }}
-            onDragLeave={() => setDragging(false)}
-            onDrop={(e) => {
-              e.preventDefault();
-              setDragging(false);
-              pick(e.dataTransfer.files[0] ?? null);
-            }}
-            className={cn(
-              'rounded-xl border-2 border-dashed p-10 text-center transition-colors duration-fast',
-              dragging ? 'border-primary bg-primary-soft' : 'border-border-strong bg-surface',
-            )}
-          >
-            <Upload className="mx-auto size-8 text-fg-faint" aria-hidden />
-            <p className="mt-3 font-medium">Drop audio here</p>
-            <p className="mt-1 text-sm text-fg-subtle">
-              wav · mp3 · m4a · ogg · flac and more
-            </p>
-            {/* A real input, so the dropzone is keyboard reachable. */}
-            <input
-              ref={inputRef}
-              type="file"
-              accept={ACCEPT}
-              className="sr-only"
-              id="audio-file"
-              onChange={(e) => pick(e.target.files?.[0] ?? null)}
-            />
-            <Button
-              type="button"
-              variant="secondary"
-              className="mt-4"
-              onClick={() => inputRef.current?.click()}
-            >
-              Browse files
-            </Button>
-          </div>
-        ) : // In record mode the panel shows its own player and Discard, so the
-        // file card would say it twice -- except while uploading, when it is
-        // the only thing carrying the progress bar.
-        file && (mode === 'upload' || uploading) ? (
-          <Card className="flex items-center gap-3 p-4">
-            <div className="grid size-10 shrink-0 place-items-center rounded-md bg-primary-soft">
-              <FileAudio className="size-5 text-primary-soft-fg" aria-hidden />
-            </div>
-            <div className="min-w-0 flex-1">
-              <p className="truncate font-medium">{file.name}</p>
-              <p className="text-sm text-fg-subtle">{fmtBytes(file.size)}</p>
-              {uploading && (
-                <div className="mt-2">
-                  <div className="h-1.5 overflow-hidden rounded-full bg-surface-2">
-                    <div
-                      className="h-full rounded-full bg-primary transition-[width]"
-                      style={{ width: `${pct}%` }}
-                    />
-                  </div>
-                  <p className="mt-1 text-xs text-fg-subtle tabular">
-                    {pct}% · {fmtBytes(progress!.loaded)} of {fmtBytes(progress!.total)}
-                  </p>
-                </div>
-              )}
-            </div>
-            {!uploading && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                aria-label="Remove file"
-                onClick={() => pick(null)}
-              >
-                <X />
-              </Button>
-            )}
-          </Card>
-        ) : null}
+        <AudioInput file={file} onFile={pick} progress={progress} />
 
         <Card className="space-y-4 p-5">
           <div>

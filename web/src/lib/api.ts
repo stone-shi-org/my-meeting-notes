@@ -81,20 +81,31 @@ export const api = {
   del: <T>(path: string, query?: Query) => request<T>('DELETE', path, { query }),
 };
 
+export interface UploadResult {
+  meeting_id: number;
+  thread_id: number;
+  job_id: string;
+  bytes: number;
+}
+
 /**
  * Multipart upload with progress.
  *
  * XHR rather than fetch: fetch still cannot report upload progress, and these
  * files run to 100 MB -- a silent bar for two minutes is not acceptable.
+ *
+ * The path is a parameter because audio arrives two ways: creating a meeting
+ * around it, and adding it to a meeting that already exists.
  */
-export function uploadMeeting(
+export function uploadAudio(
+  path: string,
   form: FormData,
   onProgress?: (loaded: number, total: number) => void,
   signal?: AbortSignal,
-): Promise<{ meeting_id: number; thread_id: number; job_id: string; bytes: number }> {
+): Promise<UploadResult> {
   return new Promise((resolve, reject) => {
     const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/meetings/upload');
+    xhr.open('POST', `/api${path}`);
     xhr.withCredentials = true;
 
     xhr.upload.onprogress = (e) => {
@@ -130,4 +141,23 @@ export function uploadMeeting(
     signal?.addEventListener('abort', () => xhr.abort());
     xhr.send(form);
   });
+}
+
+/** Create a meeting around a new recording. */
+export function uploadMeeting(
+  form: FormData,
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<UploadResult> {
+  return uploadAudio('/meetings/upload', form, onProgress, signal);
+}
+
+/** Give an existing meeting the recording it was created without. */
+export function uploadMeetingAudio(
+  meetingId: number,
+  form: FormData,
+  onProgress?: (loaded: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<UploadResult> {
+  return uploadAudio(`/meetings/${meetingId}/audio`, form, onProgress, signal);
 }
