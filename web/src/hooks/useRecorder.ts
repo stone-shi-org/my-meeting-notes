@@ -128,6 +128,18 @@ export function useRecorder() {
       setError(null);
       setPhase('starting');
 
+      // Belt to the panel's braces. navigator.mediaDevices is absent outside a
+      // secure context, and reaching for .getUserMedia on undefined is a
+      // TypeError with no useful text in it.
+      if (!navigator.mediaDevices?.getUserMedia) {
+        setPhase('idle');
+        setError(
+          'This page cannot open a microphone: browsers only allow that over HTTPS or on ' +
+            'localhost. Open the app over HTTPS, or upload a file instead.',
+        );
+        return;
+      }
+
       const mimeType = pickMimeType();
       if (!mimeType) {
         setPhase('idle');

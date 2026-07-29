@@ -55,6 +55,12 @@ failure you actually hit rather than a generic error.
 
 **New meeting → Record now.** The clip goes through exactly the same pipeline as an upload.
 
+**It needs a secure page.** Browsers only expose a microphone over HTTPS or on `localhost`, so at
+the usual `http://192.168.x.x:4020` there is nothing to expose and the recorder says so instead of
+offering a button. Either open it as `http://localhost:4020` from the machine it runs on, or put it
+behind an HTTPS reverse proxy — which you want anyway, for `MMN_SESSION_COOKIE_SECURE`. Uploading a
+file is unaffected.
+
 What you can capture depends on the browser and the OS, and not in an obvious way:
 
 | Source | Chrome / Edge | Firefox | Safari |

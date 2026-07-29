@@ -53,6 +53,14 @@ frontend half of the same trap `_caldav._stamp` guards on the server.
 July 15 email lands above a July 20 meeting on the timeline. `matching.normalize_timestamp` coerces
 on write, and the timeline sort normalises again for older rows.
 
+**`navigator.mediaDevices` is *undefined* on a plain-HTTP LAN address** — the whole object, not just
+a failing call, because it is gated on a secure context. `MediaRecorder` is **not** gated and is
+still there, so feature-detecting on it alone reports a working recorder that throws "Cannot read
+properties of undefined (reading 'getUserMedia')" on the first click. `hasMediaDevices` is the check
+that matters, and `blockedReason` names the *origin* as the problem: told "unsupported", people go
+and try a different browser. `http://localhost:4020` is a secure context; `http://192.168.1.20:4020`
+is not.
+
 **An AudioContext runs on the audio hardware's clock, not the wall clock.** With no usable output
 device it renders *behind* real time — measured at 2.5s per 3s on a box with no sound card — so
 anything recorded through the graph comes out silently time-compressed. `useRecorder` therefore

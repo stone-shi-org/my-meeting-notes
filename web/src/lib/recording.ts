@@ -25,15 +25,36 @@ export interface Platform {
   chromium: boolean;
   hasDisplayMedia: boolean;
   hasRecorder: boolean;
+  /**
+   * Whether `navigator.mediaDevices` exists at all.
+   *
+   * It is gated on a secure context, so on a plain-HTTP LAN address -- which is
+   * exactly how this app is usually reached -- the entire object is *undefined*
+   * rather than the calls failing. `MediaRecorder` is not gated, so feature-
+   * detecting on that alone reports a recorder that cannot open an input.
+   */
+  hasMediaDevices: boolean;
+}
+
+export interface Env {
+  hasDisplayMedia?: boolean;
+  hasRecorder?: boolean;
+  hasMediaDevices?: boolean;
 }
 
 export function detectPlatform(
   ua: string = typeof navigator === 'undefined' ? '' : navigator.userAgent,
-  hasDisplayMedia = typeof navigator !== 'undefined' &&
-    !!navigator.mediaDevices?.getDisplayMedia,
-  hasRecorder = typeof window !== 'undefined' && 'MediaRecorder' in window,
+  env: Env = {},
 ): Platform {
   const safari = /^((?!chrome|android|crios|fxios).)*safari/i.test(ua);
+  const {
+    hasMediaDevices = typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices?.getUserMedia,
+    hasDisplayMedia = typeof navigator !== 'undefined' &&
+      !!navigator.mediaDevices?.getDisplayMedia,
+    hasRecorder = typeof window !== 'undefined' && 'MediaRecorder' in window,
+  } = env;
+
   return {
     mac: /Mac|iPhone|iPad/i.test(ua),
     firefox: /firefox|fxios/i.test(ua),
@@ -41,7 +62,19 @@ export function detectPlatform(
     chromium: /chrome|chromium|crios|edg\//i.test(ua) && !safari,
     hasDisplayMedia,
     hasRecorder,
+    hasMediaDevices,
   };
+}
+
+/** Why recording is off the table here, or null if it is available. */
+export function blockedReason(platform: Platform): string | null {
+  if (!platform.hasRecorder) {
+    return 'This browser cannot record audio. Chrome, Edge, Firefox or Safari 14.1 and later can.';
+  }
+  if (!platform.hasMediaDevices) {
+    return 'Recording needs a secure page. Browsers only hand out the microphone over HTTPS or on localhost, so on a plain http:// address they hide it entirely.';
+  }
+  return null;
 }
 
 /**
@@ -60,9 +93,20 @@ export function detectPlatform(
  *   microphone list, not here.
  */
 export function sourceSupport(platform: Platform): Record<Source, Capability> {
-  const { mac, firefox, safari, chromium, hasDisplayMedia } = platform;
+  const { mac, firefox, safari, chromium, hasDisplayMedia, hasMediaDevices } = platform;
 
-  const displayAudio = chromium && hasDisplayMedia;
+  // No capture API at all -- an insecure origin, most likely. Nothing is
+  // offered, and the panel explains it once rather than three times.
+  const blocked = blockedReason(platform);
+  if (blocked) {
+    return {
+      mic: { available: false, hint: blocked },
+      tab: { available: false, hint: blocked },
+      system: { available: false, hint: blocked },
+    };
+  }
+
+  const displayAudio = chromium && hasDisplayMedia && hasMediaDevices;
   const noDisplayAudio = firefox
     ? 'Firefox does not share audio with a screen or tab, only video. Use Chrome or Edge, or record the microphone.'
     : safari

@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   audioConstraints,
+  blockedReason,
   detectPlatform,
   extensionFor,
   fmtElapsedMs,
@@ -22,25 +23,29 @@ const UA = {
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15',
 };
 
+const SECURE = { hasDisplayMedia: true, hasRecorder: true, hasMediaDevices: true };
+
 const support = (ua: string, hasDisplayMedia = true) =>
-  sourceSupport(detectPlatform(ua, hasDisplayMedia, true));
+  sourceSupport(
+    detectPlatform(ua, { hasDisplayMedia, hasRecorder: true, hasMediaDevices: true }),
+  );
 
 describe('detectPlatform', () => {
   it('does not mistake Chrome on a Mac for Safari', () => {
-    const platform = detectPlatform(UA.chromeMac, true, true);
+    const platform = detectPlatform(UA.chromeMac, SECURE);
     expect(platform.chromium).toBe(true);
     expect(platform.safari).toBe(false);
     expect(platform.mac).toBe(true);
   });
 
   it('recognises Safari, which advertises itself as everything', () => {
-    const platform = detectPlatform(UA.safariMac, true, true);
+    const platform = detectPlatform(UA.safariMac, SECURE);
     expect(platform.safari).toBe(true);
     expect(platform.chromium).toBe(false);
   });
 
   it('recognises Edge as Chromium', () => {
-    expect(detectPlatform(UA.edgeWindows, true, true).chromium).toBe(true);
+    expect(detectPlatform(UA.edgeWindows, SECURE).chromium).toBe(true);
   });
 });
 
@@ -78,6 +83,45 @@ describe('sourceSupport', () => {
 
   it('refuses capture when the browser has no getDisplayMedia at all', () => {
     expect(support(UA.chromeWindows, false).tab.available).toBe(false);
+  });
+});
+
+describe('an insecure origin', () => {
+  // How this app is normally reached: http://192.168.x.x:4020. Browsers gate
+  // navigator.mediaDevices on a secure context, so the whole object is missing
+  // -- while MediaRecorder, which is not gated, is still there. Detecting on
+  // MediaRecorder alone is what turned "cannot record here" into a TypeError.
+  const lan = detectPlatform(UA.chromeWindows, {
+    hasMediaDevices: false,
+    hasDisplayMedia: false,
+    hasRecorder: true,
+  });
+
+  it('is not mistaken for a working recorder', () => {
+    expect(lan.hasRecorder).toBe(true);
+    expect(lan.hasMediaDevices).toBe(false);
+    expect(blockedReason(lan)).toMatch(/HTTPS or on localhost/);
+  });
+
+  it('offers no source at all, microphone included', () => {
+    const support = sourceSupport(lan);
+    for (const source of ['mic', 'tab', 'system'] as const) {
+      expect(support[source].available).toBe(false);
+      expect(support[source].hint).toMatch(/secure page/);
+    }
+  });
+
+  it('reports no reason when everything is present', () => {
+    expect(blockedReason(detectPlatform(UA.chromeWindows, SECURE))).toBeNull();
+  });
+
+  it('still reports the older "no MediaRecorder" case', () => {
+    const ancient = detectPlatform(UA.safariMac, {
+      hasMediaDevices: true,
+      hasDisplayMedia: false,
+      hasRecorder: false,
+    });
+    expect(blockedReason(ancient)).toMatch(/cannot record audio/);
   });
 });
 

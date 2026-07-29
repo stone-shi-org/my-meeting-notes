@@ -4,7 +4,13 @@ import { Button } from '@/components/ui/Button';
 import { Label, Select } from '@/components/ui/primitives';
 import { useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
-import { detectPlatform, fmtElapsedMs, sourceSupport, type Source } from '@/lib/recording';
+import {
+  blockedReason,
+  detectPlatform,
+  fmtElapsedMs,
+  sourceSupport,
+  type Source,
+} from '@/lib/recording';
 
 const SOURCES: { id: Source; label: string; icon: typeof Mic }[] = [
   { id: 'mic', label: 'Microphone', icon: Mic },
@@ -61,6 +67,7 @@ export function RecorderPanel({
 }) {
   const platform = useMemo(() => detectPlatform(), []);
   const support = useMemo(() => sourceSupport(platform), [platform]);
+  const blocked = useMemo(() => blockedReason(platform), [platform]);
 
   const [source, setSource] = useState<Source>('mic');
   const [deviceId, setDeviceId] = useState('');
@@ -86,11 +93,39 @@ export function RecorderPanel({
   const canStart = chosen.available && !disabled;
   const needsDevicePermission = devices.length > 0 && !devices[0].label;
 
-  if (!platform.hasRecorder) {
+  // No capture API here at all. Say why, and how to get one -- "unsupported"
+  // sends people to a different browser when the actual problem is the URL.
+  if (blocked) {
+    const origin = typeof window === 'undefined' ? '' : window.location.origin;
+    const insecure = platform.hasRecorder && !platform.hasMediaDevices;
     return (
-      <div className="rounded-xl border border-border bg-surface p-5 text-sm text-fg-muted">
-        This browser cannot record audio. Chrome, Edge, Firefox or Safari 14.1 and later can —
-        or drop a file in instead.
+      <div className="space-y-3 rounded-xl border border-warning/40 bg-warning-soft/30 p-5">
+        <p className="text-sm font-medium text-warning-ink">Recording is not available here</p>
+        <p className="text-sm text-fg-muted">{blocked}</p>
+        {insecure && (
+          <>
+            <p className="text-sm text-fg-muted">
+              This page is <code className="font-mono text-xs">{origin}</code>. Any of these fixes it:
+            </p>
+            <ul className="list-disc space-y-1 pl-5 text-sm text-fg-muted">
+              <li>
+                Open it as <code className="font-mono text-xs">http://localhost:4020</code> from the
+                machine it runs on — localhost counts as secure.
+              </li>
+              <li>Put it behind an HTTPS reverse proxy, and set MMN_SESSION_COOKIE_SECURE=true.</li>
+              <li>
+                Just to try it: allow this one origin under{' '}
+                <code className="font-mono text-xs">
+                  chrome://flags/#unsafely-treat-insecure-origin-as-secure
+                </code>
+                .
+              </li>
+            </ul>
+          </>
+        )}
+        <p className="text-sm text-fg-muted">
+          Uploading a file works regardless — record on your phone or laptop and drop it in.
+        </p>
       </div>
     );
   }
