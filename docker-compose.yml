@@ -8,6 +8,9 @@ services:
     env_file:
       - .env
     ports:
+      # Still published for direct access and debugging. Note that recording in
+      # the browser does *not* work through this one: browsers only hand out a
+      # microphone in a secure context, so it has to be the https name below.
       - "4020:8000"
     volumes:
       # Bind mount rather than a named volume: the SQLite file and the audio
@@ -16,6 +19,32 @@ services:
     restart: unless-stopped
     networks:
       - home-net
+    labels:
+      # Traefik runs with exposedByDefault=false, so nothing is routed without
+      # this. Its docker provider is pinned to home-net, which is the network
+      # this service is already on; the label restates it so adding a second
+      # network later cannot make Traefik pick the wrong address.
+      - "traefik.enable=true"
+      - "traefik.docker.network=home-net"
+
+      # 8000 is the *container* port. Traefik talks to the container directly on
+      # home-net, so the published 4020 above is not involved in this path.
+      - "traefik.http.services.my-meeting-notes.loadbalancer.server.port=8000"
+
+      - "traefik.http.routers.my-meeting-notes.rule=Host(`my-meeting-notes.dev.local.shifamily.com`)"
+      - "traefik.http.routers.my-meeting-notes.entrypoints=web-secure"
+      - "traefik.http.routers.my-meeting-notes.tls=true"
+      # DNS-01 through Cloudflare, so a genuine certificate is issued for an
+      # internal name that Let's Encrypt can never reach.
+      - "traefik.http.routers.my-meeting-notes.tls.certresolver=le"
+
+      # Port 80 only redirects. Landing on http:// is how you end up on a page
+      # with no microphone, wondering why Record is greyed out.
+      - "traefik.http.routers.my-meeting-notes-http.rule=Host(`my-meeting-notes.dev.local.shifamily.com`)"
+      - "traefik.http.routers.my-meeting-notes-http.entrypoints=web"
+      - "traefik.http.routers.my-meeting-notes-http.middlewares=my-meeting-notes-https"
+      - "traefik.http.middlewares.my-meeting-notes-https.redirectscheme.scheme=https"
+      - "traefik.http.middlewares.my-meeting-notes-https.redirectscheme.permanent=true"
 
 networks:
   home-net:
