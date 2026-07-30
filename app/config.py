@@ -119,7 +119,7 @@ class Settings(BaseSettings):
 
     # --- matching -----------------------------------------------------------
     match_window_days_before: int = 7
-    match_window_days_after: int = 3
+    match_window_days_after: int = 14
     match_max_candidates: int = 25
     match_max_keywords: int = 8
 
