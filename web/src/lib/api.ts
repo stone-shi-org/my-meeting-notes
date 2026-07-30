@@ -8,6 +8,12 @@ export function setUnauthorizedHandler(fn: () => void) {
   onUnauthorized = fn;
 }
 
+/** For callers outside request() (e.g. the chat stream's own fetch) that still
+ * need to trip the same "session expired" handling on a 401. */
+export function notifyUnauthorized() {
+  onUnauthorized?.();
+}
+
 /** Fires on 409 password_change_required, the forced-change sentinel. */
 let onPasswordChangeRequired: (() => void) | null = null;
 export function setPasswordChangeHandler(fn: () => void) {

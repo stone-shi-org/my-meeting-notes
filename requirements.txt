@@ -10,6 +10,10 @@ mcp>=1.0.0
 # Fernet, for encrypting integration credentials at rest. Already arrives as an
 # mcp transitive dep, but pinned here because we now import it directly.
 cryptography>=42.0.0
+# SSE client for consuming the LLM proxy's streamed chat completions. Already
+# arrives as an mcp transitive dep (its SSE transport), but pinned here because
+# app/services/llm.py now imports it directly for the chat streaming endpoint.
+httpx-sse>=0.4.0
 # iCalendar parsing and recurrence expansion for CalDAV. icalendar alone does not
 # expand RRULEs -- upstream calls it out of scope -- and hand-rolling EXDATE,
 # RECURRENCE-ID overrides and DST-correct expansion is where the bugs live.

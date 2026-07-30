@@ -19,6 +19,7 @@ from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
 from app.routers import (
     auth,
     calendar,
+    chat,
     integrations,
     jobs,
     matching,
@@ -143,6 +144,7 @@ def create_app() -> FastAPI:
     app.include_router(calendar.router)
     app.include_router(jobs.router)
     app.include_router(settings_api.router)
+    app.include_router(chat.router)
 
     _mount_spa(app, settings.web_dist)
 

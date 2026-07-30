@@ -1,11 +1,5 @@
-import DOMPurify from 'dompurify';
-import { marked } from 'marked';
 import { describe, expect, it } from 'vitest';
-
-/** The summary body is LLM-authored and rendered as HTML, so it must be sanitized. */
-function renderSummary(markdown: string): string {
-  return DOMPurify.sanitize(marked.parse(markdown, { async: false }) as string);
-}
+import { renderMarkdown as renderSummary } from '../markdown';
 
 describe('summary markdown rendering', () => {
   it('renders ordinary markdown', () => {

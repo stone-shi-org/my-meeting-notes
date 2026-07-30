@@ -10,6 +10,7 @@ import {
   ExternalLink,
   Mail,
   MapPin,
+  MessageCircle,
   Mic,
   Plus,
   RefreshCw,
@@ -19,6 +20,7 @@ import {
 import { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
+import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
@@ -348,6 +350,7 @@ export function ThreadDetailPage() {
   const [filters, setFilters] = useState<Set<Filter>>(
     () => new Set(['meeting', 'event', 'email'] as Filter[]),
   );
+  const [chatOpen, setChatOpen] = useState(false);
 
   const thread = useQuery({
     queryKey: ['thread', threadId],
@@ -477,6 +480,14 @@ export function ThreadDetailPage() {
             </div>
 
             <div className="flex gap-2">
+              <Button
+                variant={chatOpen ? 'soft' : 'secondary'}
+                onClick={() => setChatOpen((v) => !v)}
+                title="Ask a question about this thread's meetings, calendar events and emails"
+              >
+                <MessageCircle />
+                Ask
+              </Button>
               <Button
                 variant="secondary"
                 loading={checkNow.isPending}
@@ -680,6 +691,10 @@ export function ThreadDetailPage() {
             </li>
           ))}
         </ol>
+      )}
+
+      {chatOpen && threadId && (
+        <ThreadChatPanel threadId={threadId} onClose={() => setChatOpen(false)} />
       )}
     </div>
   );

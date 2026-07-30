@@ -16,8 +16,10 @@ import json
 import re
 import secrets
 import time
+from typing import AsyncIterator
 
 import httpx
+from httpx_sse import SSEError, aconnect_sse
 
 from app.config import effective
 from app.db import get_conn
@@ -186,6 +188,77 @@ def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:
         raise LLMError("LLM returned empty content")
 
     return content, body.get("usage") or {}
+
+
+async def achat_stream(
+    config: LLMConfig, payload: dict, *, usage_out: dict | None = None
+) -> AsyncIterator[str]:
+    """Stream a chat completion, yielding visible content deltas as they arrive.
+
+    Mirrors chat()'s error semantics exactly, but over `httpx_sse` instead of a
+    single buffered response. `payload["stream"]` must already be True -- this
+    is the one caller allowed to set it, since build_payload()/chat()/chat_json()
+    stay non-streaming for everyone else.
+
+    Verified live against the real omniroute proxy: reasoning (even with
+    include_reasoning=false) arrives as one lump under delta.reasoning *before*
+    any content, must never be yielded, and usage arrives on the terminal chunk
+    before the literal `data: [DONE]`. Async generators can't `return` a value,
+    so usage is reported through the `usage_out` out-param instead.
+    """
+    url = f"{config.base_url}/chat/completions"
+    saw_content = False
+    saw_reasoning = False
+
+    async with httpx.AsyncClient(timeout=config.timeout, verify=config.ssl_verify) as client:
+        try:
+            async with aconnect_sse(
+                client, "POST", url, json=payload, headers=config.headers
+            ) as event_source:
+                response = event_source.response
+                if response.status_code in (401, 403):
+                    raise LLMAuthError(
+                        f"LLM rejected the API key ({response.status_code}). Check LLM settings."
+                    )
+                if response.status_code >= 400:
+                    body_preview = (await response.aread())[:300].decode(
+                        "utf-8", errors="replace"
+                    ).strip() or "(empty body)"
+                    raise LLMError(f"LLM returned {response.status_code}: {body_preview}")
+
+                async for sse in event_source.aiter_sse():
+                    if sse.data == "[DONE]":
+                        break
+                    chunk = json.loads(sse.data)
+                    choices = chunk.get("choices") or []
+                    if choices:
+                        delta = choices[0].get("delta") or {}
+                        if delta.get("reasoning") or delta.get("reasoning_content"):
+                            saw_reasoning = True
+                        content = delta.get("content")
+                        if content:
+                            saw_content = True
+                            yield content
+                    if usage_out is not None and chunk.get("usage"):
+                        usage_out.update(chunk["usage"])
+        except httpx.ConnectError as exc:
+            raise LLMError(f"Could not reach the LLM at {url}") from exc
+        except httpx.TimeoutException as exc:
+            raise LLMError(f"LLM timed out after {config.timeout}s") from exc
+        except SSEError as exc:
+            raise LLMError(
+                "LLM did not stream a response despite stream=true. The endpoint "
+                "is misconfigured for streaming use."
+            ) from exc
+
+    if not saw_content:
+        if saw_reasoning:
+            raise LLMReasoningTruncatedError(
+                "LLM returned only a reasoning trace and no content. The model "
+                "hit max_tokens while thinking -- raise max_tokens or use a "
+                "non-reasoning model."
+            )
+        raise LLMError("LLM returned empty content")
 
 
 def chat_json(

@@ -1,7 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import DOMPurify from 'dompurify';
 import { CheckSquare, Download, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
-import { marked } from 'marked';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -16,6 +14,7 @@ import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
 import { usePlayerStore } from '@/player/playerStore';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { renderMarkdown } from '@/lib/markdown';
 import { initials, speakerVars } from '@/lib/speakerColors';
 import { watchJob } from '@/hooks/useJob';
 import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript } from '@/types/api';
@@ -267,11 +266,7 @@ function NoSummaryPanel({ meetingId, canGenerate }: { meetingId: number; canGene
 function SummaryPanel({ meetingId, summary }: { meetingId: number; summary: Summary }) {
   const regenerate = useGenerateSummary(meetingId);
 
-  const html = useMemo(() => {
-    if (!summary.summary_md) return '';
-    // The summary is LLM-authored text rendered as HTML: sanitize it.
-    return DOMPurify.sanitize(marked.parse(summary.summary_md, { async: false }) as string);
-  }, [summary.summary_md]);
+  const html = useMemo(() => renderMarkdown(summary.summary_md ?? ''), [summary.summary_md]);
 
   return (
     <div className="space-y-4">
