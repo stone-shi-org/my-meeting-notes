@@ -6,8 +6,9 @@ loudly, so they are worth stating up front:
 * The auth header is ``Zoho-oauthtoken``, **not** ``Bearer``.
 * Mail has no ``me`` alias -- every request needs a numeric ``accountId`` fetched
   first.
-* Calendar's ``range`` is mandatory and capped at 31 days, and descriptions only
-  come back when you ask for ``Accept: application/json+large``.
+* Calendar's ``range`` is mandatory and capped at 31 days -- a wider request is
+  narrowed to the middle 31 days rather than sent as-is -- and descriptions
+  only come back when you ask for ``Accept: application/json+large``.
 
 Zoho is regional: an account lives in one data centre and its API hosts carry
 that suffix (``.com``, ``.eu``, ``.in``, ``.com.au``, ``.jp``). Talking to the
@@ -25,7 +26,7 @@ import httpx
 
 from app.config import effective
 from app.db import get_conn
-from app.errors import IntegrationAuthError, ValidationError
+from app.errors import IntegrationAuthError
 from app.logging_config import get_logger
 from app.services.providers import oauth, tokens
 from app.services.providers.base import (
@@ -42,7 +43,9 @@ log = get_logger("providers.zoho")
 
 REQUEST_TIMEOUT_SEC = 30
 DEFAULT_DC = "com"
-# Zoho rejects a wider window outright rather than truncating it.
+# Zoho rejects a wider window outright, so an over-wide request is narrowed to
+# this many days -- centred on the middle of what was asked for -- rather than
+# failing the whole search over a window another calendar provider handles fine.
 MAX_RANGE_DAYS = 31
 
 SCOPES = (
@@ -215,13 +218,10 @@ class ZohoProvider(BaseProvider):
     async def search_events(
         self, *, query: str | None, start: datetime, end: datetime
     ) -> list[EventCandidate]:
-        if end - start > timedelta(days=MAX_RANGE_DAYS):
-            # Deliberately an error rather than a chunked loop: the default
-            # window is ten days, so nobody hits this without asking for it.
-            raise ValidationError(
-                f"Zoho Calendar accepts at most {MAX_RANGE_DAYS} days per search; "
-                "narrow the match window."
-            )
+        max_span = timedelta(days=MAX_RANGE_DAYS)
+        if end - start > max_span:
+            center = start + (end - start) / 2
+            start, end = center - max_span / 2, center + max_span / 2
 
         token = await self._token()
         base = f"https://calendar.zoho.{self._dc()}/api/v1/calendars"

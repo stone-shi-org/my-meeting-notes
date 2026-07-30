@@ -219,11 +219,13 @@ Three quirks, all of which fail quietly rather than loudly:
 - Mail has no `me` alias; every path needs a numeric `accountId` fetched first.
 - `Accept: application/json+large` is required or event descriptions come back empty.
 
-`range` is mandatory on the events call and capped at 31 days — we clamp with a `ValidationError`
-rather than chunking, since the default window is ten days. Zoho is regional (`.com`/`.eu`/`.in`/
-`.com.au`/`.jp`) and the wrong data centre authenticates fine and returns nothing, so the DC is
-pinned onto the integration row at connect time. Mail search takes only an upper time bound, so the
-lower edge of the window is enforced client-side.
+`range` is mandatory on the events call and capped at 31 days — a wider request is narrowed to the
+middle 31 days of what was asked for rather than sent as-is or chunked, since the calendar match
+window (`match_window_calendar_days_before/after`, 60/60 by default) routinely exceeds it and a
+provider-level failure there would silently drop Zoho out of every match. Zoho is regional
+(`.com`/`.eu`/`.in`/`.com.au`/`.jp`) and the wrong data centre authenticates fine and returns
+nothing, so the DC is pinned onto the integration row at connect time. Mail search takes only an
+upper time bound, so the lower edge of the window is enforced client-side.
 
 Watch `parse_stamp`: an all-day `20260318` is *all digits*, so it must not be mistaken for an epoch
 millisecond stamp — that bug lands the event in 1970.

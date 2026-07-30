@@ -7,13 +7,14 @@ without which event descriptions simply vanish.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
 import respx
 
-from app.errors import IntegrationAuthError, ValidationError
+from app.errors import IntegrationAuthError
 from app.services.providers.base import IntegrationRef
 from app.services.providers.zoho import ZohoProvider, parse_stamp
 
@@ -88,12 +89,24 @@ class TestCalendar:
         assert '"start": "20260311T000000Z"' in sent or '"start":"20260311T000000Z"' in sent
         assert "20260321T000000Z" in sent
 
-    async def test_a_window_over_31_days_is_refused_not_silently_truncated(self, provider):
-        """Zoho rejects it server-side anyway; failing here says why."""
-        with pytest.raises(ValidationError, match="31 days"):
-            await provider.search_events(
-                query=None, start=START, end=START + timedelta(days=45)
-            )
+    @respx.mock
+    async def test_a_window_over_31_days_is_narrowed_to_the_middle(self, provider):
+        """Zoho rejects a wider range server-side, so it is narrowed here first."""
+        respx.get(CALENDARS).mock(
+            return_value=httpx.Response(200, json={"calendars": [{"uid": "c1", "name": "W"}]})
+        )
+        route = respx.get(f"{CALENDARS}/c1/events").mock(
+            return_value=httpx.Response(200, json={"events": []})
+        )
+        wide_end = START + timedelta(days=45)
+        await provider.search_events(query=None, start=START, end=wide_end)
+
+        sent = json.loads(dict(route.calls[0].request.url.params)["range"])
+        sent_start = datetime.strptime(sent["start"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        sent_end = datetime.strptime(sent["end"], "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        assert sent_end - sent_start == timedelta(days=31)
+        center = START + (wide_end - START) / 2
+        assert sent_start == center - timedelta(days=15, hours=12)
 
     @respx.mock
     async def test_an_event_maps_onto_the_normalised_shape(self, provider):
