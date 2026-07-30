@@ -148,6 +148,28 @@ def test_archived_threads_are_hidden_by_default(user_client):
     assert [t["id"] for t in archived["items"]] == [gone["id"]]
 
 
+def test_archiving_is_reversible_and_keeps_everything(user_client):
+    """Archiving is a filing decision, not a destructive one.
+
+    The Archive button on a thread sends exactly this, and the round trip is
+    what makes it safe to press: the meetings are still there afterwards and
+    unarchiving puts the thread back on the default list.
+    """
+    t = make_thread(user_client, title="Shipped")
+    user_client.post("/api/meetings", json={"thread_id": t["id"], "title": "Retro"})
+
+    away = user_client.patch(f"/api/threads/{t['id']}", json={"archived": True}).json()
+    assert away["archived"] is True
+    assert away["meeting_count"] == 1
+    assert user_client.get(f"/api/threads/{t['id']}").status_code == 200
+    assert user_client.get("/api/threads").json()["items"] == []
+
+    back = user_client.patch(f"/api/threads/{t['id']}", json={"archived": False}).json()
+    assert back["archived"] is False
+    assert back["meeting_count"] == 1
+    assert [x["id"] for x in user_client.get("/api/threads").json()["items"]] == [t["id"]]
+
+
 def test_sort_by_title(user_client):
     make_thread(user_client, title="Zebra")
     make_thread(user_client, title="Alpha")

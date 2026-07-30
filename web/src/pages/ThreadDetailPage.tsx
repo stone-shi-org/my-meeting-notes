@@ -1,5 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   CalendarDays,
   CheckCheck,
@@ -373,6 +375,21 @@ export function ThreadDetailPage() {
     void queryClient.invalidateQueries({ queryKey: ['threads'] });
   };
 
+  /**
+   * Put a finished thread away, or take it back out.
+   *
+   * Archiving is not deleting and not hiding-with-consequences: everything
+   * stays, and the thread is still reachable through the Threads list's
+   * "Archived only" filter. What it does change is that the periodic sweep
+   * stops watching it (`due_threads` filters on `archived = 0`), so a project
+   * nobody works on any more stops spending LLM tokens and provider quota
+   * every half hour.
+   */
+  const setArchived = useMutation({
+    mutationFn: (archived: boolean) => api.patch(`/threads/${threadId}`, { archived }),
+    onSuccess: refresh,
+  });
+
   const markAllRead = useMutation({
     mutationFn: () => api.post(`/threads/${threadId}/read`),
     onSuccess: refresh,
@@ -424,7 +441,16 @@ export function ThreadDetailPage() {
         thread.data && (
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
-              <h1 className="font-display text-2xl font-semibold">{thread.data.title}</h1>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="font-display text-2xl font-semibold">{thread.data.title}</h1>
+                {thread.data.archived && <Badge variant="neutral">Archived</Badge>}
+              </div>
+              {thread.data.archived && (
+                <p className="mt-1 text-sm text-fg-subtle">
+                  Everything on it is kept. It is out of the Threads list, and follow-ups are
+                  no longer checked for automatically.
+                </p>
+              )}
               {thread.data.description && (
                 <p className="mt-1 max-w-2xl text-sm text-fg-muted">
                   {thread.data.description}
@@ -465,6 +491,19 @@ export function ThreadDetailPage() {
                   <Plus />
                   Add meeting
                 </Link>
+              </Button>
+              <Button
+                variant="ghost"
+                loading={setArchived.isPending}
+                onClick={() => setArchived.mutate(!thread.data!.archived)}
+                title={
+                  thread.data.archived
+                    ? 'Put it back on the Threads list and resume automatic follow-up checks'
+                    : 'Keep everything, but take it off the Threads list and stop checking it for follow-ups'
+                }
+              >
+                {thread.data.archived ? <ArchiveRestore /> : <Archive />}
+                {thread.data.archived ? 'Unarchive' : 'Archive'}
               </Button>
               <Button
                 variant="ghost"
@@ -523,6 +562,10 @@ export function ThreadDetailPage() {
 
       {checkNow.error && (
         <p className="text-sm text-danger-ink">{(checkNow.error as Error).message}</p>
+      )}
+
+      {setArchived.error && (
+        <p className="text-sm text-danger-ink">{(setArchived.error as Error).message}</p>
       )}
 
       <div className="flex flex-wrap items-center gap-2" role="group" aria-label="Filter timeline">

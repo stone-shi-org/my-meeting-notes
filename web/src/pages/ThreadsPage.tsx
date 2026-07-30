@@ -304,7 +304,9 @@ export function ThreadsPage() {
               onChange={(e) => update({ archived: e.target.checked ? '1' : null })}
               className="size-4 rounded border-border-strong"
             />
-            Archived
+            {/* The filter swaps the list rather than widening it, so "Archived"
+                alone reads as "include archived", which is not what it does. */}
+            Archived only
           </label>
         </div>
       </Card>
@@ -323,11 +325,19 @@ export function ThreadsPage() {
         <Card>
           <EmptyState
             icon={Layers}
-            title={q ? 'No threads match that search' : 'No threads yet'}
+            title={
+              q
+                ? 'No threads match that search'
+                : archived
+                  ? 'Nothing is archived'
+                  : 'No threads yet'
+            }
             description={
               q
                 ? 'Try a different word, or clear the search.'
-                : 'Upload a recording and we will create the first thread for you.'
+                : archived
+                  ? 'Archiving a thread from its own page keeps everything and stops it being checked for follow-ups.'
+                  : 'Upload a recording and we will create the first thread for you.'
             }
             action={
               q ? (
@@ -339,6 +349,10 @@ export function ThreadsPage() {
                   }}
                 >
                   Clear search
+                </Button>
+              ) : archived ? (
+                <Button variant="secondary" onClick={() => update({ archived: null })}>
+                  Show active threads
                 </Button>
               ) : (
                 <Button variant="primary" asChild>

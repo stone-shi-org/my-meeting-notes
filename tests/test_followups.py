@@ -456,6 +456,18 @@ class TestScheduler:
 
         assert run_due(db_path)["swept"] == 0
 
+    def test_unarchiving_puts_a_thread_back_under_watch(
+        self, user_client, admin_client, meeting, mock_llm, db_path
+    ):
+        """Archiving is the off switch for the sweep, so it has to switch back on."""
+        configure(admin_client, auto_match_enabled=True)
+        thread_id = meeting["thread_id"]
+        user_client.patch(f"/api/threads/{thread_id}", json={"archived": True})
+        assert run_due(db_path)["swept"] == 0
+
+        user_client.patch(f"/api/threads/{thread_id}", json={"archived": False})
+        assert run_due(db_path)["swept"] == 1
+
     def test_a_thread_nobody_has_touched_in_weeks_is_not_watched(
         self, user_client, admin_client, meeting, mock_llm, db_path
     ):

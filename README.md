@@ -104,6 +104,10 @@ It is off by default because it spends LLM tokens and provider quota on its own 
 that are archived, or that nobody has touched in 30 days, stop being watched. **Check now** on a
 thread runs exactly the same sweep immediately.
 
+**Archive** on a thread is how you stop watching one deliberately: it keeps every meeting, email and
+event, takes the thread off the Threads list, and turns off its automatic checks. It is reversible
+from the same button — find it again with the **Archived only** filter on the list.
+
 ### Connecting a calendar and inbox
 
 Calendars and inboxes are **per-user**. Nothing is connected by default and no account is shared:
