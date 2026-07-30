@@ -6,6 +6,7 @@ import {
   Check,
   ExternalLink,
   MapPin,
+  RefreshCw,
   Users,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -376,6 +377,15 @@ export function UpcomingPanel() {
             </option>
           ))}
         </Select>
+        <Button
+          variant="secondary"
+          size="icon-sm"
+          aria-label="Refresh"
+          onClick={() => query.refetch()}
+          disabled={query.isFetching}
+        >
+          <RefreshCw className={cn(query.isFetching && 'animate-spin')} />
+        </Button>
       </div>
 
       {/* `> 0`, not a bare length: a falsy 0 renders as a literal "0". */}
