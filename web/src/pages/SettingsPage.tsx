@@ -377,7 +377,7 @@ export function MatchingSettingsPage() {
     <div className="space-y-4">
       <SettingsForm
         title="Matching"
-        description="How far around a meeting the search for related events and email reaches."
+        description="How far around a meeting the search for related email reaches."
         keys={[
           {
             key: 'match_window_days_before',
@@ -393,6 +393,25 @@ export function MatchingSettingsPage() {
             hint: 'Per kind, nearest in time first. Everything found is ranked, so a big number costs LLM tokens on every match.',
           },
           { key: 'match_max_keywords', label: 'Maximum keywords', type: 'number' },
+        ]}
+      />
+
+      <SettingsForm
+        title="Calendar matching window"
+        description="How far around a meeting the calendar search reaches. Kept separate from email: a wider date range costs a calendar provider nothing extra, and interviews and appointments get booked much further out than an email ever goes unanswered."
+        keys={[
+          {
+            key: 'match_window_calendar_days_before',
+            label: 'Days before',
+            type: 'number',
+            hint: 'How far back from the meeting to search calendars.',
+          },
+          {
+            key: 'match_window_calendar_days_after',
+            label: 'Days after',
+            type: 'number',
+            hint: 'How far ahead of the meeting to search calendars.',
+          },
         ]}
       />
 

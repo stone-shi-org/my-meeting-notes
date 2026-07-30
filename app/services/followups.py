@@ -134,6 +134,8 @@ async def sweep_thread(
         threshold = float(effective(conn, "auto_match_threshold"))
         days_before = effective(conn, "match_window_days_before")
         days_after = effective(conn, "match_window_days_after")
+        calendar_days_before = effective(conn, "match_window_calendar_days_before")
+        calendar_days_after = effective(conn, "match_window_calendar_days_after")
         max_candidates = effective(conn, "match_max_candidates")
         keywords = _keywords(conn, thread_id, effective(conn, "match_max_keywords"))
         context = watch_context(conn, thread_id, keywords)
@@ -142,6 +144,8 @@ async def sweep_thread(
     # lately", and the window walks forward with the clock on every tick.
     start = anchor - timedelta(days=days_before)
     end = anchor + timedelta(days=days_after)
+    calendar_start = anchor - timedelta(days=calendar_days_before)
+    calendar_end = anchor + timedelta(days=calendar_days_after)
 
     try:
         gathered = await matching_svc.gather_candidates(
@@ -150,6 +154,8 @@ async def sweep_thread(
             keywords=keywords,
             start=start,
             end=end,
+            calendar_start=calendar_start,
+            calendar_end=calendar_end,
             max_candidates=max_candidates,
             user_id=user_id,
         )

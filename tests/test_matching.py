@@ -394,7 +394,7 @@ class TestMatchJob:
             f"/api/meetings/{meeting['id']}/match/latest"
         ).json()["query"]
 
-        assert query["calendar"]["start_date"] == "2026-03-11"
+        assert query["calendar"]["start_date"] == "2026-01-17"
         assert "after:2026/03/11" in query["email"]["query"]
         assert "atlas" in query["keywords"]
 

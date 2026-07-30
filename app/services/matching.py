@@ -150,8 +150,15 @@ async def gather_candidates(
     end: datetime,
     max_candidates: int,
     user_id: int | None = None,
+    calendar_start: datetime | None = None,
+    calendar_end: datetime | None = None,
 ) -> dict:
     """Search every calendar and inbox this user has connected, concurrently.
+
+    ``calendar_start``/``calendar_end`` default to ``start``/``end`` and let the
+    calendar search run its own, usually wider, window than email -- a
+    date-range list call costs a calendar provider nothing extra, and
+    interviews get booked much further out than an email ever goes unanswered.
 
     One account being down is not fatal, and that property has to survive a user
     adding a second account: an aggregate error is only reported when *every*
@@ -190,6 +197,9 @@ async def gather_candidates(
             "matching a meeting."
         )
 
+    cal_start = calendar_start if calendar_start is not None else start
+    cal_end = calendar_end if calendar_end is not None else end
+
     gmail_query = build_gmail_query(keywords, start, end)
     calendar_query = " ".join(keywords[:3])
 
@@ -198,7 +208,7 @@ async def gather_candidates(
         (
             "calendar",
             source,
-            source.search_events(query=calendar_query or None, start=start, end=end),
+            source.search_events(query=calendar_query or None, start=cal_start, end=cal_end),
         )
         for source in calendar_sources
     ] + [
@@ -238,14 +248,15 @@ async def gather_candidates(
     emails = _dedupe_emails(emails, attached_msgs)
 
     # Nearest-in-time first, so the cap keeps what is most likely to matter.
-    anchor = start + (end - start) / 2
+    # Uses the calendar window specifically, since it may be wider than email's.
+    event_anchor = cal_start + (cal_end - cal_start) / 2
 
     def event_distance(item: dict) -> float:
         try:
             value = datetime.fromisoformat(item.get("start") or "")
             if value.tzinfo is None:
                 value = value.replace(tzinfo=timezone.utc)
-            return abs((value - anchor).total_seconds())
+            return abs((value - event_anchor).total_seconds())
         except (ValueError, TypeError):
             return float("inf")
 
@@ -282,8 +293,8 @@ async def gather_candidates(
             # are the representative rendering and `sources` carries the detail.
             "calendar": {
                 "query": calendar_query,
-                "start_date": iso_date(start),
-                "end_date": iso_date(end),
+                "start_date": iso_date(cal_start),
+                "end_date": iso_date(cal_end),
             },
             "email": {"query": gmail_query},
             "sources": [
@@ -810,6 +821,12 @@ async def run_match(ctx) -> dict:
         days_after = ctx.payload.get("window_days_after") or effective(
             conn, "match_window_days_after"
         )
+        calendar_days_before = ctx.payload.get(
+            "calendar_window_days_before"
+        ) or effective(conn, "match_window_calendar_days_before")
+        calendar_days_after = ctx.payload.get(
+            "calendar_window_days_after"
+        ) or effective(conn, "match_window_calendar_days_after")
         max_candidates = effective(conn, "match_max_candidates")
         max_keywords = effective(conn, "match_max_keywords")
 
@@ -824,8 +841,15 @@ async def run_match(ctx) -> dict:
     )
 
     start, end = date_window(meeting["meeting_at"], days_before, days_after)
+    calendar_start, calendar_end = date_window(
+        meeting["meeting_at"], calendar_days_before, calendar_days_after
+    )
 
-    ctx.stage("gathering", f"Searching {iso_date(start)} to {iso_date(end)}")
+    ctx.stage(
+        "gathering",
+        f"Searching calendar {iso_date(calendar_start)} to {iso_date(calendar_end)}, "
+        f"email {iso_date(start)} to {iso_date(end)}",
+    )
     ctx.event(f"Keywords: {', '.join(keywords) or '(none)'}", stage="gathering")
 
     def conn_factory():
@@ -837,6 +861,8 @@ async def run_match(ctx) -> dict:
         keywords=keywords,
         start=start,
         end=end,
+        calendar_start=calendar_start,
+        calendar_end=calendar_end,
         max_candidates=max_candidates,
         user_id=user_id,
     )

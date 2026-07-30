@@ -36,6 +36,8 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "summary_prompt_name": ("str", False),
     "match_window_days_before": ("int", False),
     "match_window_days_after": ("int", False),
+    "match_window_calendar_days_before": ("int", False),
+    "match_window_calendar_days_after": ("int", False),
     "match_max_candidates": ("int", False),
     "match_max_keywords": ("int", False),
     # Periodic re-matching. Off by default: it spends LLM budget and provider
@@ -120,6 +122,11 @@ class Settings(BaseSettings):
     # --- matching -----------------------------------------------------------
     match_window_days_before: int = 7
     match_window_days_after: int = 14
+    # Calendars are cheap to search broadly (a date-range list call, not a
+    # keyword search) and interviews/appointments are booked further out than
+    # a stray email ever sits unanswered, so calendar gets its own, wider window.
+    match_window_calendar_days_before: int = 60
+    match_window_calendar_days_after: int = 60
     match_max_candidates: int = 25
     match_max_keywords: int = 8
 
