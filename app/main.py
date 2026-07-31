@@ -97,6 +97,7 @@ def _mount_spa(app: FastAPI, dist: Path) -> None:
         app.mount("/assets", StaticFiles(directory=str(assets)), name="assets")
 
     index = dist / "index.html"
+    dist_resolved = dist.resolve()
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def spa(full_path: str):
@@ -115,6 +116,12 @@ def _mount_spa(app: FastAPI, dist: Path) -> None:
                     }
                 },
             )
+        # vite's `public/` files (favicon, robots.txt, ...) land at the dist
+        # root, not under /assets - serve them if the path matches one.
+        if full_path:
+            candidate = (dist / full_path).resolve()
+            if candidate.is_file() and candidate.is_relative_to(dist_resolved):
+                return FileResponse(candidate)
         return FileResponse(index, headers={"Cache-Control": "no-store"})
 
 
