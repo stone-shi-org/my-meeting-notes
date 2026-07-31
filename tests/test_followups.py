@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from datetime import datetime, timedelta, timezone
 
 import httpx
 import pytest
@@ -21,16 +22,29 @@ from app.services.providers.base import EmailCandidate, EventCandidate, Integrat
 
 LLM_URL = "https://llm.test/v1/chat/completions"
 
+# The sweep sorts calendar candidates by distance from *now* (see
+# gather_candidates' event_distance), not from a fixed meeting date -- unlike
+# the manual match in test_matching.py. Hardcoded absolute dates here would be
+# a time bomb: once "now" drifts past them, "nearest to now" silently picks a
+# different candidate than the one this suite was written against. Anchoring
+# both events on the real clock keeps uid-review the nearer one forever.
+_NOW = datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.replace(microsecond=0).isoformat()
+
+
 EVENTS = [
     {
         "uid": "uid-review", "summary": "Atlas Migration — Cutover review",
         "description": "", "location": "Room 4B",
-        "start": "2026-07-30T09:00:00+00:00", "end": "2026-07-30T09:30:00+00:00",
+        "start": _iso(_NOW + timedelta(hours=6)), "end": _iso(_NOW + timedelta(hours=6, minutes=30)),
         "calendar_name": "work@x", "account": "work@x", "type": "google",
     },
     {
         "uid": "uid-dentist", "summary": "Dentist", "description": "", "location": "",
-        "start": "2026-07-31T14:00:00+00:00", "end": "2026-07-31T15:00:00+00:00",
+        "start": _iso(_NOW + timedelta(days=30)), "end": _iso(_NOW + timedelta(days=30, hours=1)),
         "calendar_name": "personal@x", "account": "personal@x", "type": "caldav",
     },
 ]
