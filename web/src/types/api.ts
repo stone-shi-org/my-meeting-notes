@@ -382,6 +382,14 @@ export interface ChatMessage {
   created_at: string;
 }
 
+export interface MeetingChatMessage {
+  id: number;
+  meeting_id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: string;
+}
+
 /** One connected calendar/email account. Always the caller's own. */
 export interface Integration {
   id: number;

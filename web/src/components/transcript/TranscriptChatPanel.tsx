@@ -8,7 +8,7 @@ import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
 import { renderMarkdown } from '@/lib/markdown';
-import { ApiError, type ChatMessage } from '@/types/api';
+import { ApiError, type MeetingChatMessage } from '@/types/api';
 
 /** Assistant replies are LLM-authored markdown; user turns are shown as the
  * literal text typed, not run through a renderer. */
@@ -29,14 +29,12 @@ function MessageBubble({ role, content }: { role: 'user' | 'assistant'; content:
 }
 
 /**
- * Always-on assistant for asking questions about a thread's meetings,
- * calendar events and emails. Rendered unconditionally by ThreadDetailPage as
- * a docked input pill in the bottom-right corner; focusing it expands the
- * same element in place into a full-height right side panel, and the
- * minimize button collapses it back to just the pill. There is no fully
- * hidden state -- the entry point is always reachable.
+ * Always-on assistant for asking questions about a single meeting's
+ * transcript -- the same docked-pill / expanding-panel behavior as
+ * ThreadChatPanel, just scoped to one meeting's transcript instead of a
+ * thread's meetings, calendar events and emails.
  */
-export function ThreadChatPanel({ threadId }: { threadId: string }) {
+export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState('');
   const [expanded, setExpanded] = useState(false);
@@ -48,17 +46,17 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const messagesQuery = useQuery({
-    queryKey: ['thread-chat', threadId],
-    queryFn: () => api.get<ChatMessage[]>(`/threads/${threadId}/chat`),
-    enabled: !!threadId,
+    queryKey: ['meeting-chat', meetingId],
+    queryFn: () => api.get<MeetingChatMessage[]>(`/meetings/${meetingId}/chat`),
+    enabled: !!meetingId,
   });
 
   const messages = messagesQuery.data ?? [];
 
   const clear = useMutation({
-    mutationFn: () => api.del(`/threads/${threadId}/chat`),
+    mutationFn: () => api.del(`/meetings/${meetingId}/chat`),
     onSuccess: () => {
-      queryClient.setQueryData<ChatMessage[]>(['thread-chat', threadId], []);
+      queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], []);
       setStreamError(null);
     },
   });
@@ -84,14 +82,14 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
     setDraft('');
     setStreamError(null);
 
-    const optimisticUser: ChatMessage = {
+    const optimisticUser: MeetingChatMessage = {
       id: -Date.now(),
-      thread_id: Number(threadId),
+      meeting_id: Number(meetingId),
       role: 'user',
       content: message,
       created_at: new Date().toISOString(),
     };
-    queryClient.setQueryData<ChatMessage[]>(['thread-chat', threadId], (prev) => [
+    queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], (prev) => [
       ...(prev ?? []),
       optimisticUser,
     ]);
@@ -100,13 +98,13 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      await streamChat(
-        `/threads/${threadId}/chat`,
+      await streamChat<MeetingChatMessage>(
+        `/meetings/${meetingId}/chat`,
         message,
         {
           onToken: (text) => setStreamingText((prev) => (prev ?? '') + text),
           onDone: (assistantMessage) => {
-            queryClient.setQueryData<ChatMessage[]>(['thread-chat', threadId], (prev) => [
+            queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], (prev) => [
               ...(prev ?? []),
               assistantMessage,
             ]);
@@ -143,16 +141,19 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
       className={cn(
         'fixed z-30 flex flex-col overflow-hidden border-border bg-surface transition-all duration-slow ease-out motion-reduce:transition-none',
         expanded
-          ? // Docked below the app header (h-14), not over it, so the nav stays reachable.
-            'inset-x-0 top-14 bottom-0 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[28rem]'
-          : 'bottom-4 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
+          ? // Docked below the app header (h-14) and above the PlayerBar (its
+            // content box is ~3.5rem tall), so neither the nav nor transport
+            // controls end up underneath this panel.
+            'inset-x-0 top-14 bottom-14 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[28rem]'
+          : // bottom-18 clears the PlayerBar (~3.5rem) plus a small gap --
+            // bottom-4 would sit the pill right on top of its right-hand controls.
+            'bottom-18 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
       )}
-      style={!expanded ? { paddingBottom: 'env(safe-area-inset-bottom)' } : undefined}
     >
       {expanded && (
         <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
           <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
-          <h2 className="flex-1 text-sm font-semibold">Ask about this thread</h2>
+          <h2 className="flex-1 text-sm font-semibold">Ask about this transcript</h2>
           {messages.length > 0 && (
             <button
               type="button"
@@ -189,8 +190,8 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
 
           {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && (
             <p className="text-sm text-fg-subtle">
-              Ask about the meetings, calendar events and emails attached to this thread —
-              decisions made, action items, who owns what, or a specific meeting's transcript.
+              Ask about this meeting's transcript — what was said, who said it, exact
+              numbers or quotes, or anything else the recording covers.
             </p>
           )}
 
@@ -248,7 +249,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
                 void submit();
               }
             }}
-            placeholder="Ask about this thread…"
+            placeholder="Ask about this transcript…"
             rows={1}
             className={cn(
               'max-h-32 min-h-9 resize-none py-1.5',
@@ -272,7 +273,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
               type="button"
               onClick={() => setExpanded(true)}
               aria-label="Open AI chat"
-              title="Ask about this thread"
+              title="Ask about this transcript"
               className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-fg transition-transform duration-fast hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100"
             >
               <Sparkles className="size-4" aria-hidden />

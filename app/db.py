@@ -345,6 +345,21 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_chat_thread ON chat_messages(thread_id, created_at)",
+    # -------------------------------------------------------- meeting_chat_messages
+    """
+    CREATE TABLE IF NOT EXISTS meeting_chat_messages (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        meeting_id         INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+        owner_id           INTEGER NOT NULL REFERENCES users(id),
+        role               TEXT NOT NULL,
+        content            TEXT NOT NULL,
+        model              TEXT,
+        prompt_tokens      INTEGER,
+        completion_tokens  INTEGER,
+        created_at         TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_meeting_chat_meeting ON meeting_chat_messages(meeting_id, created_at)",
     # ---------------------------------------------------------- mcp_servers
     """
     CREATE TABLE IF NOT EXISTS mcp_servers (

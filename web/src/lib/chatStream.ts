@@ -33,9 +33,9 @@ export function parseSseFrames(buffer: string): {
   return { frames, rest };
 }
 
-export interface ChatStreamHandlers {
+export interface ChatStreamHandlers<T = ChatMessage> {
   onToken: (text: string) => void;
-  onDone: (message: ChatMessage) => void;
+  onDone: (message: T) => void;
   onError: (error: { code: string; message: string }) => void;
 }
 
@@ -44,14 +44,19 @@ export interface ChatStreamHandlers {
  * lib/api.ts's request() -- that helper always does one JSON in, one JSON
  * out, and every other endpoint in the app still wants exactly that.
  * EventSource can't be used here since it can't send a POST body.
+ *
+ * `path` is the endpoint below `/api` (e.g. `/threads/1/chat` or
+ * `/meetings/1/chat`) -- both thread chat and meeting chat share this same
+ * SSE contract (`token`/`done`/`error` events), only the digest behind it
+ * differs.
  */
-export async function streamChat(
-  threadId: string,
+export async function streamChat<T = ChatMessage>(
+  path: string,
   message: string,
-  handlers: ChatStreamHandlers,
+  handlers: ChatStreamHandlers<T>,
   signal?: AbortSignal,
 ): Promise<void> {
-  const response = await fetch(`/api/threads/${threadId}/chat`, {
+  const response = await fetch(`/api${path}`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
@@ -91,7 +96,7 @@ export async function streamChat(
     for (const frame of frames) {
       const data = JSON.parse(frame.data);
       if (frame.event === 'token') handlers.onToken(data.text);
-      else if (frame.event === 'done') handlers.onDone(data as ChatMessage);
+      else if (frame.event === 'done') handlers.onDone(data as T);
       else if (frame.event === 'error') handlers.onError(data);
     }
   }

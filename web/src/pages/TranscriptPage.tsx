@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
 import { PlayerBar } from '@/components/transcript/PlayerBar';
+import { TranscriptChatPanel } from '@/components/transcript/TranscriptChatPanel';
 import { TranscriptView } from '@/components/transcript/TranscriptView';
 import { MatchPanel } from '@/components/match/MatchPanel';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
@@ -611,6 +612,8 @@ export function TranscriptPage() {
       {/* Outside the grid so playback stays available with the transcript
           collapsed -- listening back doesn't require reading along. */}
       <PlayerBar />
+
+      <TranscriptChatPanel meetingId={String(m.id)} />
     </PlayerProvider>
   );
 }

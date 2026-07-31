@@ -23,6 +23,7 @@ from app.routers import (
     integrations,
     jobs,
     matching,
+    meeting_chat,
     meetings,
     settings_api,
     summaries,
@@ -146,6 +147,7 @@ def create_app() -> FastAPI:
     app.include_router(threads.router)
     app.include_router(meetings.router)
     app.include_router(transcripts.router)
+    app.include_router(meeting_chat.router)
     app.include_router(summaries.router)
     app.include_router(matching.router)
     app.include_router(calendar.router)
