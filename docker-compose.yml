@@ -1,6 +1,9 @@
 services:
   my-meeting-notes:
-    image: registry.example.com/homestack/my-meeting-notes:latest
+    # Matches build.sh's default local tag (no -r/MMN_REGISTRY): `./build.sh`
+    # then `docker compose up -d` reuses that image without triggering a
+    # second, registry-less build here.
+    image: my-meeting-notes:latest
     build:
       context: .
       target: runtime

@@ -42,13 +42,20 @@ fi
 # "registry.example.com/homestack/my-meeting-notes" once a registry is set.
 REPO="${REGISTRY:+${REGISTRY}/}${IMAGE}"
 
-# version.txt is baked into the image and surfaced at /api/version, so a running
-# container can always be traced back to a commit.
-HASH="$(git rev-parse HEAD 2>/dev/null || echo dev)"
+# version.txt is baked into the image and surfaced at /api/version (and the
+# app footer), so a running container can always be traced back to a commit.
+# git status --porcelain, not the old two-way diff --quiet check, so an
+# untracked file counts as dirty too.
+FULL_HASH="$(git rev-parse HEAD 2>/dev/null || true)"
 TIMESTAMP="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-if ! git diff --quiet 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
-    HASH="${HASH}-dirty"
+if [ -z "$FULL_HASH" ]; then
+    HASH="dev"
+else
+    HASH="${FULL_HASH:0:7}"
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        HASH="${HASH}-dev"
+    fi
 fi
 
 {
@@ -58,11 +65,10 @@ fi
 
 log "Version: ${HASH} (${TIMESTAMP})"
 
-SHORT="${HASH:0:12}"
 log "Building ${REPO}:latest"
 docker build --target runtime \
     -t "${REPO}:latest" \
-    -t "${REPO}:${SHORT}" \
+    -t "${REPO}:${HASH}" \
     ${EXTRA_TAG:+-t "${REPO}:${EXTRA_TAG}"} \
     .
 
@@ -72,7 +78,7 @@ docker images "${REPO}" --format '    {{.Repository}}:{{.Tag}}  {{.Size}}'
 if [ "$PUSH" -eq 1 ]; then
     log "Pushing"
     docker push "${REPO}:latest"
-    docker push "${REPO}:${SHORT}"
+    docker push "${REPO}:${HASH}"
     [ -n "$EXTRA_TAG" ] && docker push "${REPO}:${EXTRA_TAG}"
     log "Pushed"
 elif [ -z "$REGISTRY" ]; then

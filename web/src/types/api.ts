@@ -467,10 +467,15 @@ export interface PromptDetail extends PromptSummary {
   user: string;
 }
 
+export interface VersionInfo {
+  hash: string;
+  timestamp: string | null;
+}
+
 export interface Health {
   status: string;
   db: { ok: boolean; error: string | null; path: string };
   ffmpeg: string | null;
   workers: number;
-  version: { hash: string; timestamp: string | null };
+  version: VersionInfo;
 }

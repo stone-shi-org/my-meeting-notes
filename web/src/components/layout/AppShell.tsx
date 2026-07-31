@@ -12,6 +12,7 @@ import {
 import { useState } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
+import { Footer } from '@/components/layout/Footer';
 import { JobDock } from '@/components/jobs/JobDock';
 import { useAuth } from '@/hooks/useAuth';
 import { useTheme } from '@/hooks/useTheme';
@@ -172,6 +173,8 @@ export function AppShell() {
       <main id="main" key={location.pathname} className="mx-auto max-w-[1600px] px-4 py-6 sm:px-6 lg:px-8">
         <Outlet />
       </main>
+
+      <Footer />
 
       <JobDock />
     </div>
