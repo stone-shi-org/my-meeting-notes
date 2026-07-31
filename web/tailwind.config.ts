@@ -142,10 +142,21 @@ export default {
         shimmer: {
           '100%': { transform: 'translateX(100%)' },
         },
+        glow: {
+          '0%, 100%': {
+            boxShadow:
+              '0 0 0 0 var(--ring), 0 4px 8px -4px hsl(var(--shadow-color) / 0.12), 0 16px 32px -8px hsl(var(--shadow-color) / 0.10)',
+          },
+          '50%': {
+            boxShadow:
+              '0 0 16px 4px var(--ring), 0 4px 8px -4px hsl(var(--shadow-color) / 0.12), 0 16px 32px -8px hsl(var(--shadow-color) / 0.10)',
+          },
+        },
       },
       animation: {
         'fade-in': 'fade-in 180ms cubic-bezier(0.16, 1, 0.3, 1)',
         'zoom-in': 'zoom-in 180ms cubic-bezier(0.16, 1, 0.3, 1)',
+        glow: 'glow 2.4s ease-in-out infinite',
       },
     },
   },

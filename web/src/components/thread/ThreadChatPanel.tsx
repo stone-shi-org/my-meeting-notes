@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { MessageCircle, Send, Trash2, X } from 'lucide-react';
+import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -29,25 +29,23 @@ function MessageBubble({ role, content }: { role: 'user' | 'assistant'; content:
 }
 
 /**
- * Floating chat panel for asking questions about a thread's meetings,
- * calendar events and emails. Visibility is controlled by the parent (a
- * toggle button in ThreadDetailPage's header), matching how the existing
- * Meetings/Events/Emails filters are local state rather than a routed tab.
+ * Always-on assistant for asking questions about a thread's meetings,
+ * calendar events and emails. Rendered unconditionally by ThreadDetailPage as
+ * a docked input pill in the bottom-right corner; focusing it expands the
+ * same element in place into a full-height right side panel, and the
+ * minimize button collapses it back to just the pill. There is no fully
+ * hidden state -- the entry point is always reachable.
  */
-export function ThreadChatPanel({
-  threadId,
-  onClose,
-}: {
-  threadId: string;
-  onClose: () => void;
-}) {
+export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useState('');
+  const [expanded, setExpanded] = useState(false);
   // null = idle, '' = waiting on the model, non-empty = tokens arriving.
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<{ code: string; message: string } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   const messagesQuery = useQuery({
     queryKey: ['thread-chat', threadId],
@@ -67,11 +65,18 @@ export function ThreadChatPanel({
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, streamingText]);
+  }, [messages.length, streamingText, expanded]);
 
-  // Abandoning the read on unmount/close doesn't stop the answer being
+  // Abandoning the read on unmount/collapse doesn't stop the answer being
   // generated and saved server-side -- it just stops watching it arrive.
   useEffect(() => () => abortRef.current?.abort(), []);
+
+  // The pill and the panel are different subtrees (header/history are only
+  // mounted once expanded), so the textarea remounts across that switch and
+  // loses focus. Put it back once the expanded layout has committed.
+  useEffect(() => {
+    if (expanded) textareaRef.current?.focus();
+  }, [expanded]);
 
   async function submit() {
     const message = draft.trim();
@@ -124,18 +129,29 @@ export function ThreadChatPanel({
     }
   }
 
+  function minimize() {
+    setExpanded(false);
+    textareaRef.current?.blur();
+  }
+
   const settingsHint = streamError
     ? new ApiError(0, streamError.code, streamError.message).settingsHint
     : null;
 
   return (
     <div
-      className="fixed inset-x-3 bottom-3 z-40 flex flex-col sm:inset-x-auto sm:right-4 sm:bottom-4 sm:w-96"
-      style={{ paddingBottom: 'env(safe-area-inset-bottom)' }}
+      className={cn(
+        'fixed z-30 flex flex-col overflow-hidden border-border bg-surface transition-all duration-slow ease-out motion-reduce:transition-none',
+        expanded
+          ? // Docked below the app header (h-14), not over it, so the nav stays reachable.
+            'inset-x-0 top-14 bottom-0 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[28rem]'
+          : 'bottom-4 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
+      )}
+      style={!expanded ? { paddingBottom: 'env(safe-area-inset-bottom)' } : undefined}
     >
-      <div className="flex h-[30rem] max-h-[70vh] flex-col overflow-hidden rounded-lg border border-border bg-surface shadow-lg">
+      {expanded && (
         <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
-          <MessageCircle className="size-4 shrink-0 text-primary" aria-hidden />
+          <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
           <h2 className="flex-1 text-sm font-semibold">Ask about this thread</h2>
           {messages.length > 0 && (
             <button
@@ -155,14 +171,17 @@ export function ThreadChatPanel({
           )}
           <button
             type="button"
-            onClick={onClose}
-            aria-label="Close chat"
+            onClick={minimize}
+            aria-label="Minimize chat"
+            title="Minimize"
             className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-fg"
           >
-            <X className="size-4" aria-hidden />
+            <Minimize2 className="size-4" aria-hidden />
           </button>
         </div>
+      )}
 
+      {expanded && (
         <div className="flex-1 space-y-3 overflow-y-auto p-4">
           {messagesQuery.isLoading && (
             <p className="text-sm text-fg-subtle">Loading conversation…</p>
@@ -201,35 +220,43 @@ export function ThreadChatPanel({
 
           <div ref={bottomRef} />
         </div>
+      )}
 
-        <div className="border-t border-border p-3">
-          {streamError && (
-            <p className="mb-2 text-xs text-danger-ink">
-              {streamError.message}
-              {settingsHint && (
-                <>
-                  {' — '}
-                  <Link to={settingsHint} className="underline underline-offset-2">
-                    open settings
-                  </Link>
-                </>
-              )}
-            </p>
-          )}
-          <div className="flex items-end gap-2">
-            <Textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault();
-                  void submit();
-                }
-              }}
-              placeholder="Ask a question…"
-              rows={1}
-              className="max-h-32 min-h-9 resize-none py-1.5"
-            />
+      <div className={expanded ? 'border-t border-border p-3' : 'py-1.5 pl-4 pr-1.5'}>
+        {expanded && streamError && (
+          <p className="mb-2 text-xs text-danger-ink">
+            {streamError.message}
+            {settingsHint && (
+              <>
+                {' — '}
+                <Link to={settingsHint} className="underline underline-offset-2">
+                  open settings
+                </Link>
+              </>
+            )}
+          </p>
+        )}
+        <div className="flex items-end gap-2">
+          <Textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onFocus={() => setExpanded(true)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                void submit();
+              }
+            }}
+            placeholder="Ask about this thread…"
+            rows={1}
+            className={cn(
+              'max-h-32 min-h-9 resize-none py-1.5',
+              !expanded &&
+                'border-0 bg-transparent shadow-none focus-visible:ring-0 focus-visible:ring-offset-0',
+            )}
+          />
+          {expanded ? (
             <Button
               size="icon"
               variant="primary"
@@ -240,7 +267,17 @@ export function ThreadChatPanel({
             >
               <Send />
             </Button>
-          </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setExpanded(true)}
+              aria-label="Open AI chat"
+              title="Ask about this thread"
+              className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary text-primary-fg transition-transform duration-fast hover:scale-105 active:scale-95 motion-reduce:transition-none motion-reduce:hover:scale-100"
+            >
+              <Sparkles className="size-4" aria-hidden />
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -10,7 +10,6 @@ import {
   ExternalLink,
   Mail,
   MapPin,
-  MessageCircle,
   Mic,
   Plus,
   RefreshCw,
@@ -350,8 +349,6 @@ export function ThreadDetailPage() {
   const [filters, setFilters] = useState<Set<Filter>>(
     () => new Set(['meeting', 'event', 'email'] as Filter[]),
   );
-  const [chatOpen, setChatOpen] = useState(false);
-
   const thread = useQuery({
     queryKey: ['thread', threadId],
     queryFn: () => api.get<Thread>(`/threads/${threadId}`),
@@ -480,14 +477,6 @@ export function ThreadDetailPage() {
             </div>
 
             <div className="flex gap-2">
-              <Button
-                variant={chatOpen ? 'soft' : 'secondary'}
-                onClick={() => setChatOpen((v) => !v)}
-                title="Ask a question about this thread's meetings, calendar events and emails"
-              >
-                <MessageCircle />
-                Ask
-              </Button>
               <Button
                 variant="secondary"
                 loading={checkNow.isPending}
@@ -693,9 +682,7 @@ export function ThreadDetailPage() {
         </ol>
       )}
 
-      {chatOpen && threadId && (
-        <ThreadChatPanel threadId={threadId} onClose={() => setChatOpen(false)} />
-      )}
+      {threadId && <ThreadChatPanel threadId={threadId} />}
     </div>
   );
 }
