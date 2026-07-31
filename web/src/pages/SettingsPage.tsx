@@ -312,31 +312,166 @@ function SettingsForm({
   );
 }
 
+/**
+ * Which models the AI chat panels (thread and transcript) let people pick
+ * from, in addition to `llm_model` above (always implicitly allowed -- see
+ * `llm_svc.enabled_chat_models`). A separate small form rather than a
+ * `SettingsForm` field: it's list-valued, everything else here is scalar.
+ */
+function ChatModelsField() {
+  const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
+  const settings = useSettings();
+  const [draft, setDraft] = useState<string[] | null>(null);
+  const [customModel, setCustomModel] = useState('');
+
+  const models = useQuery({
+    queryKey: ['models', '/llm/models'],
+    queryFn: () => api.get<{ models: { id: string }[]; error: string | null }>('/llm/models'),
+    staleTime: 300_000,
+  });
+
+  const entry = settings.data?.settings.llm_chat_models;
+  const saved = Array.isArray(entry?.value) ? entry.value : [];
+  const enabled = draft ?? saved;
+
+  const save = useMutation({
+    mutationFn: (values: string[]) =>
+      api.put('/settings', { values: { llm_chat_models: values } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['settings'] });
+      setDraft(null);
+    },
+  });
+
+  if (settings.isLoading) return <Skeleton className="h-32 w-full" />;
+
+  function toggle(id: string) {
+    setDraft(enabled.includes(id) ? enabled.filter((m) => m !== id) : [...enabled, id]);
+  }
+
+  function addCustom() {
+    const id = customModel.trim();
+    if (!id || enabled.includes(id)) return;
+    setDraft([...enabled, id]);
+    setCustomModel('');
+  }
+
+  // Catalog models plus anything already enabled but no longer listed (a
+  // model an admin disabled server-side shouldn't just silently vanish here).
+  const allIds = Array.from(
+    new Set([...(models.data?.models ?? []).map((m) => m.id), ...enabled]),
+  );
+
+  return (
+    <Card className="p-5">
+      <h2 className="font-display text-lg font-semibold">Chat models</h2>
+      <p className="mt-1 text-sm text-fg-subtle">
+        Models people can choose between in the AI chat panels (thread and transcript chat).
+        The language model above is always available too.
+      </p>
+
+      <div className="mt-4 space-y-1.5">
+        {allIds.length === 0 && (
+          <p className="text-sm text-fg-subtle">No models to choose from yet.</p>
+        )}
+        {allIds.map((id) => (
+          <label key={id} className="flex items-center gap-2 text-sm">
+            <input
+              type="checkbox"
+              checked={enabled.includes(id)}
+              disabled={!isAdmin}
+              onChange={() => toggle(id)}
+              className="size-4 rounded border-border-strong"
+            />
+            {id}
+          </label>
+        ))}
+      </div>
+
+      {isAdmin && (
+        <div className="mt-3 flex gap-2">
+          <Input
+            value={customModel}
+            onChange={(e) => setCustomModel(e.target.value)}
+            placeholder="Add another model id…"
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                addCustom();
+              }
+            }}
+          />
+          <Button variant="secondary" onClick={addCustom}>
+            <Plus />
+            Add
+          </Button>
+        </div>
+      )}
+
+      {models.data?.error && (
+        <p className="mt-2 text-xs text-warning-ink">
+          Could not list models ({models.data.error}). Add ids manually.
+        </p>
+      )}
+
+      {isAdmin && (
+        <div className="mt-4 flex items-center gap-3 border-t border-border pt-4">
+          <Button
+            variant="primary"
+            disabled={draft === null}
+            loading={save.isPending}
+            onClick={() => save.mutate(enabled)}
+          >
+            Save changes
+          </Button>
+          {draft !== null && (
+            <Button variant="ghost" onClick={() => setDraft(null)}>
+              Discard
+            </Button>
+          )}
+          {save.isSuccess && draft === null && (
+            <span className="text-sm text-success-ink">Saved</span>
+          )}
+        </div>
+      )}
+      {!isAdmin && (
+        <p className="mt-4 border-t border-border pt-4 text-sm text-fg-subtle">
+          Only administrators can change these.
+        </p>
+      )}
+    </Card>
+  );
+}
+
 export function LlmSettingsPage() {
   return (
-    <SettingsForm
-      title="Language model"
-      description="Used to write summaries, detect action items and rank calendar and email matches."
-      modelsPath="/llm/models"
-      modelKey="llm_model"
-      testPath="/llm/test"
-      testKeyMap={{
-        llm_base_url: 'base_url',
-        llm_api_key: 'api_key',
-        llm_model: 'model',
-      }}
-      keys={[
-        { key: 'llm_base_url', label: 'Base URL', hint: 'OpenAI-compatible, ending in /v1' },
-        { key: 'llm_api_key', label: 'API key' },
-        {
-          key: 'llm_model',
-          label: 'Model',
-          hint: 'Use the fully-qualified id from the dropdown (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
-        },
-        { key: 'llm_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
-        { key: 'llm_temperature', label: 'Temperature', type: 'number' },
-      ]}
-    />
+    <div className="space-y-4">
+      <SettingsForm
+        title="Language model"
+        description="Used to write summaries, detect action items and rank calendar and email matches."
+        modelsPath="/llm/models"
+        modelKey="llm_model"
+        testPath="/llm/test"
+        testKeyMap={{
+          llm_base_url: 'base_url',
+          llm_api_key: 'api_key',
+          llm_model: 'model',
+        }}
+        keys={[
+          { key: 'llm_base_url', label: 'Base URL', hint: 'OpenAI-compatible, ending in /v1' },
+          { key: 'llm_api_key', label: 'API key' },
+          {
+            key: 'llm_model',
+            label: 'Model',
+            hint: 'Use the fully-qualified id from the dropdown (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
+          },
+          { key: 'llm_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
+          { key: 'llm_temperature', label: 'Temperature', type: 'number' },
+        ]}
+      />
+      <ChatModelsField />
+    </div>
   );
 }
 

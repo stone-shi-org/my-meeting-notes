@@ -379,6 +379,7 @@ export interface ChatMessage {
   thread_id: number;
   role: 'user' | 'assistant';
   content: string;
+  model: string | null;
   created_at: string;
 }
 
@@ -387,6 +388,7 @@ export interface MeetingChatMessage {
   meeting_id: number;
   role: 'user' | 'assistant';
   content: string;
+  model: string | null;
   created_at: string;
 }
 
@@ -445,7 +447,7 @@ export interface IntegrationTestResult {
 }
 
 export interface SettingEntry {
-  value: string | number | boolean | null;
+  value: string | number | boolean | string[] | null;
   type: string;
   is_secret: boolean;
   overridden: boolean;

@@ -76,6 +76,7 @@ def _row_to_message(row: sqlite3.Row) -> dict:
         "meeting_id": row["meeting_id"],
         "role": row["role"],
         "content": row["content"],
+        "model": row["model"],
         "created_at": row["created_at"],
     }
 

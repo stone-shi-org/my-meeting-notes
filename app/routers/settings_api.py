@@ -6,6 +6,7 @@ Calendar and email connections are *not* here: they are per-user and live under
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 from fastapi import APIRouter, Depends
@@ -34,7 +35,7 @@ def mask(value: str | None) -> str | None:
 
 
 class SettingsUpdate(BaseModel):
-    values: dict[str, str | int | float | bool | None]
+    values: dict[str, str | int | float | bool | list[str] | None]
 
 
 class PromptUpdate(BaseModel):
@@ -101,10 +102,15 @@ def update_settings(
         if is_secret and isinstance(value, str) and value.startswith(MASK):
             continue
 
-        stored = "" if value is None else (
-            str(value).lower() if value_type == "bool" and isinstance(value, bool)
-            else str(value)
-        )
+        if value_type == "json":
+            if value is not None and not isinstance(value, list):
+                raise ValidationError(f"{key} must be a list")
+            stored = "" if value is None else json.dumps(value)
+        else:
+            stored = "" if value is None else (
+                str(value).lower() if value_type == "bool" and isinstance(value, bool)
+                else str(value)
+            )
         conn.execute(
             """
             INSERT INTO app_settings (key, value, value_type, is_secret, updated_by, updated_at)

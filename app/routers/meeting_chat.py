@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.deps import CurrentUser, active_user, assert_can_access, get_db
 from app.logging_config import get_logger
+from app.services import llm as llm_svc
 from app.services import meeting_chat as meeting_chat_svc
 from app.services import threads as threads_svc
 
@@ -20,6 +21,8 @@ log = get_logger("meeting_chat")
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=8000)
+    # None means "use the configured default"; see llm_svc.resolve_chat_model.
+    model: str | None = Field(default=None, max_length=200)
 
 
 def _authorised_meeting(conn: sqlite3.Connection, meeting_id: int, user: CurrentUser):
@@ -61,9 +64,10 @@ async def send_chat_message(
     request-scoped `conn` before the stream starts.
     """
     _authorised_meeting(conn, meeting_id, user)
+    model = llm_svc.resolve_chat_model(conn, payload.model)
     return StreamingResponse(
         meeting_chat_svc.stream_chat_response(
-            get_settings().db_path, meeting_id, user.id, payload.message
+            get_settings().db_path, meeting_id, user.id, payload.message, model=model
         ),
         media_type="text/event-stream",
         headers={

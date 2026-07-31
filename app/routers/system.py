@@ -132,6 +132,19 @@ def llm_models(
     return {"models": models, "error": None, "base_url": base_url}
 
 
+@router.get("/llm/chat-models")
+def llm_chat_models(
+    _: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Models the AI chat panels may offer -- the admin-approved subset, not
+    the full provider catalog (that's /llm/models, used by the Settings form).
+    """
+    from app.services import llm as llm_svc
+
+    return {"models": llm_svc.enabled_chat_models(conn)}
+
+
 @router.get("/diarization/models")
 def diarization_models(
     refresh: bool = False,

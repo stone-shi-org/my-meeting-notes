@@ -254,3 +254,38 @@ def test_llm_failure_streams_an_error_frame_and_persists_nothing(user_client, is
 
     history = user_client.get(f"/api/meetings/{meeting_id}/chat").json()
     assert history == []
+
+
+# --------------------------------------------------------------------------- #
+# Model selection
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_an_enabled_model_is_used_for_the_turn(user_client, admin_client, isolated_settings):
+    meeting_id = _seed_via_api(user_client, isolated_settings)
+    admin_client.put("/api/settings", json={"values": {"llm_chat_models": ["extra/model"]}})
+    route = respx.post(LLM_URL).mock(return_value=stream_response(["answer"]))
+
+    resp = user_client.post(
+        f"/api/meetings/{meeting_id}/chat",
+        json={"message": "hi", "model": "extra/model"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert json.loads(route.calls[0].request.content)["model"] == "extra/model"
+
+    done = next(d for e, d in parse_sse_frames(resp.text) if e == "done")
+    assert done["model"] == "extra/model"
+
+
+@respx.mock
+def test_a_model_outside_the_enabled_set_is_rejected(user_client, isolated_settings):
+    meeting_id = _seed_via_api(user_client, isolated_settings)
+    route = respx.post(LLM_URL).mock(return_value=stream_response(["answer"]))
+
+    resp = user_client.post(
+        f"/api/meetings/{meeting_id}/chat",
+        json={"message": "hi", "model": "not/allowed"},
+    )
+    assert resp.status_code == 400
+    assert route.call_count == 0

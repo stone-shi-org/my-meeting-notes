@@ -30,6 +30,10 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "llm_base_url": ("str", False),
     "llm_api_key": ("str", True),
     "llm_model": ("str", False),
+    # Models selectable in the AI chat panels, in addition to llm_model (which
+    # is always implicitly allowed -- see llm_svc.enabled_chat_models). Stored
+    # as a JSON array; empty means "chat offers no choice, just llm_model".
+    "llm_chat_models": ("json", False),
     "llm_ssl_verify": ("bool", False),
     "llm_timeout_sec": ("int", False),
     "llm_temperature": ("float", False),
@@ -105,6 +109,7 @@ class Settings(BaseSettings):
     llm_base_url: str = "https://llm.internal.example/v1"
     llm_api_key: str = ""
     llm_model: str = "localai/qwen3.6-35b-a3b"
+    llm_chat_models: list[str] = Field(default_factory=list)
     llm_ssl_verify: bool = True
     llm_timeout_sec: int = 600
     llm_temperature: float = 0.2

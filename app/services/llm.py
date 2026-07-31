@@ -23,7 +23,7 @@ from httpx_sse import SSEError, aconnect_sse
 
 from app.config import effective
 from app.db import get_conn
-from app.errors import LLMAuthError, LLMError, LLMReasoningTruncatedError
+from app.errors import LLMAuthError, LLMError, LLMReasoningTruncatedError, ValidationError
 from app.logging_config import get_logger
 
 log = get_logger("llm")
@@ -124,6 +124,29 @@ class LLMConfig:
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
         return headers
+
+
+def enabled_chat_models(conn) -> list[str]:
+    """Models selectable in the AI chat panels: the admin-configured list,
+    plus the default summarization model, which is always implicitly allowed
+    even if nobody added it to llm_chat_models. De-duped, default first, so a
+    fresh install with an empty list still offers exactly one choice.
+    """
+    default = effective(conn, "llm_model")
+    configured = effective(conn, "llm_chat_models")
+    return list(dict.fromkeys([default, *configured]))
+
+
+def resolve_chat_model(conn, requested: str | None) -> str | None:
+    """None means "use the configured default". A specific choice must be one
+    of the admin-approved chat models -- otherwise any signed-in user could
+    route a request to an arbitrary model on the same API key/base_url.
+    """
+    if requested is None:
+        return None
+    if requested not in enabled_chat_models(conn):
+        raise ValidationError(f"{requested!r} is not an enabled chat model")
+    return requested
 
 
 def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:

@@ -83,6 +83,34 @@ def test_clearing_a_setting_falls_back_to_the_env_default(admin_client, isolated
     assert body["llm_model"]["value"] == isolated_settings.llm_model
 
 
+def test_a_json_list_setting_round_trips(admin_client):
+    resp = admin_client.put(
+        "/api/settings",
+        json={"values": {"llm_chat_models": ["model/a", "model/b"]}},
+    )
+    assert resp.status_code == 200, resp.text
+
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["llm_chat_models"]["value"] == ["model/a", "model/b"]
+    assert body["llm_chat_models"]["overridden"] is True
+
+
+def test_a_json_setting_rejects_a_non_list_value(admin_client):
+    resp = admin_client.put(
+        "/api/settings", json={"values": {"llm_chat_models": "not-a-list"}}
+    )
+    assert resp.status_code == 400
+    assert "llm_chat_models" in resp.json()["error"]["message"]
+
+
+def test_clearing_a_json_setting_falls_back_to_the_empty_default(admin_client):
+    admin_client.put("/api/settings", json={"values": {"llm_chat_models": ["a"]}})
+    admin_client.put("/api/settings", json={"values": {"llm_chat_models": None}})
+
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["llm_chat_models"]["value"] == []
+
+
 def test_unknown_keys_are_rejected(admin_client):
     resp = admin_client.put("/api/settings", json={"values": {"rm_rf_slash": "yes"}})
     assert resp.status_code == 400
@@ -97,6 +125,29 @@ def test_only_admins_can_write_settings(user_client):
 
 def test_any_user_can_read_settings(user_client):
     assert user_client.get("/api/settings").status_code == 200
+
+
+# --------------------------------------------------------------------------- #
+# Enabled chat models
+# --------------------------------------------------------------------------- #
+
+
+def test_chat_models_endpoint_always_includes_the_default(user_client):
+    body = user_client.get("/api/llm/chat-models").json()
+    settings = user_client.get("/api/settings").json()["settings"]
+    assert body["models"][0] == settings["llm_model"]["value"]
+
+
+def test_chat_models_endpoint_includes_configured_extras(admin_client):
+    admin_client.put(
+        "/api/settings", json={"values": {"llm_chat_models": ["extra/model"]}}
+    )
+    body = admin_client.get("/api/llm/chat-models").json()
+    assert "extra/model" in body["models"]
+
+
+def test_chat_models_endpoint_requires_login(client):
+    assert client.get("/api/llm/chat-models").status_code == 401
 
 
 # --------------------------------------------------------------------------- #

@@ -8,7 +8,7 @@ import httpx
 import pytest
 import respx
 
-from app.errors import LLMAuthError, LLMError
+from app.errors import LLMAuthError, LLMError, ValidationError
 from app.services import llm as llm_svc
 
 BASE = "https://llm.test/v1"
@@ -267,3 +267,52 @@ def test_list_models_failure_is_wrapped():
 def test_token_estimate_is_roughly_chars_over_3_6():
     assert llm_svc.estimate_tokens("x" * 360) == 100
     assert llm_svc.estimate_tokens("") == 0
+
+
+# --------------------------------------------------------------------------- #
+# Enabled chat models
+# --------------------------------------------------------------------------- #
+
+
+def _set_chat_models(conn, models: list[str]) -> None:
+    conn.execute(
+        "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+        "VALUES ('llm_chat_models', ?, 'json', 0, '2026-01-01') "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (json.dumps(models),),
+    )
+
+
+def test_enabled_chat_models_defaults_to_just_the_configured_model(conn):
+    from app.config import get_settings
+
+    assert llm_svc.enabled_chat_models(conn) == [get_settings().llm_model]
+
+
+def test_enabled_chat_models_dedupes_with_default_first(conn):
+    from app.config import get_settings
+
+    default = get_settings().llm_model
+    _set_chat_models(conn, ["a", default, "b"])
+    assert llm_svc.enabled_chat_models(conn) == [default, "a", "b"]
+
+
+def test_resolve_chat_model_none_defers_to_the_configured_default(conn):
+    assert llm_svc.resolve_chat_model(conn, None) is None
+
+
+def test_resolve_chat_model_allows_the_default_even_if_unlisted(conn):
+    from app.config import get_settings
+
+    default = get_settings().llm_model
+    assert llm_svc.resolve_chat_model(conn, default) == default
+
+
+def test_resolve_chat_model_allows_a_configured_extra(conn):
+    _set_chat_models(conn, ["extra/model"])
+    assert llm_svc.resolve_chat_model(conn, "extra/model") == "extra/model"
+
+
+def test_resolve_chat_model_rejects_anything_not_enabled(conn):
+    with pytest.raises(ValidationError):
+        llm_svc.resolve_chat_model(conn, "not/allowed")

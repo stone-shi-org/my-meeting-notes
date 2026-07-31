@@ -55,12 +55,13 @@ export async function streamChat<T = ChatMessage>(
   message: string,
   handlers: ChatStreamHandlers<T>,
   signal?: AbortSignal,
+  model?: string | null,
 ): Promise<void> {
   const response = await fetch(`/api${path}`, {
     method: 'POST',
     credentials: 'include',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
+    body: JSON.stringify(model ? { message, model } : { message }),
     signal,
   });
 

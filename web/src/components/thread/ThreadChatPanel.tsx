@@ -3,7 +3,8 @@ import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
-import { Spinner, Textarea } from '@/components/ui/primitives';
+import { Select, Spinner, Textarea } from '@/components/ui/primitives';
+import { useChatModel } from '@/hooks/useChatModel';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
@@ -46,6 +47,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const chatModel = useChatModel();
 
   const messagesQuery = useQuery({
     queryKey: ['thread-chat', threadId],
@@ -89,6 +91,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
       thread_id: Number(threadId),
       role: 'user',
       content: message,
+      model: null,
       created_at: new Date().toISOString(),
     };
     queryClient.setQueryData<ChatMessage[]>(['thread-chat', threadId], (prev) => [
@@ -118,6 +121,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
           },
         },
         controller.signal,
+        chatModel.selected,
       );
     } catch (err) {
       if (controller.signal.aborted) return;
@@ -150,34 +154,51 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
       style={!expanded ? { paddingBottom: 'env(safe-area-inset-bottom)' } : undefined}
     >
       {expanded && (
-        <div className="flex items-center gap-2 border-b border-border px-4 py-2.5">
-          <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
-          <h2 className="flex-1 text-sm font-semibold">Ask about this thread</h2>
-          {messages.length > 0 && (
+        <div className="border-b border-border px-4 py-2.5">
+          <div className="flex items-center gap-2">
+            <Sparkles className="size-4 shrink-0 text-primary" aria-hidden />
+            <h2 className="flex-1 text-sm font-semibold">Ask about this thread</h2>
+            {messages.length > 0 && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (window.confirm('Clear this conversation? This cannot be undone.')) {
+                    clear.mutate();
+                  }
+                }}
+                disabled={streamingText !== null || clear.isPending}
+                aria-label="Clear conversation"
+                title="Clear conversation"
+                className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-danger-ink disabled:opacity-50"
+              >
+                <Trash2 className="size-4" aria-hidden />
+              </button>
+            )}
             <button
               type="button"
-              onClick={() => {
-                if (window.confirm('Clear this conversation? This cannot be undone.')) {
-                  clear.mutate();
-                }
-              }}
-              disabled={streamingText !== null || clear.isPending}
-              aria-label="Clear conversation"
-              title="Clear conversation"
-              className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-danger-ink disabled:opacity-50"
+              onClick={minimize}
+              aria-label="Minimize chat"
+              title="Minimize"
+              className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-fg"
             >
-              <Trash2 className="size-4" aria-hidden />
+              <Minimize2 className="size-4" aria-hidden />
             </button>
+          </div>
+
+          {chatModel.options.length > 1 && (
+            <Select
+              aria-label="Chat model"
+              className="mt-2 h-7 text-xs"
+              value={chatModel.selected ?? ''}
+              onChange={(e) => chatModel.setModel(e.target.value)}
+            >
+              {chatModel.options.map((id) => (
+                <option key={id} value={id}>
+                  {id}
+                </option>
+              ))}
+            </Select>
           )}
-          <button
-            type="button"
-            onClick={minimize}
-            aria-label="Minimize chat"
-            title="Minimize"
-            className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-fg"
-          >
-            <Minimize2 className="size-4" aria-hidden />
-          </button>
         </div>
       )}
 
