@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import shutil
 import sqlite3
@@ -30,6 +31,7 @@ from app.schemas import (
 )
 from app.services import followups as followups_svc
 from app.services import matching as matching_svc
+from app.services import next_step as next_step_svc
 from app.services import threads as threads_svc
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -72,6 +74,19 @@ def list_threads(
     )
 
 
+def _thread_out(conn: sqlite3.Connection, row: sqlite3.Row) -> ThreadOut:
+    """``ThreadOut`` with ``next_step_stale`` actually computed.
+
+    Only the single-thread responses (create/get/patch) pay for the extra
+    fingerprint query; ``list_threads`` leaves it at ``row_to_thread``'s
+    default ``False`` rather than doing it once per row on every page load.
+    """
+    data = threads_svc.row_to_thread(row)
+    stored_fingerprint = row["next_step_fingerprint"] if "next_step_fingerprint" in row.keys() else None
+    data["next_step_stale"] = threads_svc.is_next_step_stale(conn, row["id"], stored_fingerprint)
+    return ThreadOut(**data)
+
+
 @router.post("", response_model=ThreadOut, status_code=201)
 def create_thread(
     payload: ThreadCreateRequest,
@@ -81,7 +96,7 @@ def create_thread(
     row = threads_svc.create_thread(
         conn, owner_id=user.id, title=payload.title, description=payload.description
     )
-    return ThreadOut(**threads_svc.row_to_thread(row))
+    return _thread_out(conn, row)
 
 
 @router.get("/{thread_id}", response_model=ThreadOut)
@@ -92,7 +107,7 @@ def get_thread(
 ) -> ThreadOut:
     row = threads_svc.get_thread(conn, thread_id)
     assert_can_access(row, user)
-    return ThreadOut(**threads_svc.row_to_thread(row))
+    return _thread_out(conn, row)
 
 
 @router.patch("/{thread_id}", response_model=ThreadOut)
@@ -121,7 +136,7 @@ def update_thread(
             [*updates.values(), thread_id],
         )
 
-    return ThreadOut(**threads_svc.row_to_thread(threads_svc.require_thread(conn, thread_id)))
+    return _thread_out(conn, threads_svc.require_thread(conn, thread_id))
 
 
 @router.delete("/{thread_id}")
@@ -406,6 +421,28 @@ async def check_follow_ups(
         "user %s swept thread %s: %d event(s), %d email(s) attached",
         user.username, thread_id, result["attached_events"], result["attached_emails"],
     )
+    return result
+
+
+@router.post("/{thread_id}/next-step")
+async def refresh_next_step(
+    thread_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Regenerate the cached "what's next" suggestion, one LLM call.
+
+    Run off the event loop via ``to_thread``: it's a blocking HTTP round trip,
+    the same reason ``rank_sync`` never runs inline in a coroutine. On failure
+    the response carries ``error`` and the thread's previously cached
+    suggestion is untouched -- see :func:`next_step_svc.generate_sync`.
+    """
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    result = await asyncio.to_thread(
+        next_step_svc.generate_sync, get_settings().db_path, thread_id
+    )
+    if result.get("error"):
+        log.warning("next-step refresh failed for thread %s: %s", thread_id, result["error"])
     return result
 
 

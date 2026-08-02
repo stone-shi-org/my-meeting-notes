@@ -494,6 +494,14 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # meeting (NOT NULL) and a sweep belongs to the whole thread.
     ("threads", "auto_match_at", "TEXT"),
     ("threads", "auto_match_error", "TEXT"),
+    # Cached "what's next" suggestion, one LLM call. next_step_fingerprint is
+    # what threads_svc.compute_next_step_fingerprint returned when it was
+    # generated -- a mismatch on read is what "stale" means, no invalidation
+    # call needed at every attach/create site.
+    ("threads", "next_step", "TEXT"),
+    ("threads", "next_step_generated_at", "TEXT"),
+    ("threads", "next_step_fingerprint", "TEXT"),
+    ("threads", "next_step_model", "TEXT"),
 )
 
 

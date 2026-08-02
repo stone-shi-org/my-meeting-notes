@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import sqlite3
 
 from app.db import utcnow
@@ -140,7 +141,49 @@ def row_to_thread(row: sqlite3.Row) -> dict:
         "auto_match_error": (
             row["auto_match_error"] if "auto_match_error" in row.keys() else None
         ),
+        "next_step": row["next_step"] if "next_step" in row.keys() else None,
+        "next_step_generated_at": (
+            row["next_step_generated_at"] if "next_step_generated_at" in row.keys() else None
+        ),
+        # Only the single-thread GET computes this (it costs an extra query);
+        # the list endpoint doesn't show the suggestion, so this default stands.
+        "next_step_stale": False,
     }
+
+
+def compute_next_step_fingerprint(conn: sqlite3.Connection, thread_id: int) -> str:
+    """A cheap fingerprint of everything a "next step" suggestion depends on.
+
+    Changes whenever a meeting, email or calendar event is attached to the
+    thread, or a meeting gets a new current summary -- exactly the events that
+    should make a cached suggestion stale. Compared against
+    ``threads.next_step_fingerprint`` on read rather than invalidated at every
+    attach/create call site, the same way ``summaries.stale`` is derived from a
+    transcript hash rather than cleared on write.
+    """
+    rows = conn.execute(
+        """
+        SELECT 'm' || id || ':' || COALESCE(active_summary_id, 0) || ':' || updated_at AS token
+          FROM meetings WHERE thread_id = ?
+        UNION ALL
+        SELECT 'e' || id FROM thread_emails WHERE thread_id = ?
+        UNION ALL
+        SELECT 'c' || id FROM thread_calendar_events WHERE thread_id = ?
+        ORDER BY 1
+        """,
+        (thread_id, thread_id, thread_id),
+    ).fetchall()
+    raw = "|".join(r[0] for r in rows)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def is_next_step_stale(
+    conn: sqlite3.Connection, thread_id: int, stored_fingerprint: str | None
+) -> bool:
+    """No suggestion yet is stale too -- that's what makes the box auto-generate."""
+    if not stored_fingerprint:
+        return True
+    return compute_next_step_fingerprint(conn, thread_id) != stored_fingerprint
 
 
 def mark_seen(

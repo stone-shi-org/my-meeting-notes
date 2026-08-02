@@ -110,6 +110,12 @@ class ThreadOut(BaseModel):
     """Auto-attached items nobody has opened. Non-zero puts the dot on the card."""
     auto_match_at: str | None = None
     auto_match_error: str | None = None
+    next_step: str | None = None
+    next_step_generated_at: str | None = None
+    """True when a meeting/email/event has been added since next_step was
+    generated, or nothing has been generated yet. Only computed on the
+    single-thread GET, not the list."""
+    next_step_stale: bool = False
 
 
 class ThreadCreateRequest(BaseModel):

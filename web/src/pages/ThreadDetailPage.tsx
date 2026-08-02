@@ -13,10 +13,11 @@ import {
   Mic,
   Plus,
   RefreshCw,
+  Sparkles,
   Trash2,
   X,
 } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
 import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
@@ -32,6 +33,7 @@ import type {
   Email,
   FollowUpResult,
   Meeting,
+  NextStepResult,
   Thread,
   TimelineItem,
 } from '@/types/api';
@@ -402,6 +404,39 @@ export function ThreadDetailPage() {
     onSuccess: refresh,
   });
 
+  // The cached "next step" suggestion. Patched into the thread query directly
+  // rather than refetching it, since a refetch would also re-derive
+  // next_step_stale from a fingerprint that (by definition) hasn't moved.
+  const nextStep = useMutation({
+    mutationFn: () => api.post<NextStepResult>(`/threads/${threadId}/next-step`),
+    onSuccess: (data) => {
+      queryClient.setQueryData<Thread | undefined>(['thread', threadId], (prev) =>
+        prev
+          ? {
+              ...prev,
+              next_step: data.next_step ?? prev.next_step,
+              next_step_generated_at: data.next_step_generated_at ?? prev.next_step_generated_at,
+              next_step_stale: data.next_step_stale,
+            }
+          : prev,
+      );
+    },
+  });
+
+  // Auto-generate once per thread visit when a meeting/email/event added since
+  // the last suggestion has made it stale (or nothing has been generated yet).
+  // Keyed on threadId so a failed attempt doesn't retry on every re-render --
+  // the refresh button in the box covers that.
+  const autoRefreshedFor = useRef<string | null>(null);
+  useEffect(() => {
+    if (!threadId || !thread.data) return;
+    if (!thread.data.next_step_stale) return;
+    if (autoRefreshedFor.current === threadId) return;
+    autoRefreshedFor.current = threadId;
+    nextStep.mutate();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [threadId, thread.data?.next_step_stale]);
+
   const grouped = useMemo(() => {
     const items = (timeline.data ?? []).filter((i) => filters.has(i.kind as Filter));
     const groups: { day: string; items: TimelineItem[] }[] = [];
@@ -524,6 +559,50 @@ export function ThreadDetailPage() {
             </div>
           </div>
         )
+      )}
+
+      {thread.data && (
+        <div className="flex flex-wrap items-start gap-3 rounded-lg border border-border-strong bg-surface-2/60 p-3">
+          <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+              Next step
+            </p>
+            {thread.data.next_step ? (
+              <p className="mt-1 text-sm text-fg">{thread.data.next_step}</p>
+            ) : nextStep.isPending ? (
+              <p className="mt-1 text-sm text-fg-subtle">Figuring out what&apos;s next…</p>
+            ) : (
+              <p className="mt-1 text-sm text-fg-subtle">Not generated yet.</p>
+            )}
+            <p className="mt-1 text-xs text-fg-subtle">
+              {thread.data.next_step_stale && thread.data.next_step && !nextStep.isPending && (
+                <span>Outdated — new activity since this was generated. </span>
+              )}
+              {thread.data.next_step_generated_at && (
+                <>
+                  Generated{' '}
+                  <time dateTime={thread.data.next_step_generated_at}>
+                    {fmtRelative(thread.data.next_step_generated_at)}
+                  </time>
+                </>
+              )}
+            </p>
+            {nextStep.error && (
+              <p className="mt-1 text-xs text-danger-ink">{(nextStep.error as Error).message}</p>
+            )}
+          </div>
+          <Button
+            size="sm"
+            variant="ghost"
+            loading={nextStep.isPending}
+            onClick={() => nextStep.mutate()}
+            title="Regenerate the next-step suggestion"
+          >
+            <RefreshCw />
+            Refresh
+          </Button>
+        </div>
       )}
 
       {thread.data && thread.data.unread_count > 0 && (

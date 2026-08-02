@@ -79,6 +79,20 @@ export interface Thread {
   /** When the periodic sweep last looked at this thread. */
   auto_match_at: string | null;
   auto_match_error: string | null;
+  /** Cached LLM suggestion for what to do next on this thread. */
+  next_step: string | null;
+  next_step_generated_at: string | null;
+  /** True when a meeting/email/event has been added since next_step was
+   * generated, or nothing has been generated yet. */
+  next_step_stale: boolean;
+}
+
+/** Returned by POST /threads/{id}/next-step. */
+export interface NextStepResult {
+  next_step: string | null;
+  next_step_generated_at: string | null;
+  next_step_stale: boolean;
+  error: string | null;
 }
 
 /** Attached by the sweep rather than by a person, and whether it is still new. */
