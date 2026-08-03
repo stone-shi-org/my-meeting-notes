@@ -10,6 +10,7 @@ import { TranscriptChatPanel } from '@/components/transcript/TranscriptChatPanel
 import { TranscriptView } from '@/components/transcript/TranscriptView';
 import { MatchPanel } from '@/components/match/MatchPanel';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
+import { MeetingNotesCard } from '@/components/notes/MeetingNotesCard';
 import { AddRecordingCard } from '@/components/record/AddRecordingCard';
 import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
 import { usePlayerStore } from '@/player/playerStore';
@@ -583,6 +584,8 @@ export function TranscriptPage() {
                 )}
               </Card>
             </div>
+
+            <MeetingNotesCard meetingId={m.id} />
 
             <MatchPanel meeting={m} onAttached={() => meeting.refetch()} />
           </div>

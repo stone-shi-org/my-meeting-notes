@@ -11,6 +11,7 @@ import {
   Mail,
   MapPin,
   Mic,
+  NotebookPen,
   Plus,
   RefreshCw,
   Sparkles,
@@ -20,10 +21,12 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
+import { NoteCard, NoteComposer } from '@/components/notes/NoteCard';
 import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
+import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { emailLink } from '@/lib/links';
@@ -34,16 +37,18 @@ import type {
   FollowUpResult,
   Meeting,
   NextStepResult,
+  Note,
   Thread,
   TimelineItem,
 } from '@/types/api';
 
-type Filter = 'meeting' | 'event' | 'email';
+type Filter = 'meeting' | 'event' | 'email' | 'note';
 
 const KIND_META: Record<Filter, { label: string; icon: typeof Mic; accent: string }> = {
   meeting: { label: 'Meetings', icon: Mic, accent: 'text-entity-meeting' },
   event: { label: 'Events', icon: CalendarDays, accent: 'text-entity-event' },
   email: { label: 'Emails', icon: Mail, accent: 'text-entity-email' },
+  note: { label: 'Notes', icon: NotebookPen, accent: 'text-entity-note' },
 };
 
 function dayKey(iso: string | null): string {
@@ -349,8 +354,10 @@ export function ThreadDetailPage() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<Set<Filter>>(
-    () => new Set(['meeting', 'event', 'email'] as Filter[]),
+    () => new Set(['meeting', 'event', 'email', 'note'] as Filter[]),
   );
+  const [composing, setComposing] = useState(false);
+  const noteScope: NoteScope = { kind: 'thread', threadId: threadId! };
   const thread = useQuery({
     queryKey: ['thread', threadId],
     queryFn: () => api.get<Thread>(`/threads/${threadId}`),
@@ -497,6 +504,8 @@ export function ThreadDetailPage() {
                 <span>{thread.data.event_count} events</span>
                 <span>·</span>
                 <span>{thread.data.email_count} emails</span>
+                <span>·</span>
+                <span>{thread.data.note_count} notes</span>
                 {thread.data.auto_match_at && (
                   <>
                     <span>·</span>
@@ -668,7 +677,28 @@ export function ThreadDetailPage() {
             </button>
           );
         })}
+
+        {/* Sits with the chips rather than in the header actions: it writes
+            straight into the timeline directly below it. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          className="ml-auto"
+          onClick={() => {
+            setComposing(true);
+            // Writing a note with the Notes chip off would file it somewhere
+            // the page is not showing.
+            setFilters((prev) => new Set(prev).add('note'));
+          }}
+        >
+          <NotebookPen />
+          New note
+        </Button>
       </div>
+
+      {composing && threadId && (
+        <NoteComposer scope={noteScope} onDone={() => setComposing(false)} />
+      )}
 
       {timeline.isError && <ErrorState error={timeline.error} onRetry={() => timeline.refetch()} />}
 
@@ -749,6 +779,9 @@ export function ThreadDetailPage() {
                           )}
                           {item.kind === 'email' && (
                             <EmailTimelineCard email={item.payload as Email} threadId={threadId!} />
+                          )}
+                          {item.kind === 'note' && (
+                            <NoteCard note={item.payload as Note} scope={noteScope} />
                           )}
                         </div>
                       </div>

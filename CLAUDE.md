@@ -15,13 +15,14 @@ app/
   deps.py        current_user / active_user / require_admin / owner_scope
   security.py    stdlib scrypt + opaque session tokens
   routers/       auth users integrations threads meetings transcripts summaries matching jobs
-                 calendar settings_api system
+                 calendar settings_api system notes
   services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
-                 threads users integrations secretstore mcpclient followups
+                 threads users integrations secretstore mcpclient followups notes
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
                  scheduler.py (the auto-match timer)
-  prompts/       summary_prompt.md · match_rank_prompt.md   <- EDITABLE, no deploy needed
+  prompts/       summary_prompt.md · match_rank_prompt.md · note_title_prompt.md
+                 <- EDITABLE, no deploy needed
 web/src/         types api lib hooks player components pages routes
   lib/recording.ts + hooks/useRecorder.ts   <- what each browser can capture, and the capture itself
 ```
@@ -91,6 +92,44 @@ the Test connection button reports nothing useful.
 enqueue onto an `asyncio.Queue` whose waiter belongs to a different loop, and background jobs sit
 queued forever. `tests/conftest.py` shares one client and authenticates alternate users with a
 Bearer header instead.
+
+**`navigator.clipboard` is gated on a secure context too** — the same trap as `mediaDevices` above,
+and it bites on the same plain-HTTP LAN address. The object is *undefined* there, so
+`navigator.clipboard.writeText(…)` throws synchronously rather than returning a rejected promise and
+a bare `.catch()` never fires. `lib/clipboard.ts` feature-detects, falls back to the ungated
+`document.execCommand('copy')`, and returns `false` when neither works so the button can say so
+instead of flashing a tick that lied.
+
+## Notes
+
+The third kind of document on a thread, alongside emails and calendar events — the only one this app
+writes rather than fetches. `thread_notes` mirrors the other two attachment tables (thread FK,
+nullable `meeting_id`, `ON DELETE SET NULL`) minus everything provider-shaped: no uid, no
+`raw_json`, no relevance, and no unique index, because two notes with the same title are two notes.
+
+Created by hand, or out of an AI chat reply via **Copy** / **Add to note** under every assistant
+message in both panels. `routers/notes.py` exposes the same operations twice — once under
+`/threads/{id}` and once under `/meetings/{id}` — because the thread page and the transcript page
+hold different ids; only create and list branch, and everything else uses the `thread_id` the server
+put on the note.
+
+**A note is never unread.** `auto_attached`/`seen_at` exist because the sweep attaches things while
+nobody is looking; every note is a button press, so `UNREAD_TABLES` deliberately does not list it.
+
+**A note is not summarizer input.** `matching.attached_context` does not read this table, on purpose:
+an AI-written note feeding the next summary of the meeting it was written from puts the model's own
+prose back into its input. Notes reach the model through the thread chat digest and the next-step
+payload instead, both of which say whose words they are (`source`) so a saved reply is not cited back
+as evidence. A test asserts `attached_context` still returns only events and emails.
+
+**The next-step fingerprint carries a note's `updated_at`, not just its id.** Emails and events are
+immutable snapshots of something fetched; a note is rewritten in place, and rewriting one should make
+a cached suggestion stale.
+
+**Title generation cannot fail the save.** No title supplied means one LLM call
+(`note_title_prompt.md`) run through `to_thread`; if it errors or comes back empty the note is filed
+under `derive_title` — its own first line, markdown stripped — with `title_model` NULL to record that
+nothing generated it. The body is the part worth keeping.
 
 ## Integrations (calendar + email)
 

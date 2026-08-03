@@ -74,6 +74,7 @@ export interface Thread {
   last_meeting_at: string | null;
   email_count: number;
   event_count: number;
+  note_count: number;
   /** Auto-attached items nobody has opened. Non-zero lights the dot. */
   unread_count: number;
   /** When the periodic sweep last looked at this thread. */
@@ -381,11 +382,38 @@ export interface FollowUpResult {
   error: string | null;
 }
 
+/**
+ * The one kind of attached document this app writes rather than fetches.
+ *
+ * Unlike an email or a calendar event there is nothing external behind it, so
+ * it has no uid, no provider and no relevance score -- and it is never unread,
+ * because only the sweep creates unread rows and nothing sweeps notes into
+ * existence.
+ */
+export interface Note {
+  id: number;
+  thread_id: number;
+  /** Null means the note is filed on the thread, not on one meeting. */
+  meeting_id: number | null;
+  title: string;
+  /** Markdown. Rendered as such everywhere it is displayed. */
+  body: string;
+  source: 'ai_chat' | 'manual';
+  /** The chat model whose reply this was, when it came from one. */
+  model: string | null;
+  /** What named it. Null means typed by hand, or the title call failed and the
+   * first line of the body was used. */
+  title_model: string | null;
+  created_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface TimelineItem {
-  kind: 'meeting' | 'event' | 'email';
+  kind: 'meeting' | 'event' | 'email' | 'note';
   at: string | null;
   id: number;
-  payload: Meeting | CalendarEvent | Email;
+  payload: Meeting | CalendarEvent | Email | Note;
 }
 
 export interface ChatMessage {

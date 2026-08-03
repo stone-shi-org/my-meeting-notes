@@ -1,8 +1,8 @@
-"""Thread chat: ask questions about a thread's meetings, calendar events and emails.
+"""Thread chat: ask questions about a thread's meetings, calendar events, emails and notes.
 
 The context sent to the model is a digest, not raw material: meeting summaries
-(already an LLM-compressed artifact), full calendar/email metadata, and one
-on-demand tool -- fetch a specific meeting's transcript -- for the minority of
+(already an LLM-compressed artifact), full calendar/email metadata, whatever
+notes have been written on the thread, and one on-demand tool -- fetch a specific meeting's transcript -- for the minority of
 questions that need verbatim wording. No embedding index: the digest already
 fits comfortably for the vast majority of threads, and the one artifact big
 enough to threaten that (a transcript) is fetched only when asked for, exactly
@@ -31,6 +31,12 @@ log = get_logger("chat")
 
 MAX_TOOL_HOPS = 2
 MAX_HISTORY_MESSAGES = 20
+
+# Notes are included whole, unlike the one-line snippets events and emails get:
+# a note is short by construction (one chat reply, or something typed), and
+# half of one is worse than none. The cap is a backstop against a pasted
+# document, not a routine truncation.
+NOTE_BODY_LIMIT = 4000
 TOOL_LINE_RE = re.compile(r"^\s*TOOL:\s*get_transcript\s+(\d+)\s*$", re.IGNORECASE)
 
 # How many characters of a hop's answer to withhold before deciding it isn't
@@ -90,7 +96,7 @@ def _format_meeting_block(conn: sqlite3.Connection, meeting: sqlite3.Row) -> str
     return "\n".join(lines)
 
 
-def _format_events_and_emails(conn: sqlite3.Connection, thread_id: int) -> str:
+def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
     events = conn.execute(
         "SELECT summary, start_at, location, calendar_name, description "
         "FROM thread_calendar_events WHERE thread_id = ? ORDER BY start_at",
@@ -99,6 +105,11 @@ def _format_events_and_emails(conn: sqlite3.Connection, thread_id: int) -> str:
     emails = conn.execute(
         "SELECT subject, sender, date, snippet FROM thread_emails "
         "WHERE thread_id = ? ORDER BY date",
+        (thread_id,),
+    ).fetchall()
+    notes = conn.execute(
+        "SELECT title, body, source, created_at FROM thread_notes "
+        "WHERE thread_id = ? ORDER BY created_at",
         (thread_id,),
     ).fetchall()
 
@@ -121,9 +132,36 @@ def _format_events_and_emails(conn: sqlite3.Connection, thread_id: int) -> str:
             if m["snippet"]:
                 lines.append(f"  {m['snippet'].strip()}")
 
+    if notes:
+        lines.append("### Notes")
+        for n in notes:
+            when = (n["created_at"] or "")[:10]
+            # Whose words these are matters more here than for the other two:
+            # a note saved out of a chat reply is this assistant's own earlier
+            # output, and treating it as evidence would be circular.
+            origin = "saved from an AI answer" if n["source"] == "ai_chat" else "written by the user"
+            bits = ", ".join(b for b in (when, origin) if b)
+            lines.append(f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else ""))
+            body = (n["body"] or "").strip()
+            if body:
+                shown = body[:NOTE_BODY_LIMIT]
+                if len(body) > NOTE_BODY_LIMIT:
+                    shown += "\n(note truncated)"
+                lines.append(f"  {_indent(shown)}")
+
     if not lines:
-        return "(no calendar events or emails attached to this thread)"
+        return "(no calendar events, emails or notes attached to this thread)"
     return "\n".join(lines)
+
+
+def _indent(text: str) -> str:
+    """Keep a multi-line note body inside its bullet.
+
+    Events and emails contribute one-line snippets; a note is markdown someone
+    wrote, and its own headings and bullets would otherwise read as part of the
+    digest's structure rather than as content nested under the note.
+    """
+    return text.replace("\n", "\n  ")
 
 
 def build_thread_digest(conn: sqlite3.Connection, thread_id: int) -> tuple[str, bool]:
@@ -134,8 +172,8 @@ def build_thread_digest(conn: sqlite3.Connection, thread_id: int) -> tuple[str, 
     ).fetchall()
 
     parts = [
-        "## Calendar events and emails attached to this thread",
-        _format_events_and_emails(conn, thread_id),
+        "## Calendar events, emails and notes attached to this thread",
+        _format_attachments(conn, thread_id),
         "",
         "## Meetings (most recent first)",
     ]

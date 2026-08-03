@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -106,6 +106,7 @@ class ThreadOut(BaseModel):
     last_meeting_at: str | None = None
     email_count: int = 0
     event_count: int = 0
+    note_count: int = 0
     unread_count: int = 0
     """Auto-attached items nobody has opened. Non-zero puts the dot on the card."""
     auto_match_at: str | None = None
@@ -176,12 +177,61 @@ class MeetingUpdateRequest(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
+# Notes
+# --------------------------------------------------------------------------- #
+
+# Generous, but bounded: a note is normally one chat reply. The cap exists so a
+# scripted client cannot use this route to write megabytes into the database,
+# the same reasoning as the field limits on the create-from-event payload.
+NOTE_BODY_MAX = 100_000
+
+
+class NoteOut(BaseModel):
+    id: int
+    thread_id: int
+    #: None means the note belongs to the thread rather than to one meeting.
+    meeting_id: int | None = None
+    title: str
+    body: str
+    source: str  # ai_chat | manual
+    #: The chat model whose reply this was, when it came from one.
+    model: str | None = None
+    #: What generated the title. None means it was typed, or that generation
+    #: failed and the first line was used instead.
+    title_model: str | None = None
+    created_by: int | None = None
+    created_at: str
+    updated_at: str
+
+
+class NoteCreateRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=NOTE_BODY_MAX)
+    #: Omit (or send empty) to have the title generated from the body.
+    title: str | None = Field(default=None, max_length=300)
+    meeting_id: int | None = None
+    source: Literal["ai_chat", "manual"] = "manual"
+    model: str | None = Field(default=None, max_length=200)
+    #: The question the saved answer replied to. Titles are much better with it,
+    #: and it is never stored — only shown to the title prompt.
+    question: str | None = Field(default=None, max_length=8000)
+
+
+class NoteUpdateRequest(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=300)
+    body: str | None = Field(default=None, min_length=1, max_length=NOTE_BODY_MAX)
+
+
+class NoteAppendRequest(BaseModel):
+    body: str = Field(min_length=1, max_length=NOTE_BODY_MAX)
+
+
+# --------------------------------------------------------------------------- #
 # Timeline
 # --------------------------------------------------------------------------- #
 
 
 class TimelineItem(BaseModel):
-    kind: str  # meeting | event | email
+    kind: str  # meeting | event | email | note
     at: str | None
     id: int
     payload: dict

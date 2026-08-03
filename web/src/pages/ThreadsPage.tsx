@@ -1,5 +1,5 @@
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarDays, Layers, Mail, Mic, Plus, Search, X } from 'lucide-react';
+import { CalendarDays, Layers, Mail, Mic, NotebookPen, Plus, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { UpcomingPanel } from '@/components/calendar/UpcomingPanel';
@@ -76,6 +76,7 @@ function ThreadCard({ thread }: { thread: Thread }) {
           <StatPill icon={Mic} count={thread.meeting_count} label="meetings" />
           <StatPill icon={CalendarDays} count={thread.event_count} label="calendar events" />
           <StatPill icon={Mail} count={thread.email_count} label="emails" />
+          <StatPill icon={NotebookPen} count={thread.note_count} label="notes" />
         </div>
 
         <div className="mt-4 flex items-center justify-between border-t border-border pt-3">

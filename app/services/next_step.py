@@ -21,6 +21,12 @@ log = get_logger("next_step")
 RECENT_MEETINGS = 5
 RECENT_EVENTS = 8
 RECENT_EMAILS = 8
+RECENT_NOTES = 5
+
+# Notes go in whole rather than as a snippet -- see chat.NOTE_BODY_LIMIT for
+# why -- but this payload holds five of them next to everything else, so the
+# per-note cap is tighter than the chat digest's.
+NOTE_BODY_LIMIT = 1200
 
 
 def _payload(conn: sqlite3.Connection, thread_id: int) -> dict:
@@ -66,12 +72,26 @@ def _payload(conn: sqlite3.Connection, thread_id: int) -> dict:
         (thread_id, RECENT_EMAILS),
     ).fetchall()
 
+    notes = conn.execute(
+        """
+        SELECT title, body, source, created_at
+          FROM thread_notes
+         WHERE thread_id = ?
+         ORDER BY created_at DESC
+         LIMIT ?
+        """,
+        (thread_id, RECENT_NOTES),
+    ).fetchall()
+
     return {
         "thread_title": thread["title"],
         "thread_description": thread["description"] or "",
         "recent_meetings": [dict(r) for r in meetings],
         "recent_calendar_events": [dict(r) for r in events],
         "recent_emails": [dict(r) for r in emails],
+        "recent_notes": [
+            {**dict(r), "body": (r["body"] or "")[:NOTE_BODY_LIMIT]} for r in notes
+        ],
     }
 
 

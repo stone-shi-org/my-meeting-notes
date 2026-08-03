@@ -32,6 +32,7 @@ from app.schemas import (
 from app.services import followups as followups_svc
 from app.services import matching as matching_svc
 from app.services import next_step as next_step_svc
+from app.services import notes as notes_svc
 from app.services import threads as threads_svc
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -452,10 +453,10 @@ def thread_timeline(
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> list[TimelineItem]:
-    """Meetings, calendar events and emails merged into one date-sorted list.
+    """Meetings, calendar events, emails and notes merged into one date-sorted list.
 
     Merged server-side so the SPA renders one array and "load older" can page
-    coherently across all three kinds.
+    coherently across all four kinds.
     """
     assert_can_access(threads_svc.get_thread(conn, thread_id), user)
 
@@ -486,6 +487,14 @@ def thread_timeline(
     ):
         items.append(
             TimelineItem(kind="email", at=r["date"], id=r["id"], payload=_row_to_email(r))
+        )
+
+    # Dated by when it was written, not when it was last edited: a note's place
+    # on the timeline is "what I was working on that day", and fixing a typo
+    # three weeks later should not jump it to the top.
+    for note in notes_svc.list_notes(conn, thread_id=thread_id):
+        items.append(
+            TimelineItem(kind="note", at=note["created_at"], id=note["id"], payload=note)
         )
 
     # Sort on a normalised timestamp: rows written before dates were coerced may

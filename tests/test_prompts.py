@@ -175,3 +175,9 @@ class TestShippedPrompt:
     def test_it_warns_the_model_off_non_speech_markers(self):
         p = prompts_svc.load("summary_prompt")
         assert "Environmental Sounds" in p.system
+
+    def test_note_title_prompt_carries_every_placeholder_the_code_supplies(self):
+        p = prompts_svc.load("note_title_prompt")
+        assert "note_body" in p.required_placeholders
+        for key in ("note_body", "question", "context_label"):
+            assert "{{" + key + "}}" in p.user, f"prompt never uses {key}"

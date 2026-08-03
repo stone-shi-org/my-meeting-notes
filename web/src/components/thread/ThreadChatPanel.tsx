@@ -2,36 +2,19 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
-import { Select, Spinner, Textarea } from '@/components/ui/primitives';
+import { Select, Textarea } from '@/components/ui/primitives';
 import { useChatModel } from '@/hooks/useChatModel';
+import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
-import { renderMarkdown } from '@/lib/markdown';
 import { ApiError, type ChatMessage } from '@/types/api';
-
-/** Assistant replies are LLM-authored markdown; user turns are shown as the
- * literal text typed, not run through a renderer. */
-function MessageBubble({ role, content }: { role: 'user' | 'assistant'; content: string }) {
-  if (role === 'user') {
-    return (
-      <p className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-soft-fg">
-        {content}
-      </p>
-    );
-  }
-  return (
-    <div
-      className="prose prose-sm max-w-[85%] rounded-lg bg-surface-2 px-3 py-2 dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-ol:my-1"
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
-    />
-  );
-}
 
 /**
  * Always-on assistant for asking questions about a thread's meetings,
- * calendar events and emails. Rendered unconditionally by ThreadDetailPage as
+ * calendar events, emails and notes. Rendered unconditionally by ThreadDetailPage as
  * a docked input pill in the bottom-right corner; focusing it expands the
  * same element in place into a full-height right side panel, and the
  * minimize button collapses it back to just the pill. There is no fully
@@ -48,6 +31,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatModel = useChatModel();
+  const noteScope: NoteScope = { kind: 'thread', threadId };
 
   const messagesQuery = useQuery({
     queryKey: ['thread-chat', threadId],
@@ -210,29 +194,34 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
 
           {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && (
             <p className="text-sm text-fg-subtle">
-              Ask about the meetings, calendar events and emails attached to this thread —
+              Ask about the meetings, calendar events, emails and notes on this thread —
               decisions made, action items, who owns what, or a specific meeting's transcript.
+              Any answer can be copied or kept as a note.
             </p>
           )}
 
-          {messages.map((message) => (
+          {messages.map((message, i) => (
             <div
               key={message.id}
               className={cn('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}
             >
-              <MessageBubble role={message.role} content={message.content} />
+              <MessageBubble
+                role={message.role}
+                content={message.content}
+                scope={noteScope}
+                // The turn this answered, for the generated note title.
+                question={messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined}
+                model={message.model}
+              />
             </div>
           ))}
 
+          {/* No scope while the reply is still arriving: there is nothing to
+              copy or file until it is finished and saved. */}
           {streamingText !== null && (
             <div className="flex justify-start">
               {streamingText === '' ? (
-                <p className="max-w-[85%] rounded-lg bg-surface-2 px-3 py-2 text-sm text-fg-subtle">
-                  <span className="inline-flex items-center gap-2">
-                    <Spinner className="size-3.5" />
-                    Thinking…
-                  </span>
-                </p>
+                <ThinkingBubble />
               ) : (
                 <MessageBubble role="assistant" content={streamingText} />
               )}

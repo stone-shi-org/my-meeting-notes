@@ -25,6 +25,7 @@ from app.routers import (
     matching,
     meeting_chat,
     meetings,
+    notes,
     settings_api,
     summaries,
     system,
@@ -154,6 +155,8 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(settings_api.router)
     app.include_router(chat.router)
+    app.include_router(notes.router)
+    app.include_router(notes.meeting_router)
 
     _mount_spa(app, settings.web_dist)
 

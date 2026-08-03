@@ -2,32 +2,15 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
-import { Select, Spinner, Textarea } from '@/components/ui/primitives';
+import { Select, Textarea } from '@/components/ui/primitives';
 import { useChatModel } from '@/hooks/useChatModel';
+import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
-import { renderMarkdown } from '@/lib/markdown';
 import { ApiError, type MeetingChatMessage } from '@/types/api';
-
-/** Assistant replies are LLM-authored markdown; user turns are shown as the
- * literal text typed, not run through a renderer. */
-function MessageBubble({ role, content }: { role: 'user' | 'assistant'; content: string }) {
-  if (role === 'user') {
-    return (
-      <p className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-soft-fg">
-        {content}
-      </p>
-    );
-  }
-  return (
-    <div
-      className="prose prose-sm max-w-[85%] rounded-lg bg-surface-2 px-3 py-2 dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-ol:my-1"
-      dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
-    />
-  );
-}
 
 /**
  * Always-on assistant for asking questions about a single meeting's
@@ -46,6 +29,9 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const chatModel = useChatModel();
+  // Saved answers are filed on the meeting, which puts them on its thread's
+  // timeline with the meeting recorded alongside.
+  const noteScope: NoteScope = { kind: 'meeting', meetingId };
 
   const messagesQuery = useQuery({
     queryKey: ['meeting-chat', meetingId],
@@ -212,28 +198,33 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
           {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && (
             <p className="text-sm text-fg-subtle">
               Ask about this meeting's transcript — what was said, who said it, exact
-              numbers or quotes, or anything else the recording covers.
+              numbers or quotes, or anything else the recording covers. Any answer can be
+              copied or kept as a note on this meeting.
             </p>
           )}
 
-          {messages.map((message) => (
+          {messages.map((message, i) => (
             <div
               key={message.id}
               className={cn('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}
             >
-              <MessageBubble role={message.role} content={message.content} />
+              <MessageBubble
+                role={message.role}
+                content={message.content}
+                scope={noteScope}
+                // The turn this answered, for the generated note title.
+                question={messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined}
+                model={message.model}
+              />
             </div>
           ))}
 
+          {/* No scope while the reply is still arriving: there is nothing to
+              copy or file until it is finished and saved. */}
           {streamingText !== null && (
             <div className="flex justify-start">
               {streamingText === '' ? (
-                <p className="max-w-[85%] rounded-lg bg-surface-2 px-3 py-2 text-sm text-fg-subtle">
-                  <span className="inline-flex items-center gap-2">
-                    <Spinner className="size-3.5" />
-                    Thinking…
-                  </span>
-                </p>
+                <ThinkingBubble />
               ) : (
                 <MessageBubble role="assistant" content={streamingText} />
               )}

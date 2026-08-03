@@ -15,6 +15,7 @@ THREAD_COUNTS_SQL = """
     (SELECT MAX(m.meeting_at) FROM meetings m WHERE m.thread_id = t.id)       AS last_meeting_at,
     (SELECT COUNT(*) FROM thread_emails e WHERE e.thread_id = t.id)           AS email_count,
     (SELECT COUNT(*) FROM thread_calendar_events c WHERE c.thread_id = t.id)  AS event_count,
+    (SELECT COUNT(*) FROM thread_notes n WHERE n.thread_id = t.id)            AS note_count,
     (
       (SELECT COUNT(*) FROM thread_emails e
         WHERE e.thread_id = t.id AND e.auto_attached = 1 AND e.seen_at IS NULL)
@@ -134,6 +135,7 @@ def row_to_thread(row: sqlite3.Row) -> dict:
         "last_meeting_at": row["last_meeting_at"] if "last_meeting_at" in row.keys() else None,
         "email_count": row["email_count"] if "email_count" in row.keys() else 0,
         "event_count": row["event_count"] if "event_count" in row.keys() else 0,
+        "note_count": row["note_count"] if "note_count" in row.keys() else 0,
         # Drives the blue dot on the thread card. Zero for every thread until
         # the sweep attaches something nobody has opened yet.
         "unread_count": row["unread_count"] if "unread_count" in row.keys() else 0,
@@ -154,12 +156,17 @@ def row_to_thread(row: sqlite3.Row) -> dict:
 def compute_next_step_fingerprint(conn: sqlite3.Connection, thread_id: int) -> str:
     """A cheap fingerprint of everything a "next step" suggestion depends on.
 
-    Changes whenever a meeting, email or calendar event is attached to the
+    Changes whenever a meeting, email, calendar event or note is attached to the
     thread, or a meeting gets a new current summary -- exactly the events that
     should make a cached suggestion stale. Compared against
     ``threads.next_step_fingerprint`` on read rather than invalidated at every
     attach/create call site, the same way ``summaries.stale`` is derived from a
     transcript hash rather than cleared on write.
+
+    Notes carry ``updated_at`` where emails and events carry only their id:
+    those two are immutable snapshots of something fetched, but a note is
+    edited in place, and rewriting one is exactly the kind of change that
+    should move the suggestion.
     """
     rows = conn.execute(
         """
@@ -169,9 +176,11 @@ def compute_next_step_fingerprint(conn: sqlite3.Connection, thread_id: int) -> s
         SELECT 'e' || id FROM thread_emails WHERE thread_id = ?
         UNION ALL
         SELECT 'c' || id FROM thread_calendar_events WHERE thread_id = ?
+        UNION ALL
+        SELECT 'n' || id || ':' || updated_at FROM thread_notes WHERE thread_id = ?
         ORDER BY 1
         """,
-        (thread_id, thread_id, thread_id),
+        (thread_id, thread_id, thread_id, thread_id),
     ).fetchall()
     raw = "|".join(r[0] for r in rows)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()

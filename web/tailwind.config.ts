@@ -63,6 +63,7 @@ export default {
           meeting: 'var(--entity-meeting)',
           event: 'var(--entity-event)',
           email: 'var(--entity-email)',
+          note: 'var(--entity-note)',
         },
       },
 

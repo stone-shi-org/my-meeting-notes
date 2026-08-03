@@ -309,6 +309,33 @@ SCHEMA: tuple[str, ...] = (
     """,
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_event ON thread_calendar_events(thread_id, uid)",
     "CREATE INDEX IF NOT EXISTS idx_tce_timeline ON thread_calendar_events(thread_id, start_at)",
+    # --------------------------------------------------------- thread_notes
+    #
+    # The third kind of document on a thread, alongside emails and calendar
+    # events -- but authored here rather than fetched from a provider, so there
+    # is no uid/raw_json/relevance and no unique index to dedupe against: two
+    # notes with the same title are two notes.
+    #
+    # `meeting_id` follows the same rule as the other two: NULL means the note
+    # belongs to the thread as a whole, and ON DELETE SET NULL keeps a note
+    # alive when the meeting it was taken on is deleted.
+    """
+    CREATE TABLE IF NOT EXISTS thread_notes (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        thread_id   INTEGER NOT NULL REFERENCES threads(id) ON DELETE CASCADE,
+        meeting_id  INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        title       TEXT NOT NULL,
+        body        TEXT NOT NULL,
+        source      TEXT NOT NULL,
+        model       TEXT,
+        title_model TEXT,
+        created_by  INTEGER REFERENCES users(id),
+        created_at  TEXT NOT NULL,
+        updated_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_notes_thread ON thread_notes(thread_id, created_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_notes_meeting ON thread_notes(meeting_id)",
     # ----------------------------------------------------------- match_runs
     """
     CREATE TABLE IF NOT EXISTS match_runs (
