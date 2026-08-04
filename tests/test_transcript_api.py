@@ -73,6 +73,17 @@ def test_transcript_json_shape(user_client, meeting):
     assert body["segments"][0]["speaker_name"] == "SPEAKER_00"
 
 
+def test_transcript_json_carries_speaker_stats(user_client, meeting):
+    """The legend's talk-time share comes from this call and nowhere else."""
+    body = user_client.get(f"/api/meetings/{meeting['meeting_id']}/transcript").json()
+    speakers = body["speakers"]
+
+    assert [s["id"] for s in speakers] == ["SPEAKER_00", "SPEAKER_01"]  # loudest first
+    assert [s["duration_human"] for s in speakers] == ["11:49", "10:38"]
+    assert sum(s["share"] for s in speakers) == pytest.approx(1.0)
+    assert all(s["share"] > 0 for s in speakers)
+
+
 @pytest.mark.parametrize(
     "fmt,expected_type,marker",
     [

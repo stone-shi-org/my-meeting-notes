@@ -78,6 +78,10 @@ def get_transcript(
     )
 
     if format == "json":
+        # The legend renders talk time and share per speaker, and this is the only
+        # call it makes -- so the JSON shape carries the derived stats. The text
+        # renderers walk segments and never look at them.
+        transcript["speakers"] = transcript_svc.speaker_stats(transcript)
         return transcript
 
     body = transcript_svc.render(transcript, format)

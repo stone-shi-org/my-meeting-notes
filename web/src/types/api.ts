@@ -145,8 +145,9 @@ export interface Speaker {
   color: string | null;
   total_speech_duration: number | null;
   segment_count: number | null;
-  share?: number;
-  duration_human?: string;
+  /** Derived server-side: fraction of total talk time, and that time as a clock. */
+  share: number;
+  duration_human: string;
 }
 
 export interface Transcript {

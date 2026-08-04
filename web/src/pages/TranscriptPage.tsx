@@ -85,7 +85,6 @@ function SpeakerLegend({
     <ul className="space-y-2">
       {transcript.speakers.map((speaker) => {
         const value = drafts[speaker.id] ?? speaker.display_name ?? '';
-        const share = speaker.share ?? 0;
         return (
           <li key={speaker.id} className="flex items-center gap-2" style={speakerVars(speaker.id)}>
             <span
@@ -121,7 +120,7 @@ function SpeakerLegend({
             />
 
             <span className="w-16 shrink-0 text-right text-xs text-fg-subtle tabular">
-              {speaker.duration_human} · {Math.round(share * 100)}%
+              {speaker.duration_human} · {Math.round(speaker.share * 100)}%
             </span>
 
             {saved === speaker.id && (
