@@ -134,6 +134,7 @@ function SettingsForm({
   });
 
   const entries = settings.data?.settings ?? {};
+  const modelOptions = (models.data?.models ?? []).map((m) => m.id);
 
   const save = useMutation({
     mutationFn: () => api.put('/settings', { values: draft }),
@@ -194,47 +195,47 @@ function SettingsForm({
                   <option value="true">On</option>
                   <option value="false">Off</option>
                 </Select>
-              ) : isModelField && models.data?.models?.length ? (
-                <div className="mt-1.5 flex gap-2">
-                  <Select
+              ) : (
+                <>
+                  {/* A model field is a plain text box with the catalog behind a
+                      datalist, not a select: the list runs to hundreds of ids on
+                      a gateway, which is unpickable by scrolling. Typing filters
+                      it, and an id the catalog doesn't have is still typeable. */}
+                  <Input
                     id={key}
+                    className="mt-1.5"
+                    type={entry.is_secret ? 'password' : (type ?? 'text')}
+                    step={step}
                     value={String(value)}
                     disabled={!isAdmin}
+                    placeholder={entry.is_secret ? 'unchanged' : undefined}
+                    list={isModelField && modelOptions.length ? `${key}-options` : undefined}
+                    autoComplete={isModelField ? 'off' : undefined}
                     onChange={(e) => {
                       setDraft((d) => ({ ...d, [key]: e.target.value }));
                       setTestResult(null);
                     }}
-                  >
-                    {!models.data.models.some((m) => m.id === value) && (
-                      <option value={String(value)}>{String(value)} (current)</option>
-                    )}
-                    {models.data.models.map((m) => (
-                      <option key={m.id} value={m.id}>
-                        {m.id}
-                      </option>
-                    ))}
-                  </Select>
-                </div>
-              ) : (
-                <Input
-                  id={key}
-                  className="mt-1.5"
-                  type={entry.is_secret ? 'password' : (type ?? 'text')}
-                  step={step}
-                  value={String(value)}
-                  disabled={!isAdmin}
-                  placeholder={entry.is_secret ? 'unchanged' : undefined}
-                  onChange={(e) => {
-                    setDraft((d) => ({ ...d, [key]: e.target.value }));
-                    setTestResult(null);
-                  }}
-                />
+                  />
+                  {isModelField && modelOptions.length > 0 && (
+                    <datalist id={`${key}-options`}>
+                      {modelOptions.map((id) => (
+                        <option key={id} value={id} />
+                      ))}
+                    </datalist>
+                  )}
+                </>
               )}
 
               {hint && <p className="mt-1 text-xs text-fg-subtle">{hint}</p>}
+              {isModelField && modelOptions.length > 0 && (
+                <p className="mt-1 text-xs text-fg-subtle">
+                  {modelOptions.length} models available — start typing to filter, or clear
+                  the box to see them all.
+                </p>
+              )}
               {isModelField && models.data?.error && (
                 <p className="mt-1 text-xs text-warning-ink">
-                  Could not list models ({models.data.error}). The field stays editable.
+                  Could not list models ({models.data.error}). Type the id in full.
                 </p>
               )}
               {entry.overridden && (
@@ -346,11 +347,6 @@ function ChatModelsField() {
 
   if (settings.isLoading) return <Skeleton className="h-32 w-full" />;
 
-  function add(id: string) {
-    if (!id || enabled.includes(id)) return;
-    setDraft([...enabled, id]);
-  }
-
   function remove(id: string) {
     setDraft(enabled.filter((m) => m !== id));
   }
@@ -362,7 +358,7 @@ function ChatModelsField() {
     setCustomModel('');
   }
 
-  // The dropdown only offers what isn't picked yet -- an id already in the
+  // The suggestions only offer what isn't picked yet -- an id already in the
   // list below would be a no-op choice. Enabled ids the catalog no longer
   // lists still keep their chip, so a model disabled server-side doesn't
   // silently vanish from the saved value.
@@ -378,29 +374,7 @@ function ChatModelsField() {
         The language model above is always available too.
       </p>
 
-      {isAdmin && (
-        <div className="mt-4">
-          <Label htmlFor="chat-model-add">Add a model</Label>
-          <Select
-            id="chat-model-add"
-            className="mt-1"
-            value=""
-            disabled={available.length === 0}
-            onChange={(e) => add(e.target.value)}
-          >
-            <option value="">
-              {available.length === 0 ? 'Nothing left to add' : 'Choose a model…'}
-            </option>
-            {available.map((id) => (
-              <option key={id} value={id}>
-                {id}
-              </option>
-            ))}
-          </Select>
-        </div>
-      )}
-
-      <div className="mt-3 flex min-h-9 flex-wrap items-center gap-1.5 rounded border border-border bg-surface-2 p-2">
+      <div className="mt-4 flex min-h-9 flex-wrap items-center gap-1.5 rounded border border-border bg-surface-2 p-2">
         {enabled.length === 0 && (
           <span className="px-1 text-sm text-fg-subtle">No models chosen yet.</span>
         )}
@@ -422,22 +396,41 @@ function ChatModelsField() {
       </div>
 
       {isAdmin && (
-        <div className="mt-3 flex gap-2">
-          <Input
-            value={customModel}
-            onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="…or type a model id the list doesn't have"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                addCustom();
-              }
-            }}
-          />
-          <Button variant="secondary" onClick={addCustom}>
-            <Plus />
-            Add
-          </Button>
+        <div className="mt-3">
+          <Label htmlFor="chat-model-add">Add a model</Label>
+          <div className="mt-1 flex gap-2">
+            <Input
+              id="chat-model-add"
+              value={customModel}
+              onChange={(e) => setCustomModel(e.target.value)}
+              placeholder="Type a model id, e.g. deepseek/deepseek-v4-flash"
+              list={available.length ? 'chat-model-options' : undefined}
+              autoComplete="off"
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  addCustom();
+                }
+              }}
+            />
+            {available.length > 0 && (
+              <datalist id="chat-model-options">
+                {available.map((id) => (
+                  <option key={id} value={id} />
+                ))}
+              </datalist>
+            )}
+            <Button variant="secondary" onClick={addCustom}>
+              <Plus />
+              Add
+            </Button>
+          </div>
+          {available.length > 0 && (
+            <p className="mt-1 text-xs text-fg-subtle">
+              {available.length} models available — start typing to filter. An id the catalog
+              doesn't list works too.
+            </p>
+          )}
         </div>
       )}
 
@@ -496,7 +489,7 @@ export function LlmSettingsPage() {
           {
             key: 'llm_model',
             label: 'Model',
-            hint: 'Use the fully-qualified id from the dropdown (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
+            hint: 'Use the fully-qualified id from the suggestions (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
           },
           { key: 'llm_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
           { key: 'llm_temperature', label: 'Temperature', type: 'number' },
