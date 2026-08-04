@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { PlugZap, Plus, Trash2 } from 'lucide-react';
+import { PlugZap, Plus, Trash2, X } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -346,8 +346,13 @@ function ChatModelsField() {
 
   if (settings.isLoading) return <Skeleton className="h-32 w-full" />;
 
-  function toggle(id: string) {
-    setDraft(enabled.includes(id) ? enabled.filter((m) => m !== id) : [...enabled, id]);
+  function add(id: string) {
+    if (!id || enabled.includes(id)) return;
+    setDraft([...enabled, id]);
+  }
+
+  function remove(id: string) {
+    setDraft(enabled.filter((m) => m !== id));
   }
 
   function addCustom() {
@@ -357,11 +362,13 @@ function ChatModelsField() {
     setCustomModel('');
   }
 
-  // Catalog models plus anything already enabled but no longer listed (a
-  // model an admin disabled server-side shouldn't just silently vanish here).
-  const allIds = Array.from(
-    new Set([...(models.data?.models ?? []).map((m) => m.id), ...enabled]),
-  );
+  // The dropdown only offers what isn't picked yet -- an id already in the
+  // list below would be a no-op choice. Enabled ids the catalog no longer
+  // lists still keep their chip, so a model disabled server-side doesn't
+  // silently vanish from the saved value.
+  const available = (models.data?.models ?? [])
+    .map((m) => m.id)
+    .filter((id) => !enabled.includes(id));
 
   return (
     <Card className="p-5">
@@ -371,21 +378,46 @@ function ChatModelsField() {
         The language model above is always available too.
       </p>
 
-      <div className="mt-4 space-y-1.5">
-        {allIds.length === 0 && (
-          <p className="text-sm text-fg-subtle">No models to choose from yet.</p>
+      {isAdmin && (
+        <div className="mt-4">
+          <Label htmlFor="chat-model-add">Add a model</Label>
+          <Select
+            id="chat-model-add"
+            className="mt-1"
+            value=""
+            disabled={available.length === 0}
+            onChange={(e) => add(e.target.value)}
+          >
+            <option value="">
+              {available.length === 0 ? 'Nothing left to add' : 'Choose a model…'}
+            </option>
+            {available.map((id) => (
+              <option key={id} value={id}>
+                {id}
+              </option>
+            ))}
+          </Select>
+        </div>
+      )}
+
+      <div className="mt-3 flex min-h-9 flex-wrap items-center gap-1.5 rounded border border-border bg-surface-2 p-2">
+        {enabled.length === 0 && (
+          <span className="px-1 text-sm text-fg-subtle">No models chosen yet.</span>
         )}
-        {allIds.map((id) => (
-          <label key={id} className="flex items-center gap-2 text-sm">
-            <input
-              type="checkbox"
-              checked={enabled.includes(id)}
-              disabled={!isAdmin}
-              onChange={() => toggle(id)}
-              className="size-4 rounded border-border-strong"
-            />
+        {enabled.map((id) => (
+          <Badge key={id} variant="outline" className="bg-surface py-1 pl-2 pr-1 text-sm">
             {id}
-          </label>
+            {isAdmin && (
+              <button
+                type="button"
+                aria-label={`Remove ${id}`}
+                onClick={() => remove(id)}
+                className="rounded-sm p-0.5 text-fg-subtle hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:ring-2"
+              >
+                <X className="size-3.5" />
+              </button>
+            )}
+          </Badge>
         ))}
       </div>
 
@@ -394,7 +426,7 @@ function ChatModelsField() {
           <Input
             value={customModel}
             onChange={(e) => setCustomModel(e.target.value)}
-            placeholder="Add another model id…"
+            placeholder="…or type a model id the list doesn't have"
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault();
