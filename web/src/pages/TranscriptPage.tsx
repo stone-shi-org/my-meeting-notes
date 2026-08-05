@@ -119,7 +119,7 @@ function SpeakerLegend({
               }}
             />
 
-            <span className="w-16 shrink-0 text-right text-xs text-fg-subtle tabular">
+            <span className="shrink-0 whitespace-nowrap text-right text-xs text-fg-subtle tabular">
               {speaker.duration_human} · {Math.round(speaker.share * 100)}%
             </span>
 
