@@ -6,6 +6,10 @@ that also carries the matching emails and calendar invites.
 A thread is one ongoing piece of work. It holds many meetings, plus the calendar events and email
 threads that surround them, on a single timeline.
 
+On the home screen threads sit in **groups** — collapsible folders you name yourself and drag cards
+into (or pick from the menu on each card, which is the same move without a mouse). Everything starts
+in **Ungrouped**, and deleting a group sends its threads back there rather than deleting them.
+
 ---
 
 ## Quick start

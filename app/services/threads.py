@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 
 from app.db import utcnow
-from app.errors import NotFoundError
+from app.errors import NotFoundError, ValidationError
 
 # Thread list cards show these counts, so they're computed in the list query
 # rather than N+1 round trips from the SPA.
@@ -38,6 +38,17 @@ SORTABLE = {
     "created_at": "t.created_at",
     "title": "t.title COLLATE NOCASE",
 }
+
+# The `group` query value that means "threads in no group at all". A sentinel
+# string rather than a second boolean parameter, because the home screen sends
+# one value per section and Ungrouped is just another section.
+UNGROUPED = "none"
+
+
+def _group_id(group: str) -> int:
+    if not group.isdigit():
+        raise ValidationError(f"group must be a group id or '{UNGROUPED}'")
+    return int(group)
 
 
 def touch_thread(conn: sqlite3.Connection, thread_id: int) -> None:
@@ -87,9 +98,19 @@ def list_threads(
     order: str,
     limit: int,
     offset: int,
+    group: str | None = None,
 ) -> tuple[list[sqlite3.Row], int]:
     where = [scope_sql.replace("owner_id", "t.owner_id")]
     params: list = list(scope_params)
+
+    if group is not None:
+        # UNGROUPED is a filter, not an id: the home screen pages each group
+        # separately and "no group" is one of the sections it pages.
+        if group == UNGROUPED:
+            where.append("t.group_id IS NULL")
+        else:
+            where.append("t.group_id = ?")
+            params.append(_group_id(group))
 
     if q:
         where.append("(t.title LIKE ? OR t.description LIKE ?)")
@@ -147,6 +168,8 @@ def row_to_thread(row: sqlite3.Row) -> dict:
         "next_step_generated_at": (
             row["next_step_generated_at"] if "next_step_generated_at" in row.keys() else None
         ),
+        # NULL is "Ungrouped", which is where every thread starts.
+        "group_id": row["group_id"] if "group_id" in row.keys() else None,
         # Only the single-thread GET computes this (it costs an extra query);
         # the list endpoint doesn't show the suggestion, so this default stands.
         "next_step_stale": False,

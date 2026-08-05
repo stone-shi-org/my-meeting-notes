@@ -131,6 +131,44 @@ a cached suggestion stale.
 under `derive_title` — its own first line, markdown stripped — with `title_model` NULL to record that
 nothing generated it. The body is the part worth keeping.
 
+## Groups
+
+Collapsible folders over threads on the home screen. `thread_groups` is a name and an owner;
+membership is `threads.group_id`, so filing a card is one UPDATE and there is nothing to keep in
+sync.
+
+**"Ungrouped" is not a row.** It is `group_id IS NULL`, which is why every thread that predates the
+feature is already in the right place, and why deleting a group can release its threads instead of
+deleting them (`ON DELETE SET NULL` — which only fires because `db.connect` sets
+`PRAGMA foreign_keys=ON`; SQLite has them off by default). The section is rendered like any other but
+cannot be renamed or removed.
+
+**`group_id` is a `LATE_COLUMN`, so its index cannot live in `SCHEMA`.** `SCHEMA` runs first, so
+naming the column there fails on the one boot that adds it. That is what `LATE_INDEXES` is for.
+
+**Assignment is `PUT /threads/{id}/group`, not a field on `ThreadUpdateRequest`.** Every field in
+that model treats `None` as "leave this alone", so a patch could never express "move this thread to
+Ungrouped".
+
+**Moving a thread does not bump `updated_at`.** Filing is not activity, and the default sort is last
+activity — otherwise a tidy-up session sends every card you touched to the top.
+
+**Each group pages on its own** (`?group=<id>|none` on the thread list, one query and one `page`
+state per section), so a group is never split across a page boundary. Paging therefore left the URL;
+the filters stayed, because they are what a shared link means.
+
+**The drag payload is a custom MIME type.** A card wraps an `<a>`, so the browser has already put
+the thread's *URL* on the drag before any handler runs — `application/x-mmn-thread-id` is how a card
+is told from a link, a file, or a selection dragged in from another window. Only
+`dataTransfer.types` is readable during `dragover`, which is why the accept check reads that and not
+the data.
+
+**The `<select>` on every card is not a redundant control.** HTML5 drag and drop emits nothing a
+keyboard can trigger, so without it the whole feature is mouse-only.
+
+**The collapsed set is stored whole**, so it has exactly one owner in `GroupedThreadList`. Two
+sections each holding their own copy would have the second one's write erase the first's.
+
 ## Integrations (calendar + email)
 
 Per-user, never shared. `app/services/providers/` holds one module per backend behind the protocol

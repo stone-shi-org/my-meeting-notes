@@ -85,6 +85,26 @@ SCHEMA: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at)",
+    # -------------------------------------------------------- thread_groups
+    # A folder over threads, owned by one user and named by them. Membership is
+    # a nullable `threads.group_id`, so "Ungrouped" is not a row here -- it is
+    # the absence of one, which is what makes it the default for every thread
+    # that has ever existed and the fallback when a group is deleted.
+    #
+    # UNIQUE on the name because the name *is* how a group is identified on the
+    # home screen: two folders both called "Clients" is a bug report, not a
+    # feature. NOCASE for the same reason -- "clients" is not a second folder.
+    """
+    CREATE TABLE IF NOT EXISTS thread_groups (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id   INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name       TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_thread_group_name "
+    "ON thread_groups(owner_id, name COLLATE NOCASE)",
     # -------------------------------------------------------------- threads
     """
     CREATE TABLE IF NOT EXISTS threads (
@@ -529,6 +549,18 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("threads", "next_step_generated_at", "TEXT"),
     ("threads", "next_step_fingerprint", "TEXT"),
     ("threads", "next_step_model", "TEXT"),
+    # Which group the thread sits in on the home screen. NULL is "Ungrouped",
+    # which is why this is nullable rather than pointing at a real default row:
+    # every thread that predates groups is already in the right place.
+    # ON DELETE SET NULL because deleting a folder must not delete the work --
+    # its threads fall back to Ungrouped.
+    ("threads", "group_id", "INTEGER REFERENCES thread_groups(id) ON DELETE SET NULL"),
+)
+
+# Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that
+# runs first, so naming group_id there would fail on the boot that adds it.
+LATE_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(owner_id, group_id)",
 )
 
 
@@ -544,3 +576,6 @@ def init_db(db_path: Path | str | None = None) -> None:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc).lower():
                     raise
+
+        for statement in LATE_INDEXES:
+            conn.execute(statement)

@@ -1,111 +1,16 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarDays, Layers, Mail, Mic, NotebookPen, Plus, Search, X } from 'lucide-react';
+import { useMutation, useQueryClient } from '@tanstack/react-query';
+import { Layers, Plus, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { UpcomingPanel } from '@/components/calendar/UpcomingPanel';
+import { GroupedThreadList, NewGroupButton } from '@/components/thread/ThreadGroups';
 import { Button } from '@/components/ui/Button';
-import {
-  Badge,
-  Card,
-  Input,
-  Label,
-  Select,
-  Skeleton,
-  Textarea,
-} from '@/components/ui/primitives';
-import { EmptyState, ErrorState, Pagination } from '@/components/ui/states';
+import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
+import { EmptyState } from '@/components/ui/states';
 import { api } from '@/lib/api';
-import { cn } from '@/lib/cn';
-import { fmtRelative } from '@/lib/time';
-import type { Paginated, Thread } from '@/types/api';
+import type { Thread } from '@/types/api';
 
-function StatPill({
-  icon: Icon,
-  count,
-  label,
-}: {
-  icon: typeof Mic;
-  count: number;
-  label: string;
-}) {
-  return (
-    <span
-      className="inline-flex items-center gap-1 text-xs text-fg-subtle"
-      aria-label={`${count} ${label}`}
-    >
-      <Icon className="size-3.5 text-fg-faint" aria-hidden />
-      <span className="tabular">{count}</span>
-    </span>
-  );
-}
-
-function ThreadCard({ thread }: { thread: Thread }) {
-  const unread = thread.unread_count > 0;
-  return (
-    <Card interactive className="relative overflow-hidden">
-      {/* 3px identity rail: the app's own objects are indigo. */}
-      <span className="absolute inset-y-0 left-0 w-[3px] bg-entity-meeting" aria-hidden />
-      <Link to={`/threads/${thread.id}`} className="block p-5 pl-6">
-        <div className="flex items-start justify-between gap-3">
-          <h3 className="font-display text-lg font-semibold leading-snug">
-            {unread && (
-              // Inline rather than absolutely positioned so it pushes the title
-              // instead of sitting over it at long titles.
-              <span
-                className="mr-2 inline-block size-2 shrink-0 rounded-full glow-dot align-middle"
-                aria-hidden
-              />
-            )}
-            {thread.title}
-          </h3>
-          {thread.archived && <Badge variant="neutral">Archived</Badge>}
-        </div>
-
-        {/* The dot is decoration; this is the part a screen reader gets. */}
-        {unread && (
-          <p className="mt-1 text-xs font-medium text-info-ink">
-            {thread.unread_count} new item{thread.unread_count === 1 ? '' : 's'} found for you
-          </p>
-        )}
-
-        {thread.description && (
-          <p className="mt-1.5 line-clamp-2 text-sm text-fg-subtle">{thread.description}</p>
-        )}
-
-        <div className="mt-4 flex items-center gap-4">
-          <StatPill icon={Mic} count={thread.meeting_count} label="meetings" />
-          <StatPill icon={CalendarDays} count={thread.event_count} label="calendar events" />
-          <StatPill icon={Mail} count={thread.email_count} label="emails" />
-          <StatPill icon={NotebookPen} count={thread.note_count} label="notes" />
-        </div>
-
-        <div className="mt-4 flex items-center justify-between border-t border-border pt-3">
-          <span className="text-xs text-fg-subtle">
-            Updated <time dateTime={thread.updated_at}>{fmtRelative(thread.updated_at)}</time>
-          </span>
-        </div>
-      </Link>
-    </Card>
-  );
-}
-
-function ThreadCardSkeleton() {
-  return (
-    <Card className="p-5">
-      <Skeleton className="h-5 w-2/3" />
-      <Skeleton className="mt-2 h-4 w-full" />
-      <Skeleton className="mt-1 h-4 w-4/5" />
-      <div className="mt-4 flex gap-4">
-        <Skeleton className="h-4 w-10" />
-        <Skeleton className="h-4 w-10" />
-        <Skeleton className="h-4 w-10" />
-      </div>
-      <Skeleton className="mt-5 h-4 w-24" />
-    </Card>
-  );
-}
-
-function NewThreadDialog({ onDone }: { onDone: () => void }) {
+function NewThreadDialog() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [title, setTitle] = useState('');
@@ -118,7 +23,6 @@ function NewThreadDialog({ onDone }: { onDone: () => void }) {
       setOpen(false);
       setTitle('');
       setDescription('');
-      onDone();
     },
   });
 
@@ -193,43 +97,23 @@ function NewThreadDialog({ onDone }: { onDone: () => void }) {
 export function ThreadsPage() {
   const [params, setParams] = useSearchParams();
 
-  const page = Number(params.get('page') || 1);
-  const pageSize = Number(params.get('size') || 12);
   const q = params.get('q') || '';
   const sort = params.get('sort') || 'updated_at';
   const archived = params.get('archived') === '1';
 
   const [searchDraft, setSearchDraft] = useState(q);
 
+  // The filters stay in the URL because they are what a shared link means.
+  // Paging does not: each group pages on its own now, and one `?page=` cannot
+  // say which of five sections it belongs to.
   function update(next: Record<string, string | null>) {
     const merged = new URLSearchParams(params);
     for (const [key, value] of Object.entries(next)) {
       if (value === null || value === '') merged.delete(key);
       else merged.set(key, value);
     }
-    // Any filter change invalidates the current page number.
-    if (!('page' in next)) merged.delete('page');
     setParams(merged, { replace: true });
   }
-
-  const query = useQuery({
-    queryKey: ['threads', { page, pageSize, q, sort, archived }],
-    queryFn: () =>
-      api.get<Paginated<Thread>>('/threads', {
-        page,
-        page_size: pageSize,
-        q: q || undefined,
-        sort,
-        archived: archived ? 'true' : 'false',
-      }),
-    // No layout jump when paging.
-    placeholderData: keepPreviousData,
-    // The sweep attaches things while this page is just sitting open, and a dot
-    // that only appears on reload is not a notification. One list query a minute
-    // is cheap; it is the same query the page already runs.
-    refetchInterval: 60_000,
-    refetchOnWindowFocus: true,
-  });
 
   return (
     <div className="space-y-6">
@@ -242,7 +126,8 @@ export function ThreadsPage() {
         </div>
 
         <div className="flex gap-2">
-          <NewThreadDialog onDone={() => query.refetch()} />
+          <NewGroupButton />
+          <NewThreadDialog />
           <Button variant="primary" asChild>
             <Link to="/meetings/new">
               <Plus />
@@ -312,18 +197,9 @@ export function ThreadsPage() {
         </div>
       </Card>
 
-      {query.isError && <ErrorState error={query.error} onRetry={() => query.refetch()} />}
-
-      {query.isLoading && (
-        <div className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4">
-          {Array.from({ length: 6 }).map((_, i) => (
-            <ThreadCardSkeleton key={i} />
-          ))}
-        </div>
-      )}
-
-      {query.data && query.data.items.length === 0 && (
-        <Card>
+      <GroupedThreadList
+        filters={{ q, sort, archived }}
+        emptyState={
           <EmptyState
             icon={Layers}
             title={
@@ -365,32 +241,8 @@ export function ThreadsPage() {
               )
             }
           />
-        </Card>
-      )}
-
-      {query.data && query.data.items.length > 0 && (
-        <>
-          <div
-            className={cn(
-              'grid gap-5 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4',
-              query.isPlaceholderData && 'opacity-60 transition-opacity',
-            )}
-          >
-            {query.data.items.map((thread) => (
-              <ThreadCard key={thread.id} thread={thread} />
-            ))}
-          </div>
-
-          <Pagination
-            page={query.data.page}
-            pageSize={query.data.page_size}
-            total={query.data.total}
-            totalPages={query.data.total_pages}
-            onPage={(p) => update({ page: String(p) })}
-            onPageSize={(s) => update({ size: String(s), page: null })}
-          />
-        </>
-      )}
+        }
+      />
 
       {/* Below the threads: this page is titled "Threads" and its search and
           paging belong to that list, so the calendar sits after it rather than

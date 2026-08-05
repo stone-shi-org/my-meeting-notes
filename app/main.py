@@ -20,6 +20,7 @@ from app.routers import (
     auth,
     calendar,
     chat,
+    groups,
     integrations,
     jobs,
     matching,
@@ -146,6 +147,8 @@ def create_app() -> FastAPI:
     app.include_router(users.router)
     app.include_router(integrations.router)
     app.include_router(threads.router)
+    app.include_router(groups.router)
+    app.include_router(groups.thread_router)
     app.include_router(meetings.router)
     app.include_router(transcripts.router)
     app.include_router(meeting_chat.router)

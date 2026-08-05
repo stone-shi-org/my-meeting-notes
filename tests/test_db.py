@@ -12,6 +12,7 @@ from app.db import get_conn, init_db, utcnow
 EXPECTED_TABLES = {
     "users",
     "sessions",
+    "thread_groups",
     "threads",
     "meetings",
     "diarizations",
@@ -34,6 +35,8 @@ EXPECTED_INDEXES = {
     "idx_sessions_exp",
     "idx_threads_owner_updated",
     "idx_threads_title",
+    "uq_thread_group_name",
+    "idx_threads_group",
     "idx_meetings_thread",
     "idx_meetings_owner",
     "idx_diar_meeting",
@@ -104,6 +107,7 @@ def _columns(conn, table: str) -> set[str]:
         ("thread_calendar_events", "provider"),
         ("thread_calendar_events", "source_uid"),
         ("match_runs", "source_errors_json"),
+        ("threads", "group_id"),
     ],
 )
 def test_late_columns_are_applied(conn, table, column):
@@ -118,6 +122,12 @@ def test_late_columns_survive_a_second_init(db_path):
     init_db(db_path)
     with get_conn(db_path) as conn:
         assert "url" in _columns(conn, "thread_emails")
+
+
+def test_late_indexes_are_created(conn):
+    """An index over a LATE_COLUMN cannot live in SCHEMA -- that runs before the
+    ALTER TABLE that adds the column, so it would fail on the boot that adds it."""
+    assert "idx_threads_group" in _indexes(conn)
 
 
 def _make_user(conn, user_id: int, username: str) -> None:
@@ -175,6 +185,47 @@ class TestIntegrationsTable:
         ).fetchone()
         assert (row["calendar_enabled"], row["email_enabled"]) == (0, 0)
         assert row["status"] == "unverified"
+
+
+class TestThreadGroups:
+    """The FK on threads.group_id, which only behaves because foreign_keys=ON."""
+
+    def _seed(self, conn):
+        now = utcnow()
+        _make_user(conn, 1, "one")
+        conn.execute(
+            "INSERT INTO thread_groups (id, owner_id, name, created_at, updated_at) "
+            "VALUES (1, 1, 'Clients', ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO threads (id, owner_id, group_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 1, 'T', ?, ?)",
+            (now, now),
+        )
+
+    def test_deleting_a_group_releases_its_threads(self, conn):
+        """SET NULL, not CASCADE: deleting a folder must not delete the work."""
+        self._seed(conn)
+        conn.execute("DELETE FROM thread_groups WHERE id = 1")
+        row = conn.execute("SELECT group_id FROM threads WHERE id = 1").fetchone()
+        assert row is not None and row["group_id"] is None
+
+    def test_a_group_name_is_unique_per_owner(self, conn):
+        self._seed(conn)
+        now = utcnow()
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO thread_groups (owner_id, name, created_at, updated_at) "
+                "VALUES (1, 'clients', ?, ?)",
+                (now, now),
+            )
+
+    def test_deleting_a_user_removes_their_groups(self, conn):
+        self._seed(conn)
+        conn.execute("DELETE FROM threads WHERE id = 1")
+        conn.execute("DELETE FROM users WHERE id = 1")
+        assert conn.execute("SELECT COUNT(*) FROM thread_groups").fetchone()[0] == 0
 
 
 # --------------------------------------------------------------------------- #

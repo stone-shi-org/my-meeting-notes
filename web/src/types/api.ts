@@ -86,6 +86,21 @@ export interface Thread {
   /** True when a meeting/email/event has been added since next_step was
    * generated, or nothing has been generated yet. */
   next_step_stale: boolean;
+  /** Which home-screen group the thread sits in. null is "Ungrouped". */
+  group_id: number | null;
+}
+
+/** A folder over threads on the home screen. "Ungrouped" is not one of these —
+ * it is the threads whose `group_id` is null, which is where they all start. */
+export interface ThreadGroup {
+  id: number;
+  owner_id: number;
+  name: string;
+  /** Every thread in the group, unfiltered. Shown while the section's own
+   * query is still in flight, and counted in the delete confirmation. */
+  thread_count: number;
+  created_at: string;
+  updated_at: string;
 }
 
 /** Returned by POST /threads/{id}/next-step. */

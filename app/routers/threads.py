@@ -47,6 +47,9 @@ def list_threads(
     sort: str = Query("updated_at"),
     order: str = Query("desc"),
     archived: bool | None = Query(False),
+    group: str | None = Query(
+        None, description="A group id, or 'none' for ungrouped. Omit for every thread."
+    ),
     all: bool = Query(False, description="Admins only: include other users' threads"),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
@@ -64,6 +67,7 @@ def list_threads(
         order=order,
         limit=size,
         offset=offset,
+        group=group,
     )
 
     return Page[ThreadOut](

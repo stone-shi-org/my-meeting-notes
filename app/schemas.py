@@ -117,6 +117,8 @@ class ThreadOut(BaseModel):
     generated, or nothing has been generated yet. Only computed on the
     single-thread GET, not the list."""
     next_step_stale: bool = False
+    group_id: int | None = None
+    """Which home-screen group the thread sits in. None is "Ungrouped"."""
 
 
 class ThreadCreateRequest(BaseModel):
@@ -128,6 +130,37 @@ class ThreadUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     description: str | None = Field(default=None, max_length=5000)
     archived: bool | None = None
+
+
+# --------------------------------------------------------------------------- #
+# Thread groups
+# --------------------------------------------------------------------------- #
+
+
+class ThreadGroupOut(BaseModel):
+    id: int
+    owner_id: int
+    name: str
+    thread_count: int = 0
+    """Every thread in the group, unfiltered. What the heading shows before the
+    section's own query lands, and what the delete confirmation counts."""
+    created_at: str
+    updated_at: str
+
+
+class ThreadGroupCreateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ThreadGroupUpdateRequest(BaseModel):
+    name: str = Field(min_length=1, max_length=120)
+
+
+class ThreadGroupAssignRequest(BaseModel):
+    group_id: int | None = None
+    """None moves the thread to Ungrouped. Explicit rather than a PATCH field on
+    ThreadUpdateRequest, where None already means "leave this alone" and so
+    could never express it."""
 
 
 # --------------------------------------------------------------------------- #
