@@ -318,6 +318,30 @@ class CreateIntegrationRequest(BaseModel):
     secret: dict[str, str] = Field(default_factory=dict)
 
 
+# --------------------------------------------------------------------------- #
+# Development data
+#
+# Deliberately loose: these are fixtures a developer is typing, and the server
+# validates what matters (date_mode, repeat bounds, required title) in
+# dev_data._clean rather than duplicating a field list in two places.
+# --------------------------------------------------------------------------- #
+
+
+class DevItemRequest(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+
+class DevGenerateRequest(BaseModel):
+    thread_id: int
+    count: int = Field(default=8, ge=1, le=20)
+    model: str | None = None
+
+
+class DevImportRequest(BaseModel):
+    emails: list[dict] = Field(default_factory=list)
+    events: list[dict] = Field(default_factory=list)
+
+
 class UpdateIntegrationRequest(BaseModel):
     account_label: str | None = Field(default=None, max_length=200)
     calendar_enabled: bool | None = None

@@ -8,6 +8,7 @@ that is all any API response ever carries.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 
 from app.db import get_conn, utcnow
@@ -131,7 +132,9 @@ def _validate_kinds(provider: str, calendar: bool, email: bool) -> None:
         raise ValidationError(f"{provider} cannot search email")
 
 
-def derive_account_key(provider: str, config: dict, secret: dict) -> str:
+def derive_account_key(
+    provider: str, config: dict, secret: dict, label: str | None = None
+) -> str:
     """Work out the stable identity of the account being connected.
 
     Must not come from anything the user can rename, and must not be blank --
@@ -151,6 +154,16 @@ def derive_account_key(provider: str, config: dict, secret: dict) -> str:
         if not base:
             raise ValidationError("A server URL is required")
         return f"{base}:{profile}"
+
+    if spec.auth_type == "none":
+        # The Development provider has no credential to identify, so its key is
+        # a slug of the label -- the one case where the key is derived from
+        # something renameable. It is snapshotted here and never rewritten, so
+        # the unique index still does its documented job of stopping repeated
+        # Connect clicks piling up rows, while two accounts under two labels
+        # stay distinct (which is what makes multi-account failures testable).
+        slug = re.sub(r"[^a-z0-9]+", "-", (label or "").strip().lower()).strip("-")
+        return slug or "default"
 
     if spec.auth_type == "password":
         username = (secret.get("username") or config.get("username") or "").strip()

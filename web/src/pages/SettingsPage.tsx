@@ -34,10 +34,19 @@ const TABS = [
   { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/users', label: 'Users', adminOnly: true },
+  // Only on a server with MMN_DEV_PROVIDER_ENABLED set. Detected by whether the
+  // provider is offered at all rather than by a capability endpoint of its own:
+  // the picker query is already running and already cached.
+  { to: '/settings/development', label: 'Development', devOnly: true },
 ];
 
 export function SettingsPage() {
   const { isAdmin } = useAuth();
+  const providers = useQuery({
+    queryKey: ['integration-providers'],
+    queryFn: () => api.get<ProviderSpec[]>('/integrations/providers'),
+  });
+  const devEnabled = (providers.data ?? []).some((p) => p.id === 'dev');
 
   return (
     <div className="space-y-6">
@@ -50,7 +59,9 @@ export function SettingsPage() {
 
       <div className="grid gap-6 lg:grid-cols-[220px_minmax(0,1fr)]">
         <nav aria-label="Settings sections" className="flex gap-1 overflow-x-auto lg:flex-col">
-          {TABS.filter((t) => !t.adminOnly || isAdmin).map((tab) => (
+          {TABS.filter(
+            (t) => (!t.adminOnly || isAdmin) && (!t.devOnly || devEnabled),
+          ).map((tab) => (
             <NavLink
               key={tab.to}
               to={tab.to}
@@ -1037,6 +1048,75 @@ function ConnectOAuth({ spec, onDone }: { spec: ProviderSpec; onDone: () => void
   );
 }
 
+/** Connecting the Development provider, which has nothing to authenticate.
+ *
+ * A name is the whole form: the "account" is just a label for a set of rows in
+ * this app's own database. The label is also what its account_key is slugged
+ * from, snapshotted at create time -- so two fixture sets need two names, and
+ * connecting the same name twice is a conflict rather than a duplicate row.
+ */
+function AddDevForm({ spec, onDone }: { spec: ProviderSpec; onDone: () => void }) {
+  const queryClient = useQueryClient();
+  const [label, setLabel] = useState('Fixtures');
+
+  const create = useMutation({
+    mutationFn: () =>
+      api.post<Integration>('/integrations', {
+        provider: spec.id,
+        account_label: label.trim(),
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['integrations'] });
+      void queryClient.invalidateQueries({ queryKey: ['integrations', 'summary'] });
+      onDone();
+    },
+  });
+
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-fg-subtle">
+        A calendar and inbox you write yourself. No credentials — the data lives in this app, and
+        you fill it in under <strong>Settings → Development</strong> once this is connected.
+      </p>
+
+      <div>
+        <Label htmlFor="dev-label">Name</Label>
+        <Input
+          id="dev-label"
+          className="mt-1.5"
+          value={label}
+          onChange={(e) => setLabel(e.target.value)}
+          placeholder="Fixtures"
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Only to tell one set of fake data from another. Add a second account under a different
+          name if you want two independent inboxes.
+        </p>
+      </div>
+
+      {create.error && (
+        <p role="alert" className="text-sm text-danger-ink">
+          {(create.error as Error).message}
+        </p>
+      )}
+
+      <div className="flex gap-2">
+        <Button
+          variant="primary"
+          loading={create.isPending}
+          disabled={!label.trim()}
+          onClick={() => create.mutate()}
+        >
+          Connect
+        </Button>
+        <Button variant="ghost" onClick={onDone}>
+          Cancel
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
   const [picked, setPicked] = useState<ProviderSpec | null>(null);
   const [open, setOpen] = useState(false);
@@ -1087,7 +1167,10 @@ function AddIntegration({ providers }: { providers: ProviderSpec[] }) {
             <ConnectOAuth spec={picked} onDone={close} />
           ) : picked.auth_type === 'password' ? (
             <AddAppleForm spec={picked} onDone={close} />
+          ) : picked.auth_type === 'none' ? (
+            <AddDevForm spec={picked} onDone={close} />
           ) : (
+            // 'token' -- the MCP servers, the only thing left that wants a URL.
             <AddMcpForm spec={picked} onDone={close} />
           )}
         </div>

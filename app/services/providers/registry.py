@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from app.errors import NotFoundError
-from app.services.providers import apple, google, mcp, zoho
+from app.services.providers import apple, dev, google, mcp, zoho
 
 CALENDAR = "calendar"
 EMAIL = "email"
@@ -78,6 +78,18 @@ REGISTRY: dict[str, ProviderSpec] = {
         factory=mcp.McpEmailProvider,
         supplies_triage=True,
     ),
+    # Hand-authored fake data. Registered unconditionally so an existing row
+    # still resolves to a spec when the flag is off -- `all_specs` is what hides
+    # it from the picker, and `loader.build_provider` is what makes it inert.
+    "dev": ProviderSpec(
+        id="dev",
+        label="Development (fake data)",
+        kinds=frozenset({CALENDAR, EMAIL}),
+        # Nothing to authenticate against: the "account" is a name for a set of
+        # rows in this app's own database.
+        auth_type="none",
+        factory=dev.DevProvider,
+    ),
 }
 
 
@@ -89,7 +101,15 @@ def spec(provider_id: str) -> ProviderSpec:
 
 
 def all_specs() -> list[ProviderSpec]:
-    return sorted(REGISTRY.values(), key=lambda s: s.label)
+    """What the "Add integration" picker offers.
+
+    The Development provider is omitted unless this build enables it, which is
+    how the flag hides it from the UI without the SPA knowing the flag exists.
+    """
+    visible = [
+        s for s in REGISTRY.values() if s.id != dev.PROVIDER_ID or dev.enabled()
+    ]
+    return sorted(visible, key=lambda s: s.label)
 
 
 def supported_kinds(provider_id: str) -> frozenset[str]:

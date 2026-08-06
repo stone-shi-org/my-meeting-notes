@@ -5,6 +5,7 @@ import {
   BrowserRouter as Router,
   Routes,
 } from 'react-router-dom';
+import { DevDataPanel } from '@/components/dev/DevDataPanel';
 import { AppShell } from '@/components/layout/AppShell';
 import { AuthProvider } from '@/hooks/useAuth';
 import { ThemeProvider } from '@/hooks/useTheme';
@@ -82,6 +83,9 @@ export function App() {
                         element={<Navigate to="/settings/integrations" replace />}
                       />
                       <Route path="prompt" element={<PromptSettingsPage />} />
+                      {/* Renders its own "no account yet" state when the server
+                          has dev data off; the tab is hidden there anyway. */}
+                      <Route path="development" element={<DevDataPanel />} />
                       <Route element={<RequireAdmin />}>
                         <Route path="users" element={<UsersSettingsPage />} />
                       </Route>

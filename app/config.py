@@ -161,6 +161,17 @@ class Settings(BaseSettings):
     max_upload_mb: int = 1024
     long_audio_warn_sec: int = 1800
 
+    # --- development ---------------------------------------------------------
+    # The Development provider: a calendar and inbox you fill in by hand, so the
+    # match pipeline and the follow-up sweep can be exercised without a real
+    # account. Same idea as diarize_fake above, for the other expensive external
+    # dependency.
+    #
+    # Deliberately env-only and absent from RUNTIME_KEYS: a real deployment must
+    # not be one checkbox in Settings away from feeding itself invented email,
+    # and anything attached from it lands in thread_emails for good.
+    dev_provider_enabled: bool = False
+
     # --- secrets ------------------------------------------------------------
     # Encrypts per-user integration credentials. Blank means "generate and keep
     # data/secret.key"; set it explicitly to hold the key outside the volume the

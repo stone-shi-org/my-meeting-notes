@@ -245,6 +245,48 @@ Credentials are Fernet-encrypted (`services/secretstore.py`). Refresh has exactl
 lease, and a `secret_version` CAS on write-back — **if the CAS is lost the new token is discarded**,
 because writing it would orphan whichever token the database already holds.
 
+### Development (fake data)
+
+A provider whose calendar and inbox you write yourself, from **Settings → Development**. It exists
+so matching, the threshold and the sweep can be exercised without a real account, and it is a
+provider rather than a test double precisely so the thing being exercised is the real path.
+
+**Off unless `MMN_DEV_PROVIDER_ENABLED` is set**, and env-only — deliberately not in `RUNTIME_KEYS`.
+Same reasoning as `diarize_fake`, plus one more: what it produces gets attached to real threads for
+good. Three gates, all reading the flag lazily: `registry.all_specs` hides it from the picker,
+`loader.build_provider` returns None so an existing row goes inert, and every `/api/dev/*` route
+404s.
+
+**`dev_emails`/`dev_events` are a *source*, not attachments.** The tempting shortcut — writing fake
+rows straight into `thread_emails` — skips ranking, dedupe, the threshold and attach, which is the
+entire pipeline the fake data exists to exercise.
+
+**An item's date is an offset, not a date.** `date_mode` is `absolute` | `relative` (now + offset) |
+`anchored` (a meeting's `meeting_at` + offset). Only the last two survive contact with time: a
+pinned date falls out of the 60/60 match window within a couple of months and the fixture silently
+stops testing anything. An anchored item whose meeting was deleted falls back to relative rather
+than vanishing — an item that quietly stops appearing is the harder failure to diagnose.
+
+**It filters on keywords and window like a real provider.** One that returned its whole table
+regardless of the query would mean ranking never sees a plausible non-match, and near-misses are
+the fixtures worth authoring. `expected_relevant` is the answer key for judging a run; nothing
+branches on it.
+
+**`rfc2822_date`, `all_day` and `repeat_weekly` exist to reproduce documented traps** — lexical
+sorting of raw RFC 2822 dates, the UTC-midnight all-day shift, and `dedupe_events` over a series
+sharing one `source_uid`. The last is the cheap stand-in for `icloud_recurring.ics`.
+
+**`auth_type` is `"none"`, and its `account_key` is a slug of the label** — the one place a key
+comes from something renameable. Snapshotted at create time and never rewritten, so the unique
+index still stops repeated Connect clicks piling up rows while two labelled accounts stay distinct
+(which is what makes the "every account of a kind failed" aggregate reproducible).
+
+**Generated items are returned, never written.** `POST .../generate` responds with drafts; accepting
+one POSTs it back through the ordinary create route. One write path, and a model that returns
+nonsense costs a click rather than a cleanup. `dev_seed_prompt.md` asks for decoys and near-misses
+on purpose: email generated *from* a meeting's summary and then matched *against* it makes a test
+that cannot fail — the same circularity the `attached_context` note warns about for AI-written notes.
+
 ### MCP servers
 
 Still supported, now as two providers (`mcp_calendar`, `mcp_email`) configured per user.

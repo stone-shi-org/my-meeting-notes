@@ -13,7 +13,7 @@ import sqlite3
 from app.db import utcnow
 from app.logging_config import get_logger
 from app.services import secretstore
-from app.services.providers import registry
+from app.services.providers import dev, registry
 from app.services.providers.base import BaseProvider, IntegrationRef
 
 log = get_logger("providers.loader")
@@ -51,6 +51,13 @@ def build_provider(conn: sqlite3.Connection, row: sqlite3.Row) -> BaseProvider |
         # A row for a provider this build no longer ships. Skip it rather than
         # breaking every other integration the user has.
         log.warning("integration %s names unknown provider %r", row["id"], row["provider"])
+        return None
+
+    if row["provider"] == dev.PROVIDER_ID and not dev.enabled():
+        # A Development account left behind on a build that has the flag off.
+        # Going inert is the point: the row keeps its authored data, but nothing
+        # it holds reaches a match run.
+        log.info("integration %s is a dev account and dev data is disabled", row["id"])
         return None
 
     try:

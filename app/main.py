@@ -20,6 +20,7 @@ from app.routers import (
     auth,
     calendar,
     chat,
+    dev,
     groups,
     integrations,
     jobs,
@@ -160,6 +161,7 @@ def create_app() -> FastAPI:
     app.include_router(chat.router)
     app.include_router(notes.router)
     app.include_router(notes.meeting_router)
+    app.include_router(dev.router)
 
     _mount_spa(app, settings.web_dist)
 

@@ -103,6 +103,73 @@ export interface ThreadGroup {
   updated_at: string;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Development data — only present when MMN_DEV_PROVIDER_ENABLED is set        */
+/* -------------------------------------------------------------------------- */
+
+/** When an authored item happens. Only the last two survive contact with time:
+ * an absolute date falls out of the match window within a couple of months. */
+export type DevDateMode = 'absolute' | 'relative' | 'anchored';
+
+interface DevItemBase {
+  id: number;
+  integration_id: number;
+  date_mode: DevDateMode;
+  /** Set only when date_mode is 'absolute'. */
+  at: string | null;
+  /** Signed. From now, or from the anchor meeting's start. */
+  offset_minutes: number | null;
+  anchor_meeting_id: number | null;
+  /** Ground truth: should a correct matcher pick this up? Nothing branches on
+   * it — it is the answer key for judging a run. */
+  expected_relevant: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface DevEmail extends DevItemBase {
+  subject: string;
+  sender: string | null;
+  snippet: string | null;
+  account: string | null;
+  /** Emit the date the way Gmail does, to exercise timestamp normalisation. */
+  rfc2822_date: boolean;
+}
+
+export interface DevEvent extends DevItemBase {
+  summary: string;
+  description: string | null;
+  location: string | null;
+  attendees: string[];
+  calendar_name: string | null;
+  event_type: string | null;
+  duration_minutes: number;
+  /** A bare date with no time, like a real all-day event. */
+  all_day: boolean;
+  /** Expands into N weekly instances sharing one source_uid. */
+  repeat_weekly: number;
+}
+
+/** An LLM-drafted item, not yet written. Accepting one POSTs it through the
+ * same create route the manual form uses. */
+export interface DevDraft {
+  kind: 'emails' | 'events';
+  date_mode: DevDateMode;
+  anchor_meeting_id: number | null;
+  offset_minutes: number;
+  expected_relevant: boolean;
+  /** The model's one-line reason for inventing it. */
+  note: string;
+  subject?: string;
+  sender?: string | null;
+  snippet?: string | null;
+  summary?: string;
+  description?: string | null;
+  location?: string | null;
+  attendees?: string[];
+  duration_minutes?: number;
+}
+
 /** Returned by POST /threads/{id}/next-step. */
 export interface NextStepResult {
   next_step: string | null;
@@ -461,7 +528,8 @@ export interface Integration {
   calendar_enabled: boolean;
   email_enabled: boolean;
   enabled: boolean;
-  auth_type: 'oauth2' | 'password' | 'token';
+  /** 'none' is the Development provider: there is no credential to hold. */
+  auth_type: 'oauth2' | 'password' | 'token' | 'none';
   /** Non-secret settings only. */
   config: Record<string, unknown>;
   has_secret: boolean;
@@ -479,7 +547,8 @@ export interface ProviderSpec {
   id: string;
   label: string;
   kinds: string[];
-  auth_type: 'oauth2' | 'password' | 'token';
+  /** 'none' is the Development provider: there is no credential to hold. */
+  auth_type: 'oauth2' | 'password' | 'token' | 'none';
   docs_url: string;
 }
 

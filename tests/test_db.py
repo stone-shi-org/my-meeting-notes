@@ -28,6 +28,8 @@ EXPECTED_TABLES = {
     "user_mcp_profiles",
     "integrations",
     "app_settings",
+    "dev_emails",
+    "dev_events",
 }
 
 EXPECTED_INDEXES = {
@@ -55,6 +57,8 @@ EXPECTED_INDEXES = {
     "idx_match_meeting",
     "uq_integration_account",
     "idx_integrations_user",
+    "idx_dev_emails_integration",
+    "idx_dev_events_integration",
 }
 
 
@@ -226,6 +230,52 @@ class TestThreadGroups:
         conn.execute("DELETE FROM threads WHERE id = 1")
         conn.execute("DELETE FROM users WHERE id = 1")
         assert conn.execute("SELECT COUNT(*) FROM thread_groups").fetchone()[0] == 0
+
+
+class TestDevData:
+    """The Development provider's authored inbox and calendar."""
+
+    def _seed(self, conn):
+        now = utcnow()
+        _make_user(conn, 1, "one")
+        conn.execute(
+            "INSERT INTO integrations (id, user_id, provider, account_key, auth_type, "
+            "created_at, updated_at) VALUES (5, 1, 'dev', 'default', 'none', ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO dev_emails (integration_id, subject, created_at, updated_at) "
+            "VALUES (5, 'Hi', ?, ?)",
+            (now, now),
+        )
+
+    def test_items_go_with_the_account(self, conn):
+        """An inbox belonging to no account means nothing -- hence CASCADE, and
+        hence the JSON export in dev_data for keeping fixtures across one."""
+        self._seed(conn)
+        conn.execute("DELETE FROM integrations WHERE id = 5")
+        assert conn.execute("SELECT COUNT(*) FROM dev_emails").fetchone()[0] == 0
+
+    def test_an_anchor_survives_its_meeting(self, conn):
+        """SET NULL, so the item stays findable; dev.resolve_when then falls back
+        to treating the offset as relative to now."""
+        now = utcnow()
+        self._seed(conn)
+        conn.execute(
+            "INSERT INTO threads (id, owner_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 'T', ?, ?)",
+            (now, now),
+        )
+        conn.execute(
+            "INSERT INTO meetings (id, thread_id, owner_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 1, 'M', ?, ?)",
+            (now, now),
+        )
+        conn.execute("UPDATE dev_emails SET anchor_meeting_id = 1")
+        conn.execute("DELETE FROM meetings WHERE id = 1")
+
+        row = conn.execute("SELECT * FROM dev_emails").fetchone()
+        assert row is not None and row["anchor_meeting_id"] is None
 
 
 # --------------------------------------------------------------------------- #

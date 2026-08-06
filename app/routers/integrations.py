@@ -27,7 +27,7 @@ from app.schemas import (
     UpdateIntegrationRequest,
 )
 from app.services import integrations as svc
-from app.services.providers import google, loader, oauth, registry, zoho
+from app.services.providers import dev, google, loader, oauth, registry, zoho
 
 router = APIRouter(prefix="/api/integrations", tags=["integrations"])
 log = get_logger("integrations_api")
@@ -235,7 +235,17 @@ def create_integration(
     /api/integrations/oauth/{provider}/start, because only the callback knows
     which account was actually authorized.
     """
-    account_key = svc.derive_account_key(payload.provider, payload.config, payload.secret)
+    if payload.provider == dev.PROVIDER_ID and not dev.enabled():
+        # Same answer the picker gives by omitting it, for a client that asked
+        # anyway. Not a 404: the provider exists, this build just will not run it.
+        raise ValidationError(
+            "Development data is not enabled on this server "
+            "(set MMN_DEV_PROVIDER_ENABLED)."
+        )
+
+    account_key = svc.derive_account_key(
+        payload.provider, payload.config, payload.secret, payload.account_label
+    )
     integration_id = svc.create(
         conn,
         user_id=user.id,

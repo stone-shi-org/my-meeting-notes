@@ -193,6 +193,27 @@ cd web && npm run dev         # Vite on :5173, proxying /api to :4020
 Backend edits need a rebuild unless you add a `docker-compose.override.yml` that bind-mounts `./app`
 and runs `uvicorn --reload`.
 
+### Fake email and calendar
+
+Matching, the confidence threshold and the automatic sweep are all awkward to exercise against a
+real account — you have to compose an email, send it, and wait. Set
+
+```bash
+MMN_DEV_PROVIDER_ENABLED=true
+```
+
+and a **Development (fake data)** provider appears in Settings → Integrations. Connect one and you
+get a **Settings → Development** tab where you write the emails and events yourself, or have the
+LLM draft a batch around one of your threads for you to review before saving any of it.
+
+Dates are written as offsets — *2 days after the Atlas kickoff*, *yesterday* — rather than calendar
+dates, so a fixture stays inside the match window months from now instead of quietly ageing out of
+it. Items flow through the real pipeline, so `POST /api/threads/{id}/follow-ups` on a thread with an
+item dated yesterday is the quickest way to see the sweep attach something and light the unread dot.
+
+Off by default and deliberately not switchable from Settings: whatever it produces gets attached to
+real threads for good.
+
 ## Tests
 
 ```bash

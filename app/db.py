@@ -503,6 +503,79 @@ SCHEMA: tuple[str, ...] = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_integration_account "
     "ON integrations(user_id, provider, account_key)",
     "CREATE INDEX IF NOT EXISTS idx_integrations_user ON integrations(user_id, enabled)",
+    # ------------------------------------------------- dev_emails/dev_events
+    # The Development provider's hand-authored inbox and calendar. These are a
+    # *source*, upstream of matching -- deliberately not thread_emails /
+    # thread_calendar_events, which hold what has already been attached. Writing
+    # fake data straight into those would skip the ranking, threshold and attach
+    # logic that is the whole reason for having a fake source.
+    #
+    # Scoped to an integration rather than a user, so two Development accounts
+    # have two separate inboxes -- which is what makes "aggregate an error only
+    # when every account of a kind failed" testable. CASCADE because an inbox
+    # belonging to no account means nothing; app/services/dev_data.py has a JSON
+    # export for keeping authored fixtures across a disconnect.
+    #
+    # When each item happens is `date_mode`, and it is the reason these are not
+    # a JSON fixture file:
+    #   absolute  -- `at` verbatim, for pinning an exact reproduction
+    #   relative  -- now + offset_minutes, e.g. "an email from yesterday"
+    #   anchored  -- a meeting's meeting_at + offset_minutes
+    # Only the last two survive contact with time. An absolute date drops out of
+    # the 60/60 match window within a couple of months and the fixture quietly
+    # stops testing anything.
+    """
+    CREATE TABLE IF NOT EXISTS dev_emails (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        integration_id    INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+        subject           TEXT NOT NULL,
+        sender            TEXT,
+        snippet           TEXT,
+        account           TEXT,
+        date_mode         TEXT NOT NULL DEFAULT 'relative',
+        at                TEXT,
+        offset_minutes    INTEGER,
+        anchor_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        -- Emit the date as RFC 2822 the way Gmail does, rather than ISO-8601.
+        -- Stored raw those sort lexically above every ISO date; this is how you
+        -- exercise matching.normalize_timestamp on purpose.
+        rfc2822_date      INTEGER NOT NULL DEFAULT 0,
+        -- Ground truth: should a correct matcher pick this up? Nothing branches
+        -- on it -- it is there to judge a run by, and for a scoring report later.
+        expected_relevant INTEGER NOT NULL DEFAULT 1,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dev_emails_integration ON dev_emails(integration_id)",
+    """
+    CREATE TABLE IF NOT EXISTS dev_events (
+        id                INTEGER PRIMARY KEY AUTOINCREMENT,
+        integration_id    INTEGER NOT NULL REFERENCES integrations(id) ON DELETE CASCADE,
+        summary           TEXT NOT NULL,
+        description       TEXT,
+        location          TEXT,
+        attendees_json    TEXT,
+        calendar_name     TEXT,
+        event_type        TEXT,
+        duration_minutes  INTEGER NOT NULL DEFAULT 60,
+        date_mode         TEXT NOT NULL DEFAULT 'relative',
+        at                TEXT,
+        offset_minutes    INTEGER,
+        anchor_meeting_id INTEGER REFERENCES meetings(id) ON DELETE SET NULL,
+        -- A bare YYYY-MM-DD with no time, which is what a real all-day event
+        -- carries and what puts it on the wrong day west of Greenwich if
+        -- anything coerces it to midnight.
+        all_day           INTEGER NOT NULL DEFAULT 0,
+        -- Expand into N weekly instances sharing one source_uid. The cheap
+        -- stand-in for icloud_recurring.ics: it is what exercises dedupe_events.
+        repeat_weekly     INTEGER NOT NULL DEFAULT 1,
+        expected_relevant INTEGER NOT NULL DEFAULT 1,
+        created_at        TEXT NOT NULL,
+        updated_at        TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_dev_events_integration ON dev_events(integration_id)",
 )
 
 # Columns added after the initial release go here as (table, column, ddl_fragment).
