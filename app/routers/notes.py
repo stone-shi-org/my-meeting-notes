@@ -18,7 +18,13 @@ from app.config import get_settings
 from app.deps import CurrentUser, active_user, assert_can_access, get_db
 from app.errors import NotFoundError
 from app.logging_config import get_logger
-from app.schemas import NoteAppendRequest, NoteCreateRequest, NoteOut, NoteUpdateRequest
+from app.schemas import (
+    MoveItemRequest,
+    NoteAppendRequest,
+    NoteCreateRequest,
+    NoteOut,
+    NoteUpdateRequest,
+)
 from app.services import notes as notes_svc
 from app.services import threads as threads_svc
 
@@ -162,6 +168,23 @@ def append_thread_note(
     _authorised_thread(conn, thread_id, user)
     note = notes_svc.append_to_note(conn, thread_id=thread_id, note_id=note_id, body=payload.body)
     threads_svc.touch_thread(conn, thread_id)
+    return NoteOut(**note)
+
+
+@router.post("/{thread_id}/notes/{note_id}/move", response_model=NoteOut)
+def move_thread_note(
+    thread_id: int,
+    note_id: int,
+    payload: MoveItemRequest,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> NoteOut:
+    _authorised_thread(conn, thread_id, user)
+    _authorised_thread(conn, payload.target_thread_id, user)
+    note = notes_svc.move_note(
+        conn, thread_id=thread_id, note_id=note_id, target_thread_id=payload.target_thread_id
+    )
+    threads_svc.touch_thread(conn, payload.target_thread_id)
     return NoteOut(**note)
 
 

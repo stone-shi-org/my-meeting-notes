@@ -259,6 +259,41 @@ class TestLifecycle:
 
 
 # --------------------------------------------------------------------------- #
+# Moving a note to another thread
+# --------------------------------------------------------------------------- #
+
+
+class TestMove:
+    def test_moving_clears_the_meeting_id(self, user_client, meeting, mock_llm):
+        note = create(user_client, f"/api/meetings/{meeting['id']}/notes", title="Kickoff notes")
+        other = user_client.post(
+            "/api/threads", json={"title": "Other thread"}
+        ).json()
+
+        resp = user_client.post(
+            f"/api/threads/{note['thread_id']}/notes/{note['id']}/move",
+            json={"target_thread_id": other["id"]},
+        )
+        assert resp.status_code == 200, resp.text
+        moved = resp.json()
+        assert moved["thread_id"] == other["id"]
+        assert moved["meeting_id"] is None, "the meeting it was filed on belongs to the old thread"
+
+        assert user_client.get(f"/api/threads/{note['thread_id']}/notes").json() == []
+        assert [n["id"] for n in user_client.get(f"/api/threads/{other['id']}/notes").json()] == [
+            note["id"]
+        ]
+
+    def test_moving_something_not_attached_is_404(self, user_client):
+        a = user_client.post("/api/threads", json={"title": "A"}).json()
+        b = user_client.post("/api/threads", json={"title": "B"}).json()
+        resp = user_client.post(
+            f"/api/threads/{a['id']}/notes/999/move", json={"target_thread_id": b["id"]}
+        )
+        assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
 # Ownership -- someone else's row is 404, never 403
 # --------------------------------------------------------------------------- #
 

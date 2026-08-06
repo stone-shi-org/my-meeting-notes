@@ -1,5 +1,6 @@
 import { Check, Copy, Pencil, Sparkles, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { MoveToThread } from '@/components/thread/MoveToThread';
 import { Button } from '@/components/ui/Button';
 import { Badge, Input, Textarea } from '@/components/ui/primitives';
 import { useNotes, type NoteScope } from '@/hooks/useNotes';
@@ -28,7 +29,7 @@ export function NoteCard({
   scope: NoteScope;
   className?: string;
 }) {
-  const { update, remove } = useNotes(scope, { enabled: false });
+  const { update, remove, move } = useNotes(scope, { enabled: false });
   const [editing, setEditing] = useState(false);
   const [title, setTitle] = useState(note.title);
   const [body, setBody] = useState(note.body);
@@ -136,6 +137,12 @@ export function NoteCard({
             onClick={() => void copyText(note.body).then(setCopied)}
           />
           <IconAction label="Edit note" icon={Pencil} onClick={() => setEditing(true)} />
+          <MoveToThread
+            currentThreadId={String(note.thread_id)}
+            pending={move.isPending}
+            label="Move this note to another thread"
+            onMove={(targetThreadId) => move.mutate({ note, targetThreadId })}
+          />
           <IconAction
             label="Delete note"
             icon={Trash2}
@@ -175,6 +182,9 @@ export function NoteCard({
         {edited && <span>edited {fmtRelative(note.updated_at)}</span>}
         {remove.error && (
           <span className="text-danger-ink">{(remove.error as Error).message}</span>
+        )}
+        {move.error && (
+          <span className="text-danger-ink">{(move.error as Error).message}</span>
         )}
       </div>
     </div>

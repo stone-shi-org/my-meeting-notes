@@ -6,7 +6,7 @@ import hashlib
 import sqlite3
 
 from app.db import utcnow
-from app.errors import NotFoundError, ValidationError
+from app.errors import ConflictError, NotFoundError, ValidationError
 
 # Thread list cards show these counts, so they're computed in the list query
 # rather than N+1 round trips from the SPA.
@@ -235,6 +235,38 @@ def mark_seen(
         sql += " AND id = ?"
         params.append(item_id)
     return conn.execute(sql, params).rowcount
+
+
+def move_item(
+    conn: sqlite3.Connection, *, kind: str, thread_id: int, item_id: int, target_thread_id: int
+) -> None:
+    """Move one attached email or calendar event to another thread.
+
+    Clears ``meeting_id``: ``matching.attached_context`` is scoped by meeting
+    regardless of thread, so leaving it set would keep feeding a summary on a
+    meeting this item no longer sits under. Reset to "seen" too, on the same
+    reasoning as ``attach_event``/``attach_email`` -- a move is a person acting
+    on the item, not the sweep finding it while nobody was looking.
+
+    The unique index on (thread_id, uid) / (thread_id, message_id) means this
+    can collide with something already attached to the destination -- reported
+    as a conflict rather than merged, since picking whose score and reason wins
+    is a call the pipeline shouldn't make silently.
+    """
+    table = UNREAD_TABLES[kind]
+    try:
+        cur = conn.execute(
+            f"""
+            UPDATE {table}
+               SET thread_id = ?, meeting_id = NULL, auto_attached = 0, seen_at = ?
+             WHERE id = ? AND thread_id = ?
+            """,
+            (target_thread_id, utcnow(), item_id, thread_id),
+        )
+    except sqlite3.IntegrityError:
+        raise ConflictError("Already attached to the destination thread") from None
+    if cur.rowcount == 0:
+        raise NotFoundError("Not attached to this thread")
 
 
 # --------------------------------------------------------------------------- #

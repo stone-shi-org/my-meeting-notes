@@ -95,5 +95,21 @@ export function useNotes(scope: NoteScope, options: { enabled?: boolean } = {}) 
     onSuccess: (_data, note) => settle(note),
   });
 
-  return { list, create, append, update, remove };
+  const move = useMutation({
+    mutationFn: ({ note, targetThreadId }: { note: Note; targetThreadId: number }) =>
+      api.post<Note>(`/threads/${note.thread_id}/notes/${note.id}/move`, {
+        target_thread_id: targetThreadId,
+      }),
+    // settle(data) covers the destination; the source thread is not in the
+    // response any more, so it needs its own invalidation from the argument.
+    onSuccess: (data, { note }) => {
+      settle(data);
+      const sourceThreadId = String(note.thread_id);
+      void queryClient.invalidateQueries({ queryKey: ['notes', 'thread', sourceThreadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', sourceThreadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', sourceThreadId] });
+    },
+  });
+
+  return { list, create, append, update, remove, move };
 }

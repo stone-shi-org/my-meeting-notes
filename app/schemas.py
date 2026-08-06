@@ -132,6 +132,10 @@ class ThreadUpdateRequest(BaseModel):
     archived: bool | None = None
 
 
+class MoveItemRequest(BaseModel):
+    target_thread_id: int
+
+
 # --------------------------------------------------------------------------- #
 # Thread groups
 # --------------------------------------------------------------------------- #

@@ -23,6 +23,7 @@ from app.errors import NotFoundError
 from app.logging_config import get_logger
 from app.schemas import (
     MeetingOut,
+    MoveItemRequest,
     Page,
     ThreadCreateRequest,
     ThreadOut,
@@ -314,6 +315,27 @@ def detach_email(
     return {"ok": True}
 
 
+@router.post("/{thread_id}/emails/{email_id}/move")
+def move_email(
+    thread_id: int,
+    email_id: int,
+    payload: MoveItemRequest,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    assert_can_access(threads_svc.get_thread(conn, payload.target_thread_id), user)
+    threads_svc.move_item(
+        conn,
+        kind="emails",
+        thread_id=thread_id,
+        item_id=email_id,
+        target_thread_id=payload.target_thread_id,
+    )
+    threads_svc.touch_thread(conn, payload.target_thread_id)
+    return {"ok": True}
+
+
 @router.get("/{thread_id}/calendar-events")
 def list_thread_events(
     thread_id: int,
@@ -342,6 +364,27 @@ def detach_event(
     )
     if cur.rowcount == 0:
         raise NotFoundError("Event not attached to this thread")
+    return {"ok": True}
+
+
+@router.post("/{thread_id}/calendar-events/{event_id}/move")
+def move_event(
+    thread_id: int,
+    event_id: int,
+    payload: MoveItemRequest,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    assert_can_access(threads_svc.get_thread(conn, payload.target_thread_id), user)
+    threads_svc.move_item(
+        conn,
+        kind="calendar-events",
+        thread_id=thread_id,
+        item_id=event_id,
+        target_thread_id=payload.target_thread_id,
+    )
+    threads_svc.touch_thread(conn, payload.target_thread_id)
     return {"ok": True}
 
 

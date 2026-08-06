@@ -385,3 +385,97 @@ def test_another_user_cannot_detach_your_attachments(
     ).status_code == 404
     # And it is still there afterwards.
     assert len(user_client.get(f"/api/threads/{t['id']}/calendar-events").json()) == 1
+
+
+# --------------------------------------------------------------------------- #
+# Moving an attachment to another thread
+# --------------------------------------------------------------------------- #
+
+
+def _attach_email(
+    db_path, thread_id: int, message_id: str = "<m1>", meeting_id: int | None = None,
+    auto_attached: int = 1,
+) -> int:
+    from app.db import get_conn, utcnow
+
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO thread_emails (thread_id, meeting_id, message_id, subject, date, "
+            "raw_json, auto_attached, attached_at) VALUES (?, ?, ?, 'Hi', ?, '{}', ?, ?)",
+            (thread_id, meeting_id, message_id, "2026-03-17T00:00:00+00:00", auto_attached, utcnow()),
+        )
+        return cur.lastrowid
+
+
+def test_moving_an_email_clears_meeting_id_and_the_unread_mark(user_client, isolated_settings):
+    source = make_thread(user_client, title="Source")
+    target = make_thread(user_client, title="Target")
+    meeting = user_client.post(
+        "/api/meetings", json={"thread_id": source["id"], "title": "Kickoff"}
+    ).json()
+    email_id = _attach_email(isolated_settings.db_path, source["id"], meeting_id=meeting["id"])
+
+    resp = user_client.post(
+        f"/api/threads/{source['id']}/emails/{email_id}/move",
+        json={"target_thread_id": target["id"]},
+    )
+    assert resp.status_code == 200, resp.text
+
+    assert user_client.get(f"/api/threads/{source['id']}/emails").json() == []
+    moved = user_client.get(f"/api/threads/{target['id']}/emails").json()
+    assert len(moved) == 1
+    assert moved[0]["id"] == email_id
+    assert moved[0]["meeting_id"] is None
+    assert moved[0]["unread"] is False, "a move is a person acting on it, not the sweep"
+
+
+def test_moving_an_event_that_already_exists_on_the_target_thread_is_a_conflict(
+    user_client, isolated_settings
+):
+    source = make_thread(user_client, title="Source")
+    target = make_thread(user_client, title="Target")
+    event_id = _attach_event(isolated_settings.db_path, source["id"], uid="evt-1")
+    _attach_event(isolated_settings.db_path, target["id"], uid="evt-1")
+
+    resp = user_client.post(
+        f"/api/threads/{source['id']}/calendar-events/{event_id}/move",
+        json={"target_thread_id": target["id"]},
+    )
+    assert resp.status_code == 409, resp.text
+    # Untouched on both ends.
+    assert len(user_client.get(f"/api/threads/{source['id']}/calendar-events").json()) == 1
+    assert len(user_client.get(f"/api/threads/{target['id']}/calendar-events").json()) == 1
+
+
+def test_moving_something_not_attached_is_404(user_client):
+    source = make_thread(user_client, title="Source")
+    target = make_thread(user_client, title="Target")
+    resp = user_client.post(
+        f"/api/threads/{source['id']}/emails/999/move",
+        json={"target_thread_id": target["id"]},
+    )
+    assert resp.status_code == 404
+
+
+def test_moving_into_someone_elses_thread_is_404(user_client, other_user_client, isolated_settings):
+    source = make_thread(user_client, title="Source")
+    other_thread = make_thread(other_user_client, title="Not yours")
+    event_id = _attach_event(isolated_settings.db_path, source["id"])
+
+    resp = user_client.post(
+        f"/api/threads/{source['id']}/calendar-events/{event_id}/move",
+        json={"target_thread_id": other_thread["id"]},
+    )
+    assert resp.status_code == 404
+    assert len(user_client.get(f"/api/threads/{source['id']}/calendar-events").json()) == 1
+
+
+def test_moving_someone_elses_attachment_is_404(user_client, other_user_client, isolated_settings):
+    t = make_thread(user_client)
+    event_id = _attach_event(isolated_settings.db_path, t["id"])
+
+    resp = other_user_client.post(
+        f"/api/threads/{t['id']}/calendar-events/{event_id}/move",
+        json={"target_thread_id": t["id"]},
+    )
+    assert resp.status_code == 404

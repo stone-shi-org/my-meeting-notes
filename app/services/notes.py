@@ -219,6 +219,25 @@ def append_to_note(conn: sqlite3.Connection, *, thread_id: int, note_id: int, bo
     return require_note(conn, thread_id, note_id)
 
 
+def move_note(
+    conn: sqlite3.Connection, *, thread_id: int, note_id: int, target_thread_id: int
+) -> dict:
+    """Move a note to another thread.
+
+    Clears ``meeting_id``: it names a meeting under the thread being left, and
+    a note filed under a meeting on a different thread would show up on that
+    meeting's transcript page instead of the note's own. No unique index and no
+    unread flags to worry about here, unlike emails and events -- a note has
+    neither a uid nor a way to arrive unseen.
+    """
+    require_note(conn, thread_id, note_id)
+    conn.execute(
+        "UPDATE thread_notes SET thread_id = ?, meeting_id = NULL WHERE id = ? AND thread_id = ?",
+        (target_thread_id, note_id, thread_id),
+    )
+    return require_note(conn, target_thread_id, note_id)
+
+
 def delete_note(conn: sqlite3.Connection, *, thread_id: int, note_id: int) -> None:
     cur = conn.execute(
         "DELETE FROM thread_notes WHERE id = ? AND thread_id = ?", (note_id, thread_id)

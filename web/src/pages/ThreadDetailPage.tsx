@@ -23,6 +23,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
 import { NoteCard, NoteComposer } from '@/components/notes/NoteCard';
+import { MoveToThread } from '@/components/thread/MoveToThread';
 import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
@@ -160,6 +161,26 @@ function useDetach(threadId: string, kind: Kind) {
   });
 }
 
+/** Move an attached item onto another thread.
+ *
+ * Invalidates both ends: the source loses the item from its timeline and
+ * counts, the destination gains it -- and `threads` too, since both cards'
+ * counts on the home screen are affected. */
+function useMoveItem(threadId: string, kind: Kind) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, targetThreadId }: { id: number; targetThreadId: number }) =>
+      api.post(`/threads/${threadId}/${kind}/${id}/move`, { target_thread_id: targetThreadId }),
+    onSuccess: (_data, { targetThreadId }) => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(targetThreadId)] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', String(targetThreadId)] });
+      void queryClient.invalidateQueries({ queryKey: ['threads'] });
+    },
+  });
+}
+
 /** Clear the "arrived while you were away" mark on one item.
  *
  * Fired on the link the user actually clicks, which is the moment the mark stops
@@ -229,6 +250,7 @@ function DetachButton({
 
 function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId: string }) {
   const detach = useDetach(threadId, 'calendar-events');
+  const move = useMoveItem(threadId, 'calendar-events');
   const markRead = useMarkRead(threadId, 'calendar-events');
   const unread = !!event.unread && event.id !== undefined;
   const read = () => {
@@ -262,11 +284,19 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
         </p>
         {unread && <MarkReadButton onClick={read} pending={markRead.isPending} />}
         {event.id !== undefined && (
-          <DetachButton
-            onClick={() => detach.mutate(event.id as number)}
-            pending={detach.isPending}
-            label="Remove this event from the thread"
-          />
+          <>
+            <MoveToThread
+              currentThreadId={threadId}
+              pending={move.isPending}
+              label="Move this event to another thread"
+              onMove={(targetThreadId) => move.mutate({ id: event.id as number, targetThreadId })}
+            />
+            <DetachButton
+              onClick={() => detach.mutate(event.id as number)}
+              pending={detach.isPending}
+              label="Remove this event from the thread"
+            />
+          </>
         )}
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-fg-subtle">
@@ -281,6 +311,9 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
         {event.relevance_reason && (
           <span className="italic text-fg-faint">{event.relevance_reason}</span>
         )}
+        {move.error && (
+          <span className="text-danger-ink">{(move.error as Error).message}</span>
+        )}
       </div>
     </div>
   );
@@ -289,6 +322,7 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
 function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string }) {
   const href = emailLink(email);
   const detach = useDetach(threadId, 'emails');
+  const move = useMoveItem(threadId, 'emails');
   const markRead = useMarkRead(threadId, 'emails');
   const unread = !!email.unread && typeof email.id === 'number';
   const read = () => {
@@ -322,17 +356,28 @@ function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string
         </p>
         {unread && <MarkReadButton onClick={read} pending={markRead.isPending} />}
         {typeof email.id === 'number' && (
-          <DetachButton
-            onClick={() => detach.mutate(email.id as number)}
-            pending={detach.isPending}
-            label="Remove this email from the thread"
-          />
+          <>
+            <MoveToThread
+              currentThreadId={threadId}
+              pending={move.isPending}
+              label="Move this email to another thread"
+              onMove={(targetThreadId) => move.mutate({ id: email.id as number, targetThreadId })}
+            />
+            <DetachButton
+              onClick={() => detach.mutate(email.id as number)}
+              pending={detach.isPending}
+              label="Remove this email from the thread"
+            />
+          </>
         )}
       </div>
       <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-fg-subtle">
         {unread && <span className="font-medium text-info-ink">New · added for you</span>}
         <span className="truncate">{email.sender}</span>
         {email.tag && <Badge variant="outline" size="sm">{email.tag}</Badge>}
+        {move.error && (
+          <span className="text-danger-ink">{(move.error as Error).message}</span>
+        )}
       </div>
       {email.snippet && (
         <p
