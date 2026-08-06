@@ -1,4 +1,14 @@
-import { AppWindow, Circle, Mic, Monitor, Pause, Play, Square, Trash2 } from 'lucide-react';
+import {
+  AppWindow,
+  Circle,
+  Mic,
+  Monitor,
+  Pause,
+  Play,
+  RefreshCw,
+  Square,
+  Trash2,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Label, Select } from '@/components/ui/primitives';
@@ -189,9 +199,27 @@ export function RecorderPanel({
 
       {(source === 'mic' || withMic) && (
         <div>
-          <Label htmlFor="rec-device">
-            {source === 'mic' ? 'Input' : 'Microphone to mix in'}
-          </Label>
+          <div className="flex items-center justify-between">
+            <Label htmlFor="rec-device">
+              {source === 'mic' ? 'Input' : 'Microphone to mix in'}
+            </Label>
+            <Button
+              type="button"
+              size="icon-sm"
+              variant="ghost"
+              aria-label="Refresh device list"
+              title={
+                needsDevicePermission
+                  ? 'Prompts for microphone access once, just to read device names'
+                  : 'Refresh device list'
+              }
+              loading={requesting}
+              disabled={recorder.live || disabled}
+              onClick={() => void (needsDevicePermission ? requestAccess() : refresh())}
+            >
+              <RefreshCw className="size-3.5" />
+            </Button>
+          </div>
           <Select
             id="rec-device"
             className="mt-1.5"
@@ -200,29 +228,18 @@ export function RecorderPanel({
             onChange={(e) => setDeviceId(e.target.value)}
           >
             <option value="">System default</option>
-            {devices.map((device, i) => (
-              <option key={device.deviceId || i} value={device.deviceId}>
-                {device.label || `Input ${i + 1}`}
-              </option>
-            ))}
+            {/* Unlabelled devices are indistinguishable from each other, so a
+                fabricated "Input 1" would be naming something we can't actually
+                tell apart -- better to just not offer a choice until refreshing
+                reveals which is which. */}
+            {devices
+              .filter((device) => device.label)
+              .map((device) => (
+                <option key={device.deviceId} value={device.deviceId}>
+                  {device.label}
+                </option>
+              ))}
           </Select>
-          {needsDevicePermission && (
-            <div className="mt-1.5 flex items-center gap-2">
-              <Button
-                type="button"
-                size="sm"
-                variant="secondary"
-                loading={requesting}
-                disabled={recorder.live || disabled}
-                onClick={() => void requestAccess()}
-              >
-                Show device names
-              </Button>
-              <p className="text-xs text-fg-subtle">
-                One-time prompt to read real device names — recording still works without it.
-              </p>
-            </div>
-          )}
           {requestError && (
             <p role="alert" className="mt-1 text-xs text-danger-ink">
               {requestError}
