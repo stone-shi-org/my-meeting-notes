@@ -102,6 +102,10 @@ export function RecorderPanel({
   const chosen = support[source];
   const canStart = chosen.available && !disabled;
   const needsDevicePermission = devices.length > 0 && !devices[0].label;
+  // Only a plain mic recording releases the device on pause (see
+  // useRecorder) -- pausing a tab/system capture just suspends the encoder,
+  // so there is nothing to switch there.
+  const canSwitchWhilePaused = recorder.phase === 'paused' && source === 'mic';
 
   // No capture API here at all. Say why, and how to get one -- "unsupported"
   // sends people to a different browser when the actual problem is the URL.
@@ -214,7 +218,7 @@ export function RecorderPanel({
                   : 'Refresh device list'
               }
               loading={requesting}
-              disabled={recorder.live || disabled}
+              disabled={(recorder.live && !canSwitchWhilePaused) || disabled}
               onClick={() => void (needsDevicePermission ? requestAccess() : refresh())}
             >
               <RefreshCw className="size-3.5" />
@@ -224,7 +228,7 @@ export function RecorderPanel({
             id="rec-device"
             className="mt-1.5"
             value={deviceId}
-            disabled={recorder.live || disabled}
+            disabled={(recorder.live && !canSwitchWhilePaused) || disabled}
             onChange={(e) => setDeviceId(e.target.value)}
           >
             <option value="">System default</option>
@@ -240,6 +244,14 @@ export function RecorderPanel({
                 </option>
               ))}
           </Select>
+          {/* Pausing a mic recording releases the device entirely (see
+              useRecorder), which is what makes it safe to offer a different
+              one here -- Resume opens whichever is selected at that point. */}
+          {canSwitchWhilePaused && (
+            <p className="mt-1 text-xs text-fg-subtle">
+              Pick a different input, then Resume.
+            </p>
+          )}
           {requestError && (
             <p role="alert" className="mt-1 text-xs text-danger-ink">
               {requestError}
@@ -285,7 +297,12 @@ export function RecorderPanel({
                 Pause
               </Button>
             ) : (
-              <Button type="button" variant="secondary" onClick={recorder.resume}>
+              <Button
+                type="button"
+                variant="secondary"
+                loading={recorder.resuming}
+                onClick={() => recorder.resume({ deviceId: deviceId || undefined })}
+              >
                 <Play />
                 Resume
               </Button>

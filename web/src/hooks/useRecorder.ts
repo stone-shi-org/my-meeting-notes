@@ -59,6 +59,20 @@ const TIMESLICE_MS = 1000;
  * unsupported outside Chromium and Safari 16.4+, and a lock is silently
  * dropped by the browser the moment the document goes hidden -- so it is
  * re-requested on `visibilitychange` rather than assumed to still hold.
+ *
+ * **Pausing a plain mic recording ends its MediaRecorder rather than
+ * suspending it.** That is what releases the device: `.pause()` alone would
+ * leave the old track open, and there would be nothing to switch to on
+ * resume. Each pause/resume cycle is its own segment (own getUserMedia, own
+ * AudioContext tap, own MediaRecorder), and the file at Stop is every
+ * segment's blob concatenated. Verified against this app's own
+ * `convert_to_wav16k_mono` -- ffmpeg decodes straight through the boundary
+ * between two independently-finalized "live" WebM/Opus blobs (the exact
+ * shape `MediaRecorder` produces) with only a ~6ms artifact per splice from
+ * Opus's per-stream pre-skip, not the truncation a naive read might expect.
+ * Tab/system capture is exempt: there is no device to switch mid-share, and
+ * re-requesting `getDisplayMedia` on resume would force a fresh, disruptive
+ * share prompt for no reason, so it keeps the old suspend/resume behaviour.
  */
 export function useRecorder() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -66,6 +80,8 @@ export function useRecorder() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [level, setLevel] = useState(0);
   const [clip, setClip] = useState<Clip | null>(null);
+
+  const [resuming, setResuming] = useState(false);
 
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<BlobPart[]>([]);
@@ -82,6 +98,16 @@ export function useRecorder() {
   // Mirrors clip.url so unmount can revoke it without the effect closing over
   // a stale clip.
   const clipUrl = useRef<string | null>(null);
+  // A plain mic recording is split into one MediaRecorder per pause/resume
+  // cycle rather than one continuous one, which is what makes it possible to
+  // resume on a different device -- see openMicSegment below. Each finished
+  // segment lands here; the file at Stop is all of them back to back.
+  const segments = useRef<Blob[]>([]);
+  const mimeTypeRef = useRef('');
+  // Set by stop() right before ending the current segment, so that segment's
+  // onstop knows whether it just ended a pause (keep going) or the recording
+  // itself (build the file). pause() never touches this.
+  const isFinalStop = useRef(false);
   const wakeLock = useRef<WakeLockSentinel | null>(null);
   // Whether a recording session wants the lock held, independent of whether
   // one is currently acquired -- the lock itself is dropped every time the
@@ -169,6 +195,73 @@ export function useRecorder() {
     raf.current = requestAnimationFrame(meter);
   }, []);
 
+  /** Build the final File from every segment recorded so far, and tear down. */
+  const finalizeRecording = useCallback(() => {
+    const blob = new Blob(segments.current, { type: mimeTypeRef.current });
+    const at = new Date();
+    const durationSec =
+      (accumulated.current + (startedAt.current ? Date.now() - startedAt.current : 0)) / 1000;
+    const file = new File(
+      [blob],
+      recordingFilename(startedWith.current, mimeTypeRef.current, at),
+      { type: mimeTypeRef.current, lastModified: at.getTime() },
+    );
+    const url = URL.createObjectURL(blob);
+    clipUrl.current = url;
+    setClip((previous) => {
+      if (previous) URL.revokeObjectURL(previous.url);
+      return { file, durationSec, url };
+    });
+    setPhase('done');
+    teardown();
+  }, [teardown]);
+
+  /**
+   * Open one microphone segment: a fresh getUserMedia + MediaRecorder pair,
+   * good until the next pause or the final Stop.
+   *
+   * Plain mic recording is never mixed (a single raw track, see the class
+   * doc), so unlike the tab/system path below there is no AudioContext
+   * destination to route through and no reason to keep one alive across a
+   * pause -- each segment gets its own, torn down the moment it stops. That
+   * is what lets `pause()` release the device entirely rather than merely
+   * suspending the encoder, which is what makes resuming on a *different*
+   * device possible: there is nothing left holding the old one open.
+   */
+  const openMicSegment = useCallback(
+    async (deviceId?: string) => {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: audioConstraints('mic', deviceId),
+      });
+
+      const ctx = new AudioContext();
+      await ctx.resume();
+      const node = ctx.createAnalyser();
+      node.fftSize = 1024;
+      ctx.createMediaStreamSource(stream).connect(node);
+
+      const segmentChunks: BlobPart[] = [];
+      const media = new MediaRecorder(stream, { mimeType: mimeTypeRef.current });
+      media.ondataavailable = (event) => {
+        if (event.data.size > 0) segmentChunks.push(event.data);
+      };
+      media.onstop = () => {
+        segments.current.push(new Blob(segmentChunks, { type: mimeTypeRef.current }));
+        for (const track of stream.getTracks()) track.stop();
+        node.disconnect();
+        void ctx.close().catch(() => {});
+        if (isFinalStop.current) finalizeRecording();
+      };
+
+      streams.current = [stream];
+      audioCtx.current = ctx;
+      analyser.current = node;
+      recorder.current = media;
+      media.start(TIMESLICE_MS);
+    },
+    [finalizeRecording],
+  );
+
   const start = useCallback(
     async ({ source, deviceId, withMic }: StartOptions) => {
       setError(null);
@@ -193,47 +286,65 @@ export function useRecorder() {
         return;
       }
 
+      if (source === 'mic') {
+        segments.current = [];
+        isFinalStop.current = false;
+        accumulated.current = 0;
+        startedWith.current = 'mic';
+        mimeTypeRef.current = mimeType;
+        startedAt.current = Date.now();
+        try {
+          await openMicSegment(deviceId);
+        } catch (err) {
+          setPhase('idle');
+          setError(explain(err));
+          return;
+        }
+        setElapsedMs(0);
+        setPhase('recording');
+        ticker.current = setInterval(
+          () => setElapsedMs(accumulated.current + (Date.now() - startedAt.current)),
+          200,
+        );
+        raf.current = requestAnimationFrame(meter);
+        wantsWakeLock.current = true;
+        void acquireWakeLock();
+        return;
+      }
+
       const captured: MediaStream[] = [];
       try {
-        if (source === 'mic') {
+        const display = await navigator.mediaDevices.getDisplayMedia({
+          // Audio-only display capture is not a thing: Chrome rejects a
+          // request with no video, so we ask for the cheapest video we can.
+          video: {
+            displaySurface: source === 'tab' ? 'browser' : 'monitor',
+            frameRate: 1,
+          },
+          audio: audioConstraints(source),
+          // Hints, not guarantees; the user can still pick anything.
+          ...({
+            systemAudio: source === 'system' ? 'include' : 'exclude',
+            selfBrowserSurface: 'exclude',
+            surfaceSwitching: 'include',
+          } as object),
+        });
+        captured.push(display);
+
+        if (display.getAudioTracks().length === 0) {
+          throw new Error(
+            source === 'tab'
+              ? 'That share has no audio. Pick a tab and tick “Also share tab audio”.'
+              : 'That share has no audio. Choose “Entire screen” and tick “Also share system audio”.',
+          );
+        }
+
+        if (withMic) {
           captured.push(
             await navigator.mediaDevices.getUserMedia({
               audio: audioConstraints('mic', deviceId),
             }),
           );
-        } else {
-          const display = await navigator.mediaDevices.getDisplayMedia({
-            // Audio-only display capture is not a thing: Chrome rejects a
-            // request with no video, so we ask for the cheapest video we can.
-            video: {
-              displaySurface: source === 'tab' ? 'browser' : 'monitor',
-              frameRate: 1,
-            },
-            audio: audioConstraints(source),
-            // Hints, not guarantees; the user can still pick anything.
-            ...({
-              systemAudio: source === 'system' ? 'include' : 'exclude',
-              selfBrowserSurface: 'exclude',
-              surfaceSwitching: 'include',
-            } as object),
-          });
-          captured.push(display);
-
-          if (display.getAudioTracks().length === 0) {
-            throw new Error(
-              source === 'tab'
-                ? 'That share has no audio. Pick a tab and tick “Also share tab audio”.'
-                : 'That share has no audio. Choose “Entire screen” and tick “Also share system audio”.',
-            );
-          }
-
-          if (withMic) {
-            captured.push(
-              await navigator.mediaDevices.getUserMedia({
-                audio: audioConstraints('mic', deviceId),
-              }),
-            );
-          }
         }
 
         const tracks = captured.flatMap((stream) => stream.getAudioTracks());
@@ -319,39 +430,91 @@ export function useRecorder() {
         setError(explain(err));
       }
     },
-    [meter, teardown, acquireWakeLock],
+    [meter, teardown, acquireWakeLock, openMicSegment],
   );
 
   const pause = useCallback(() => {
     if (recorder.current?.state !== 'recording') return;
-    recorder.current.pause();
     accumulated.current += Date.now() - startedAt.current;
     startedAt.current = 0;
     if (ticker.current !== null) clearInterval(ticker.current);
     ticker.current = null;
+
+    if (startedWith.current === 'mic') {
+      // Release the microphone entirely rather than just suspending the
+      // encoder: freeing the device is what makes resuming on a *different*
+      // one possible. The finished segment is stitched back together with
+      // whatever comes next at the final Stop.
+      if (raf.current !== null) cancelAnimationFrame(raf.current);
+      raf.current = null;
+      setLevel(0);
+      recorder.current.stop();
+      recorder.current = null;
+    } else {
+      recorder.current.pause();
+    }
+
     setElapsedMs(accumulated.current);
     setPhase('paused');
   }, []);
 
-  const resume = useCallback(() => {
-    if (recorder.current?.state !== 'paused') return;
-    recorder.current.resume();
-    startedAt.current = Date.now();
-    ticker.current = setInterval(
-      () => setElapsedMs(accumulated.current + (Date.now() - startedAt.current)),
-      200,
-    );
-    setPhase('recording');
-  }, []);
+  const resume = useCallback(
+    (options: { deviceId?: string } = {}) => {
+      if (phase !== 'paused') return;
+
+      if (startedWith.current !== 'mic') {
+        if (recorder.current?.state !== 'paused') return;
+        recorder.current.resume();
+        startedAt.current = Date.now();
+        ticker.current = setInterval(
+          () => setElapsedMs(accumulated.current + (Date.now() - startedAt.current)),
+          200,
+        );
+        setPhase('recording');
+        return;
+      }
+
+      setError(null);
+      setResuming(true);
+      void (async () => {
+        try {
+          await openMicSegment(options.deviceId);
+          startedAt.current = Date.now();
+          ticker.current = setInterval(
+            () => setElapsedMs(accumulated.current + (Date.now() - startedAt.current)),
+            200,
+          );
+          raf.current = requestAnimationFrame(meter);
+          setPhase('recording');
+        } catch (err) {
+          // Nothing was torn down -- the mic from before pause is already
+          // gone, but the segments recorded so far are intact and Stop still
+          // works. Stay paused so a different device can be tried.
+          setError(explain(err));
+        } finally {
+          setResuming(false);
+        }
+      })();
+    },
+    [phase, openMicSegment, meter],
+  );
 
   const stop = useCallback(() => {
-    if (!recorder.current || recorder.current.state === 'inactive') return;
-    // onstop finishes the job: it needs the last ondataavailable first.
-    recorder.current.stop();
-  }, []);
+    if (recorder.current && recorder.current.state !== 'inactive') {
+      // onstop finishes the job: it needs the last ondataavailable first.
+      isFinalStop.current = true;
+      recorder.current.stop();
+      return;
+    }
+    // Paused with the microphone already released (see pause() above): there
+    // is no live recorder to stop, so build the file directly from whatever
+    // segments already exist.
+    if (segments.current.length > 0) finalizeRecording();
+  }, [finalizeRecording]);
 
   const discard = useCallback(() => {
     clipUrl.current = null;
+    segments.current = [];
     setClip((previous) => {
       if (previous) URL.revokeObjectURL(previous.url);
       return null;
@@ -371,6 +534,7 @@ export function useRecorder() {
     start,
     pause,
     resume,
+    resuming,
     stop,
     discard,
     busy: phase === 'starting',

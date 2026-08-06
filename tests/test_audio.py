@@ -182,3 +182,28 @@ class TestRealFfmpeg:
         junk.write_bytes(b"this is definitely not audio")
         with pytest.raises(AudioError):
             audio_svc.probe(junk)
+
+    def test_concatenated_live_webm_segments_are_not_truncated(self, tmp_path):
+        """Pausing and resuming a plain mic recording (web/src/hooks/useRecorder.ts)
+        ends its MediaRecorder rather than suspending it, so the file at Stop is
+        several independently-finalized WebM/Opus blobs concatenated -- exactly
+        the container shape browser_recording.webm was built to reproduce. This
+        guards the failure that would silently break that feature: ffmpeg
+        reading only the first segment and dropping the rest.
+        """
+        single = FIXTURES / "browser_recording.webm"
+        concatenated = tmp_path / "concatenated.webm"
+        concatenated.write_bytes(single.read_bytes() * 2)
+
+        single_out = tmp_path / "single.wav"
+        audio_svc.convert_to_wav16k_mono(single, single_out)
+        single_duration = audio_svc.probe(single_out).duration_sec
+
+        combined_out = tmp_path / "combined.wav"
+        audio_svc.convert_to_wav16k_mono(concatenated, combined_out)
+        combined_duration = audio_svc.probe(combined_out).duration_sec
+
+        # Not exactly double: each independently-finalized segment carries its
+        # own un-trimmed Opus pre-skip, adding a few milliseconds per splice.
+        # Truncation to ~single_duration is the regression this guards against.
+        assert combined_duration > single_duration * 1.9
