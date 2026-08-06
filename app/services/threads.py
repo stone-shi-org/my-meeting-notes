@@ -401,3 +401,58 @@ def row_to_meeting(row: sqlite3.Row) -> dict:
         "open_action_items": row["open_action_items"] if "open_action_items" in keys else 0,
         "speaker_count": row["speaker_count"] if "speaker_count" in keys else 0,
     }
+
+
+# Tables scoped to one meeting that also carry their own thread_id, kept in
+# lockstep with the meeting's by every attach path (see matching.attach_event /
+# attach_email). Moving the meeting alone would strand them -- still on the old
+# thread, naming a meeting that no longer lives there -- so a meeting move
+# cascades to all four. ``jobs`` and ``match_runs`` matter even though nothing
+# reads their thread_id today: both have ``thread_id ... ON DELETE CASCADE``,
+# so leaving it stale means deleting the *old* thread later silently deletes a
+# still-live meeting's job history and match runs out from under it.
+_MEETING_SCOPED_UNIQUE_TABLES = {
+    "calendar-events": "thread_calendar_events",
+    "emails": "thread_emails",
+}
+_MEETING_SCOPED_TABLES = ("thread_notes", "match_runs", "jobs")
+
+
+def move_meeting(
+    conn: sqlite3.Connection, *, meeting_id: int, thread_id: int, target_thread_id: int
+) -> sqlite3.Row:
+    """Move a meeting -- and everything scoped to it -- to another thread.
+
+    Same conflict rule as :func:`move_item`: a uid/message_id collision with
+    something already attached to the destination thread raises rather than
+    merging silently, which rolls the whole move back (the caller's
+    connection commits or rolls back the request as one unit, so a conflict
+    partway through a cascade never leaves the meeting moved but an
+    attachment stranded behind).
+    """
+    cur = conn.execute(
+        "UPDATE meetings SET thread_id = ?, updated_at = ? WHERE id = ? AND thread_id = ?",
+        (target_thread_id, utcnow(), meeting_id, thread_id),
+    )
+    if cur.rowcount == 0:
+        raise NotFoundError("Meeting not found on this thread")
+
+    for kind, table in _MEETING_SCOPED_UNIQUE_TABLES.items():
+        try:
+            conn.execute(
+                f"UPDATE {table} SET thread_id = ? WHERE meeting_id = ?",
+                (target_thread_id, meeting_id),
+            )
+        except sqlite3.IntegrityError:
+            noun = "event" if kind == "calendar-events" else "email"
+            raise ConflictError(
+                f"An attached {noun} on this meeting already exists on the destination thread"
+            ) from None
+
+    for table in _MEETING_SCOPED_TABLES:
+        conn.execute(
+            f"UPDATE {table} SET thread_id = ? WHERE meeting_id = ?",
+            (target_thread_id, meeting_id),
+        )
+
+    return require_meeting(conn, meeting_id)

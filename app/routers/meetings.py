@@ -25,6 +25,7 @@ from app.schemas import (
     MeetingCreateRequest,
     MeetingOut,
     MeetingUpdateRequest,
+    MoveItemRequest,
     Page,
 )
 from app.services import audio as audio_svc
@@ -391,6 +392,30 @@ def update_meeting(
         threads_svc.touch_thread(conn, row["thread_id"])
 
     return MeetingOut(**threads_svc.row_to_meeting(threads_svc.require_meeting(conn, meeting_id)))
+
+
+@router.post("/{meeting_id}/move", response_model=MeetingOut)
+def move_meeting(
+    meeting_id: int,
+    payload: MoveItemRequest,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> MeetingOut:
+    row = threads_svc.get_meeting(conn, meeting_id)
+    assert_can_access(row, user)
+    assert_can_access(threads_svc.get_thread(conn, payload.target_thread_id), user)
+
+    moved = threads_svc.move_meeting(
+        conn,
+        meeting_id=meeting_id,
+        thread_id=row["thread_id"],
+        target_thread_id=payload.target_thread_id,
+    )
+    # Only the destination counts as activity, same call as a single
+    # attachment's move: losing something isn't what the sort order means to
+    # surface, gaining one is.
+    threads_svc.touch_thread(conn, payload.target_thread_id)
+    return MeetingOut(**threads_svc.row_to_meeting(moved))
 
 
 @router.delete("/{meeting_id}")

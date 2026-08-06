@@ -81,6 +81,21 @@ function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId
   // Created from a calendar event, or by hand, and still waiting for its audio.
   const awaitingAudio = !meeting.has_audio && meeting.status !== 'processing';
 
+  // Moving a meeting cascades to its attached emails, events and notes on the
+  // backend, so the invalidation here is the same shape as any other move --
+  // both threads' timelines and counts, plus the list for the home screen.
+  const move = useMutation({
+    mutationFn: (targetThreadId: number) =>
+      api.post(`/meetings/${meeting.id}/move`, { target_thread_id: targetThreadId }),
+    onSuccess: (_data, targetThreadId) => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(targetThreadId)] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', String(targetThreadId)] });
+      void queryClient.invalidateQueries({ queryKey: ['threads'] });
+    },
+  });
+
   return (
     <Card interactive className="group relative p-4">
       {/* Stretched link: one anchor covering the card, so the delete button can
@@ -107,6 +122,13 @@ function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId
                 {fmtClock(meeting.audio_duration_sec)}
               </span>
             )}
+            <MoveToThread
+              currentThreadId={threadId}
+              pending={move.isPending}
+              label="Move this meeting to another thread"
+              className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+              onMove={(targetThreadId) => move.mutate(targetThreadId)}
+            />
             <DeleteMeetingButton
               meeting={meeting}
               variant="icon"
@@ -129,6 +151,11 @@ function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId
             <span className="inline-flex items-center gap-1">
               <CheckSquare className="size-3.5" aria-hidden />
               {meeting.open_action_items} open
+            </span>
+          )}
+          {move.error && (
+            <span className="pointer-events-auto text-danger-ink">
+              {(move.error as Error).message}
             </span>
           )}
           {/* The recording is what this meeting is missing, so that is what the

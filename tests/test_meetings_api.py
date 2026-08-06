@@ -172,3 +172,125 @@ def test_admin_can_see_all_meetings_with_the_flag(admin_client, user_client, thr
 
     assert admin_client.get("/api/meetings").json()["total"] == 0
     assert admin_client.get("/api/meetings", params={"all": True}).json()["total"] == 1
+
+
+# --------------------------------------------------------------------------- #
+# Moving to another thread -- cascades to everything scoped to the meeting
+# --------------------------------------------------------------------------- #
+
+
+def _attach_email(db_path, thread_id: int, meeting_id: int, message_id: str = "<m1>") -> int:
+    from app.db import get_conn, utcnow
+
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO thread_emails (thread_id, meeting_id, message_id, subject, date, "
+            "raw_json, attached_at) VALUES (?, ?, ?, 'Hi', ?, '{}', ?)",
+            (thread_id, meeting_id, message_id, "2026-03-17T00:00:00+00:00", utcnow()),
+        )
+        return cur.lastrowid
+
+
+def _attach_event(db_path, thread_id: int, meeting_id: int, uid: str = "evt-1") -> int:
+    from app.db import get_conn, utcnow
+
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            "INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, summary, "
+            "start_at, raw_json, attached_at) VALUES (?, ?, ?, 'Standup', ?, '{}', ?)",
+            (thread_id, meeting_id, uid, "2026-03-18T09:00:00+00:00", utcnow()),
+        )
+        return cur.lastrowid
+
+
+def test_moving_a_meeting_updates_counts_on_both_threads(user_client, thread):
+    other = user_client.post("/api/threads", json={"title": "Other"}).json()
+    m = user_client.post(
+        "/api/meetings", json={"thread_id": thread["id"], "title": "Relocating"}
+    ).json()
+
+    resp = user_client.post(f"/api/meetings/{m['id']}/move", json={"target_thread_id": other["id"]})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["thread_id"] == other["id"]
+
+    assert user_client.get(f"/api/threads/{thread['id']}").json()["meeting_count"] == 0
+    assert user_client.get(f"/api/threads/{other['id']}").json()["meeting_count"] == 1
+    assert [x["title"] for x in user_client.get(f"/api/threads/{other['id']}/meetings").json()["items"]] == [
+        "Relocating"
+    ]
+
+
+def test_moving_a_meeting_cascades_its_attachments(user_client, thread, isolated_settings):
+    other = user_client.post("/api/threads", json={"title": "Other"}).json()
+    m = user_client.post(
+        "/api/meetings", json={"thread_id": thread["id"], "title": "Relocating"}
+    ).json()
+    email_id = _attach_email(isolated_settings.db_path, thread["id"], m["id"])
+    event_id = _attach_event(isolated_settings.db_path, thread["id"], m["id"])
+    note = user_client.post(
+        f"/api/meetings/{m['id']}/notes", json={"body": "notes", "title": "T"}
+    ).json()
+
+    assert user_client.post(
+        f"/api/meetings/{m['id']}/move", json={"target_thread_id": other["id"]}
+    ).status_code == 200
+
+    # Gone from the old thread's attachments...
+    assert user_client.get(f"/api/threads/{thread['id']}/emails").json() == []
+    assert user_client.get(f"/api/threads/{thread['id']}/calendar-events").json() == []
+    assert user_client.get(f"/api/threads/{thread['id']}/notes").json() == []
+
+    # ...and present on the new one, still tied to the same meeting.
+    emails = user_client.get(f"/api/threads/{other['id']}/emails").json()
+    assert [e["id"] for e in emails] == [email_id]
+    assert emails[0]["meeting_id"] == m["id"]
+
+    events = user_client.get(f"/api/threads/{other['id']}/calendar-events").json()
+    assert [e["id"] for e in events] == [event_id]
+    assert events[0]["meeting_id"] == m["id"]
+
+    notes = user_client.get(f"/api/threads/{other['id']}/notes").json()
+    assert [n["id"] for n in notes] == [note["id"]]
+    assert notes[0]["meeting_id"] == m["id"]
+
+
+def test_moving_a_meeting_is_a_conflict_if_an_attached_event_collides(
+    user_client, thread, isolated_settings
+):
+    other = user_client.post("/api/threads", json={"title": "Other"}).json()
+    m = user_client.post(
+        "/api/meetings", json={"thread_id": thread["id"], "title": "Relocating"}
+    ).json()
+    _attach_event(isolated_settings.db_path, thread["id"], m["id"], uid="evt-1")
+    # Something unrelated already sits on the destination thread under the same uid.
+    _attach_event(isolated_settings.db_path, other["id"], meeting_id=None, uid="evt-1")
+
+    resp = user_client.post(f"/api/meetings/{m['id']}/move", json={"target_thread_id": other["id"]})
+    assert resp.status_code == 409, resp.text
+
+    # Rolled back entirely: the meeting never moved.
+    assert user_client.get(f"/api/meetings/{m['id']}").json()["thread_id"] == thread["id"]
+    assert len(user_client.get(f"/api/threads/{thread['id']}/calendar-events").json()) == 1
+
+
+def test_moving_someone_elses_meeting_is_404(user_client, other_user_client, thread):
+    m = user_client.post(
+        "/api/meetings", json={"thread_id": thread["id"], "title": "Private"}
+    ).json()
+    resp = other_user_client.post(
+        f"/api/meetings/{m['id']}/move", json={"target_thread_id": thread["id"]}
+    )
+    assert resp.status_code == 404
+
+
+def test_moving_into_someone_elses_thread_is_404(user_client, other_user_client, thread):
+    m = user_client.post(
+        "/api/meetings", json={"thread_id": thread["id"], "title": "Mine"}
+    ).json()
+    other_thread = other_user_client.post("/api/threads", json={"title": "Not yours"}).json()
+
+    resp = user_client.post(
+        f"/api/meetings/{m['id']}/move", json={"target_thread_id": other_thread["id"]}
+    )
+    assert resp.status_code == 404
+    assert user_client.get(f"/api/meetings/{m['id']}").json()["thread_id"] == thread["id"]
