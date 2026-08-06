@@ -49,6 +49,16 @@ const TIMESLICE_MS = 1000;
  * but stopping the video track ends the share, and Chrome then ends the audio
  * with it. The frames are pulled and dropped; the browser's own "sharing"
  * indicator staying up is honest, since it is.
+ *
+ * **The screen wake lock is best-effort, not load-bearing.** It stops the
+ * *screen* from dimming or locking mid-recording -- the actual failure mode
+ * this exists for is a laptop lid staying open but the display sleeping, which
+ * on some OS/browser combinations is enough to throttle a background tab hard
+ * enough to starve MediaRecorder. It cannot promise anything once the tab is
+ * genuinely backgrounded or the OS suspends the device outright, it is
+ * unsupported outside Chromium and Safari 16.4+, and a lock is silently
+ * dropped by the browser the moment the document goes hidden -- so it is
+ * re-requested on `visibilitychange` rather than assumed to still hold.
  */
 export function useRecorder() {
   const [phase, setPhase] = useState<Phase>('idle');
@@ -72,12 +82,48 @@ export function useRecorder() {
   // Mirrors clip.url so unmount can revoke it without the effect closing over
   // a stale clip.
   const clipUrl = useRef<string | null>(null);
+  const wakeLock = useRef<WakeLockSentinel | null>(null);
+  // Whether a recording session wants the lock held, independent of whether
+  // one is currently acquired -- the lock itself is dropped every time the
+  // tab is hidden, but the session isn't over just because the tab was.
+  const wantsWakeLock = useRef(false);
+
+  const acquireWakeLock = useCallback(async () => {
+    if (!('wakeLock' in navigator) || wakeLock.current) return;
+    try {
+      wakeLock.current = await navigator.wakeLock.request('screen');
+    } catch {
+      // Battery saver, an already-hidden tab, or no support -- recording
+      // works either way, it just cannot promise the screen stays on.
+      wakeLock.current = null;
+    }
+  }, []);
+
+  const releaseWakeLock = useCallback(() => {
+    wantsWakeLock.current = false;
+    const sentinel = wakeLock.current;
+    wakeLock.current = null;
+    void sentinel?.release().catch(() => {});
+  }, []);
+
+  // Re-request on return to the tab: the browser silently releases the lock
+  // the moment the document goes hidden, and does not restore it on its own.
+  useEffect(() => {
+    function onVisible() {
+      if (document.visibilityState === 'visible' && wantsWakeLock.current) {
+        void acquireWakeLock();
+      }
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+  }, [acquireWakeLock]);
 
   const teardown = useCallback(() => {
     if (raf.current !== null) cancelAnimationFrame(raf.current);
     raf.current = null;
     if (ticker.current !== null) clearInterval(ticker.current);
     ticker.current = null;
+    releaseWakeLock();
 
     for (const stream of streams.current) {
       for (const track of stream.getTracks()) track.stop();
@@ -90,7 +136,7 @@ export function useRecorder() {
     audioCtx.current = null;
     recorder.current = null;
     setLevel(0);
-  }, []);
+  }, [releaseWakeLock]);
 
   // A recording in flight when the page unmounts must release the microphone
   // and drop the browser's sharing indicator; a finished one must not leave its
@@ -263,6 +309,8 @@ export function useRecorder() {
           200,
         );
         raf.current = requestAnimationFrame(meter);
+        wantsWakeLock.current = true;
+        void acquireWakeLock();
       } catch (err) {
         for (const stream of captured) {
           for (const track of stream.getTracks()) track.stop();
@@ -271,7 +319,7 @@ export function useRecorder() {
         setError(explain(err));
       }
     },
-    [meter, teardown],
+    [meter, teardown, acquireWakeLock],
   );
 
   const pause = useCallback(() => {
