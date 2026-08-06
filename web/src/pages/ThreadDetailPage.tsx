@@ -12,6 +12,7 @@ import {
   MapPin,
   Mic,
   NotebookPen,
+  Pencil,
   Plus,
   RefreshCw,
   Sparkles,
@@ -24,7 +25,7 @@ import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
 import { NoteCard, NoteComposer } from '@/components/notes/NoteCard';
 import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
 import { Button } from '@/components/ui/Button';
-import { Badge, Card, Skeleton } from '@/components/ui/primitives';
+import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
 import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
@@ -349,6 +350,84 @@ function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string
   );
 }
 
+/**
+ * Click-to-edit thread title, same interaction as a thread group's rename
+ * (ThreadGroups.tsx): a pencil button swaps the heading for an input, Enter or
+ * blur commits, Escape reverts. An empty or unchanged draft is a no-op rather
+ * than a write -- there is nothing useful to save.
+ */
+export function ThreadTitle({ thread }: { thread: Thread }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(thread.title);
+
+  const rename = useMutation({
+    mutationFn: (title: string) => api.patch<Thread>(`/threads/${thread.id}`, { title }),
+    onSuccess: () => {
+      setEditing(false);
+      void queryClient.invalidateQueries({ queryKey: ['thread', String(thread.id)] });
+      void queryClient.invalidateQueries({ queryKey: ['threads'] });
+    },
+  });
+
+  function commit() {
+    const title = draft.trim();
+    if (!title || title === thread.title) {
+      setEditing(false);
+      setDraft(thread.title);
+      return;
+    }
+    rename.mutate(title);
+  }
+
+  if (editing) {
+    return (
+      <div>
+        <Input
+          className="font-display text-2xl font-semibold"
+          autoFocus
+          maxLength={300}
+          value={draft}
+          aria-label="Thread title"
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commit}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.currentTarget.blur();
+            } else if (e.key === 'Escape') {
+              setDraft(thread.title);
+              setEditing(false);
+            }
+          }}
+        />
+        {rename.error && (
+          <p role="alert" className="mt-1 text-sm text-danger-ink">
+            {(rename.error as Error).message}
+          </p>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div className="group flex items-center gap-1.5">
+      <h1 className="font-display text-2xl font-semibold">{thread.title}</h1>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label="Rename thread"
+        className="opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+        onClick={() => {
+          setDraft(thread.title);
+          setEditing(true);
+        }}
+      >
+        <Pencil className="size-3.5" />
+      </Button>
+    </div>
+  );
+}
+
 export function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
   const navigate = useNavigate();
@@ -484,7 +563,7 @@ export function ThreadDetailPage() {
           <div className="flex flex-wrap items-start justify-between gap-4">
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
-                <h1 className="font-display text-2xl font-semibold">{thread.data.title}</h1>
+                <ThreadTitle thread={thread.data} />
                 {thread.data.archived && <Badge variant="neutral">Archived</Badge>}
               </div>
               {thread.data.archived && (
