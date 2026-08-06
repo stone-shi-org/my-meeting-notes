@@ -393,6 +393,7 @@ function GroupSection({
   collapsed,
   onToggle,
   emptyState,
+  hideWhenEmpty = false,
 }: {
   group: ThreadGroup | null;
   groups: ThreadGroup[];
@@ -402,6 +403,9 @@ function GroupSection({
   /** Rendered instead of the section's own hint when this is the only section
    * and it is empty — i.e. the page has nothing on it at all. */
   emptyState?: React.ReactNode;
+  /** Drop the whole section from the page when it holds nothing. Used for
+   * Ungrouped, which is a heading over nothing once everything is filed. */
+  hideWhenEmpty?: boolean;
 }) {
   const sectionKey = group ? String(group.id) : UNGROUPED;
   const move = useMoveThread();
@@ -437,6 +441,10 @@ function GroupSection({
   // heading does not flash empty. Ungrouped has no such count, hence the null.
   const count = query.data?.total ?? group?.thread_count ?? null;
   const items = query.data?.items ?? [];
+
+  // Only once the query has actually answered: hiding on `undefined` would make
+  // every section flicker out of the page on the first render.
+  if (hideWhenEmpty && query.data?.total === 0) return null;
 
   return (
     <section
@@ -492,7 +500,9 @@ function GroupSection({
                 <p className="px-2 py-6 text-center text-sm text-fg-subtle">
                   {filters.q
                     ? 'No threads here match that search.'
-                    : 'Drag a thread card here to file it in this group.'}
+                    : group
+                      ? 'Drag a thread card here to file it in this group.'
+                      : 'Drop a thread card here to take it out of its group.'}
                 </p>
               )}
             </>
@@ -600,9 +610,11 @@ export function NewGroupButton() {
  * The home screen's thread list, laid out as one section per group with
  * Ungrouped last.
  *
- * `emptyState` is only used when no group has ever been created: with groups on
- * screen, an empty Ungrouped section is a normal state that wants a one-line
- * hint, not a full-page "no threads yet" panel.
+ * Ungrouped hides itself once it is empty -- it is a heading over nothing when
+ * everything has been filed. It comes back for the duration of a drag, because
+ * otherwise dragging the last thread *out* of a group would have nowhere to
+ * land, and it stays put when no group exists at all, since that is the whole
+ * page and `emptyState` belongs in it.
  */
 export function GroupedThreadList({
   filters,
@@ -616,6 +628,9 @@ export function GroupedThreadList({
     queryFn: () => api.get<ThreadGroup[]>('/thread-groups'),
   });
   const { collapsed, toggle } = useCollapsed();
+  // A card is mid-drag. dragstart/dragend both bubble, so one pair of handlers
+  // on the container sees every card without threading callbacks through.
+  const [dragging, setDragging] = useState(false);
 
   if (groups.isError) {
     return <ErrorState error={groups.error} onRetry={() => groups.refetch()} />;
@@ -624,7 +639,14 @@ export function GroupedThreadList({
   const list = groups.data ?? [];
 
   return (
-    <div className="space-y-4">
+    <div
+      className="space-y-4"
+      onDragStart={(e) => {
+        if (e.dataTransfer.types.includes(THREAD_MIME)) setDragging(true);
+      }}
+      onDragEnd={() => setDragging(false)}
+      onDrop={() => setDragging(false)}
+    >
       {list.map((group) => (
         <GroupSection
           key={group.id}
@@ -635,8 +657,8 @@ export function GroupedThreadList({
           onToggle={() => toggle(String(group.id))}
         />
       ))}
-      {/* Ungrouped last, and always present: it is where threads start, and
-          where the threads of a deleted group reappear. */}
+      {/* Ungrouped last: it is where threads start, and where the threads of a
+          deleted group reappear. */}
       <GroupSection
         group={null}
         groups={list}
@@ -644,6 +666,7 @@ export function GroupedThreadList({
         collapsed={collapsed.has(UNGROUPED)}
         onToggle={() => toggle(UNGROUPED)}
         emptyState={list.length === 0 ? emptyState : undefined}
+        hideWhenEmpty={list.length > 0 && !dragging}
       />
     </div>
   );

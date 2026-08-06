@@ -225,7 +225,28 @@ describe('GroupedThreadList', () => {
     expect(within(heading).getByText('1')).toBeInTheDocument();
   });
 
-  it('offers the full empty state only when no group exists', async () => {
+  it('hides Ungrouped once every thread has been filed', async () => {
+    stubApi({ '1': page([thread(10, 'Atlas Migration', 1)]), none: page([]) });
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    expect(screen.queryByRole('region', { name: 'Ungrouped' })).not.toBeInTheDocument();
+  });
+
+  it('brings Ungrouped back for the duration of a drag', async () => {
+    // Otherwise dragging the last thread out of a group has nowhere to land.
+    stubApi({ '1': page([thread(10, 'Atlas Migration', 1)]), none: page([]) });
+    renderList();
+    const card = (await screen.findByText('Atlas Migration')).closest('[draggable]')!;
+
+    fireEvent.dragStart(card, threadDrag(10));
+    expect(screen.getByRole('region', { name: 'Ungrouped' })).toBeInTheDocument();
+
+    fireEvent.dragEnd(card, threadDrag(10));
+    expect(screen.queryByRole('region', { name: 'Ungrouped' })).not.toBeInTheDocument();
+  });
+
+  it('keeps an empty Ungrouped when no group exists — it is the whole page', async () => {
     vi.mocked(api.get).mockImplementation((path: string) =>
       Promise.resolve((path === '/thread-groups' ? [] : page([])) as never),
     );

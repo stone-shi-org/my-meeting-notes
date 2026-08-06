@@ -143,6 +143,13 @@ deleting them (`ON DELETE SET NULL` — which only fires because `db.connect` se
 `PRAGMA foreign_keys=ON`; SQLite has them off by default). The section is rendered like any other but
 cannot be renamed or removed.
 
+**Ungrouped hides itself when empty, and comes back for the length of a drag.** A heading over
+nothing is noise once everything is filed — but it is also the only drop target for taking a thread
+*out* of a group, so hiding it unconditionally would make that last drag impossible. `dragstart` and
+`dragend` both bubble, so one pair of handlers on the list container tracks "a card is moving"
+without threading callbacks through every card. It stays put when no group exists at all: that case
+is the whole page, and the "no threads yet" panel lives in it.
+
 **`group_id` is a `LATE_COLUMN`, so its index cannot live in `SCHEMA`.** `SCHEMA` runs first, so
 naming the column there fails on the one boot that adds it. That is what `LATE_INDEXES` is for.
 
