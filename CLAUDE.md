@@ -173,6 +173,13 @@ the data.
 **The `<select>` on every card is not a redundant control.** HTML5 drag and drop emits nothing a
 keyboard can trigger, so without it the whole feature is mouse-only.
 
+**A group's colour comes from its id, not its list position.** `lib/groupColors.ts`, the same rule
+and the same reason as `speakerColors.ts`: sections are ordered by name, so deriving the hue from
+position would repaint half the page every time a group is renamed or deleted. `--group-0..7` are
+`var()` aliases of the speaker slots rather than a second palette — the two never share a screen, and
+one set of eight is one thing to keep contrast-checked. Ungrouped keeps `--entity-meeting`: unfiled
+is the absence of a group colour, not a ninth one.
+
 **The collapsed set is stored whole**, so it has exactly one owner in `GroupedThreadList`. Two
 sections each holding their own copy would have the second one's write erase the first's.
 

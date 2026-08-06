@@ -28,6 +28,7 @@ import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
 import { ErrorState, Pagination } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { groupRailColor } from '@/lib/groupColors';
 import { fmtRelative } from '@/lib/time';
 import type { Paginated, Thread, ThreadGroup } from '@/types/api';
 
@@ -195,8 +196,14 @@ function ThreadCard({
       }}
       onDragEnd={() => setDragging(false)}
     >
-      {/* 3px identity rail: the app's own objects are indigo. */}
-      <span className="absolute inset-y-0 left-0 w-[3px] bg-entity-meeting" aria-hidden />
+      {/* 3px identity rail, in the colour of the group the card is filed under.
+          Decoration only -- the section heading above it says the same thing in
+          words. Ungrouped keeps the app's default indigo. */}
+      <span
+        className="absolute inset-y-0 left-0 w-[3px]"
+        style={{ background: groupRailColor(thread.group_id) }}
+        aria-hidden
+      />
       <Link to={`/threads/${thread.id}`} className="block p-5 pb-3 pl-6">
         <div className="flex items-start justify-between gap-3">
           <h3 className="font-display text-lg font-semibold leading-snug">
@@ -346,6 +353,13 @@ function GroupHeading({
             'size-4 shrink-0 text-fg-faint transition-transform duration-fast',
             collapsed && '-rotate-90',
           )}
+          aria-hidden
+        />
+        {/* The same colour as the rail on this section's cards, so the two read
+            as one system rather than as decoration that happens to differ. */}
+        <span
+          className="size-2 shrink-0 rounded-full"
+          style={{ background: groupRailColor(group?.id ?? null) }}
           aria-hidden
         />
         <span className="font-display font-semibold">{group?.name ?? 'Ungrouped'}</span>

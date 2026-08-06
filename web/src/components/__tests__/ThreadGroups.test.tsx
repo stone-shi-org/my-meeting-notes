@@ -225,6 +225,19 @@ describe('GroupedThreadList', () => {
     expect(within(heading).getByText('1')).toBeInTheDocument();
   });
 
+  it('paints each card rail in its own group colour', async () => {
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    const rail = (title: string) =>
+      (screen.getByText(title).closest('[draggable]')!.querySelector('span[aria-hidden]') as
+        HTMLElement).style.background;
+
+    expect(rail('Atlas Migration')).toBe('var(--group-1)');
+    // Ungrouped is the absence of a group colour, not a ninth one.
+    expect(rail('Loose end')).toBe('var(--entity-meeting)');
+  });
+
   it('hides Ungrouped once every thread has been filed', async () => {
     stubApi({ '1': page([thread(10, 'Atlas Migration', 1)]), none: page([]) });
     renderList();

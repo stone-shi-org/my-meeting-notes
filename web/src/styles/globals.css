@@ -87,6 +87,22 @@
   --speaker-7: #e34948;
   --speaker-7-ink: #b31f1f;
 
+  /* thread group identity slots.
+   * Aliases of the speaker hues, not a second palette: the two never share a
+   * screen (speakers live on the transcript, groups on the home list), and one
+   * set of eight is one thing to keep contrast- and CVD-checked. Declared as
+   * var() so the .dark overrides above them are picked up automatically.
+   * Only ever used for the 3px rail on a card, which is decoration -- the
+   * group's name is always on the section heading over it. */
+  --group-0: var(--speaker-0);
+  --group-1: var(--speaker-1);
+  --group-2: var(--speaker-2);
+  --group-3: var(--speaker-3);
+  --group-4: var(--speaker-4);
+  --group-5: var(--speaker-5);
+  --group-6: var(--speaker-6);
+  --group-7: var(--speaker-7);
+
   --shadow-color: 220 40% 12%;
   --radius: 0.75rem;
 }
