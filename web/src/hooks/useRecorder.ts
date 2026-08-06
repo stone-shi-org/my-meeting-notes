@@ -406,6 +406,8 @@ function explain(err: unknown): string {
  */
 export function useAudioInputs(enabled: boolean) {
   const [devices, setDevices] = useState<MediaDeviceInfo[]>([]);
+  const [requesting, setRequesting] = useState(false);
+  const [requestError, setRequestError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     if (!navigator.mediaDevices?.enumerateDevices) return;
@@ -424,5 +426,33 @@ export function useAudioInputs(enabled: boolean) {
     return () => navigator.mediaDevices?.removeEventListener?.('devicechange', refresh);
   }, [enabled, refresh]);
 
-  return { devices, refresh };
+  /**
+   * Ask for the microphone purely to read real device names, not to record.
+   *
+   * `enumerateDevices` only fills in `label` once this origin's mic
+   * permission is "granted" -- until then every input comes back blank,
+   * indistinguishable except by count, which is what turns into "Input 1" in
+   * the picker. A grant is sticky per origin, so this happens at most once:
+   * the browser will not prompt again when the real recording starts.
+   */
+  const requestAccess = useCallback(async () => {
+    if (!navigator.mediaDevices?.getUserMedia) return;
+    setRequesting(true);
+    setRequestError(null);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      for (const track of stream.getTracks()) track.stop();
+      await refresh();
+    } catch (err) {
+      setRequestError(
+        err instanceof Error && err.name === 'NotAllowedError'
+          ? 'Permission refused. Allow microphone access for this site and try again.'
+          : 'Could not read device names.',
+      );
+    } finally {
+      setRequesting(false);
+    }
+  }, [refresh]);
+
+  return { devices, refresh, requestAccess, requesting, requestError };
 }

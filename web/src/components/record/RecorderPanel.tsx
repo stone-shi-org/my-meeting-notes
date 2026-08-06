@@ -74,7 +74,7 @@ export function RecorderPanel({
   const [withMic, setWithMic] = useState(true);
 
   const recorder = useRecorder();
-  const { devices, refresh } = useAudioInputs(true);
+  const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
 
   // Labels are blank until permission has been granted once, so re-read the
   // list the moment a recording succeeds -- that is when they appear.
@@ -207,8 +207,25 @@ export function RecorderPanel({
             ))}
           </Select>
           {needsDevicePermission && (
-            <p className="mt-1 text-xs text-fg-subtle">
-              Device names appear once you have allowed microphone access once.
+            <div className="mt-1.5 flex items-center gap-2">
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                loading={requesting}
+                disabled={recorder.live || disabled}
+                onClick={() => void requestAccess()}
+              >
+                Show device names
+              </Button>
+              <p className="text-xs text-fg-subtle">
+                One-time prompt to read real device names — recording still works without it.
+              </p>
+            </div>
+          )}
+          {requestError && (
+            <p role="alert" className="mt-1 text-xs text-danger-ink">
+              {requestError}
             </p>
           )}
         </div>
