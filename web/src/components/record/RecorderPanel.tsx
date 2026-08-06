@@ -255,7 +255,20 @@ export function RecorderPanel({
             variant="primary"
             loading={recorder.busy}
             disabled={!canStart}
-            onClick={() => void recorder.start({ source, deviceId: deviceId || undefined, withMic })}
+            onClick={() => {
+              // Starting over replaces recorder.clip in place -- there is no
+              // separate "keep the old one" step, so this is the only chance
+              // to back out before it's gone.
+              if (
+                recorder.clip &&
+                !window.confirm(
+                  'Recording again discards the current recording, unless you have already submitted it. Continue?',
+                )
+              ) {
+                return;
+              }
+              void recorder.start({ source, deviceId: deviceId || undefined, withMic });
+            }}
           >
             <Circle className="fill-current" />
             {recorder.clip ? 'Record again' : 'Start recording'}
