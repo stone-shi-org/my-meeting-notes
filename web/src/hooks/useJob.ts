@@ -10,6 +10,11 @@ const SILENCE_LIMIT_MS = 45_000;
 
 const TERMINAL = new Set(['succeeded', 'failed', 'cancelled']);
 
+/** A job that will not change again, so whatever it produced is now readable. */
+export function isTerminal(status: string | undefined): boolean {
+  return !!status && TERMINAL.has(status);
+}
+
 export interface JobFeed {
   job: Job | undefined;
   events: JobEvent[];

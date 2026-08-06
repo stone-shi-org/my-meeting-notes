@@ -18,7 +18,7 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { renderMarkdown } from '@/lib/markdown';
 import { initials, speakerVars } from '@/lib/speakerColors';
-import { watchJob } from '@/hooks/useJob';
+import { useGenerateSummary } from '@/hooks/useGenerateSummary';
 import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript } from '@/types/api';
 
 const TRANSCRIPT_PREF_KEY = 'mmn.showTranscript';
@@ -196,19 +196,6 @@ function ActionItemList({ meetingId, items }: { meetingId: number; items: Action
   );
 }
 
-/** Queue a summary run. Shared by the regenerate button and the empty state,
- * since "generate the first one" and "redo it" are the same request. */
-function useGenerateSummary(meetingId: number) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: () => api.post<{ job_id: string }>(`/meetings/${meetingId}/summary/regenerate`, {}),
-    onSuccess: (data) => {
-      watchJob(data.job_id);
-      void queryClient.invalidateQueries({ queryKey: ['jobs', 'active'] });
-    },
-  });
-}
-
 /**
  * Shown when a meeting has a transcript but no summary -- normally because
  * the summarize stage failed while the transcript succeeded. The ingest job
@@ -235,7 +222,7 @@ function NoSummaryPanel({ meetingId, canGenerate }: { meetingId: number; canGene
             variant="primary"
             className="mt-3"
             onClick={() => generate.mutate()}
-            loading={generate.isPending}
+            loading={generate.isPending || generate.running}
           >
             <RefreshCw />
             Generate summary
@@ -247,15 +234,22 @@ function NoSummaryPanel({ meetingId, canGenerate }: { meetingId: number; canGene
             </p>
           )}
 
-          {generate.isSuccess && (
+          {generate.running && generate.data && (
             <p className="mt-2 text-xs text-fg-muted">
-              Started.{' '}
+              Working on it — this panel will fill in on its own.{' '}
               <Link
                 to={`/jobs/${generate.data.job_id}`}
                 className="text-primary hover:underline"
               >
                 Follow progress
               </Link>
+            </p>
+          )}
+
+          {generate.failure && (
+            <p className="mt-2 text-sm text-danger-ink">
+              That run {generate.failure.status}.{' '}
+              {generate.failure.error ?? 'No summary was written.'}
             </p>
           )}
         </>
@@ -286,19 +280,29 @@ function SummaryPanel({ meetingId, summary }: { meetingId: number; summary: Summ
           variant="ghost"
           className="ml-auto"
           onClick={() => regenerate.mutate()}
-          loading={regenerate.isPending}
+          loading={regenerate.isPending || regenerate.running}
+          disabled={regenerate.running}
         >
           <RefreshCw />
           Regenerate
         </Button>
       </div>
 
-      {regenerate.isSuccess && (
+      {/* Driven by the job, not by the 202 that queued it -- otherwise this
+          notice never comes down and the summary below it never changes. */}
+      {regenerate.running && regenerate.data && (
         <p className="rounded border border-border bg-surface-2 p-2 text-xs text-fg-muted">
-          Regenerating…{' '}
+          Regenerating… the summary below will update when it finishes.{' '}
           <Link to={`/jobs/${regenerate.data.job_id}`} className="text-primary hover:underline">
             follow progress
           </Link>
+        </p>
+      )}
+
+      {regenerate.failure && (
+        <p className="rounded border border-danger/30 bg-danger-soft/40 p-2 text-xs text-danger-ink">
+          That run {regenerate.failure.status}.{' '}
+          {regenerate.failure.error ?? 'The previous summary is unchanged.'}
         </p>
       )}
 
