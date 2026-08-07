@@ -280,7 +280,10 @@ class TestEventSearch:
         assert len({e.source_uid for e in found}) == 1
 
     async def test_series_instances_outside_the_window_are_dropped(self, seeded):
-        add_event(seeded, repeat_weekly=8)
+        # Anchored on the fixed NOW, not the default relative mode -- that
+        # resolves against the real wall clock inside search_events, which
+        # drifts this test's expected count as real time passes NOW.
+        add_event(seeded, repeat_weekly=8, date_mode="absolute", at=NOW.isoformat())
         found = await provider().search_events(
             query="", start=NOW - timedelta(days=1), end=NOW + timedelta(days=15)
         )
