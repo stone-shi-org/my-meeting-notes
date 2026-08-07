@@ -332,6 +332,52 @@ async def test_recover_does_not_requeue_a_job_past_its_attempt_limit(seeded, ini
         assert c.execute("SELECT status FROM jobs WHERE id=?", (job_id,)).fetchone()[0] == "interrupted"
 
 
+async def test_recover_resumes_a_job_that_crashed_mid_run(seeded, initialised_db):
+    """`_run_job` charges `attempts` at dequeue time, before any stage runs, so
+    a real SIGKILL always leaves a fresh job at attempts=1/max_attempts=1 --
+    recover() must still treat that as its first (interrupted) attempt, not
+    as an exhausted retry budget, or a crash mid-transcription never resumes."""
+    started = asyncio.Event()
+
+    async def body(ctx):
+        ctx.stage("diarizing")
+        started.set()
+        await asyncio.sleep(60)  # the "crash" below cuts in long before this returns
+
+    queue_mod.JOB_BODIES["testcrash"] = body
+    job_id = _job(seeded, job_type="testcrash")
+    seeded.commit()
+
+    q = JobQueue(concurrency=1, db_path=initialised_db)
+    await q.start()
+    await q.enqueue(job_id)
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    # Simulate a SIGKILL: tear down the worker without going through
+    # JobQueue.stop()'s cleanup, so the row is left exactly as _run_job set it.
+    for task in q._workers:
+        task.cancel()
+    q._workers.clear()
+    if q._watchdog:
+        q._watchdog.cancel()
+        q._watchdog = None
+
+    with get_conn(initialised_db) as c:
+        row = c.execute(
+            "SELECT status, attempts, max_attempts FROM jobs WHERE id = ?", (job_id,)
+        ).fetchone()
+    assert (row["status"], row["attempts"], row["max_attempts"]) == ("running", 1, 1)
+
+    q2 = JobQueue(concurrency=0, db_path=initialised_db)
+    stats = await q2.recover()
+    assert stats == {"interrupted": 1, "requeued": 1}
+
+    with get_conn(initialised_db) as c:
+        row = c.execute("SELECT status FROM jobs WHERE id = ?", (job_id,)).fetchone()
+    assert row["status"] == "queued"
+    del queue_mod.JOB_BODIES["testcrash"]
+
+
 async def test_recover_leaves_finished_jobs_alone(seeded, initialised_db):
     job_id = _job(seeded)
     seeded.execute("UPDATE jobs SET status = 'succeeded' WHERE id = ?", (job_id,))
@@ -354,3 +400,34 @@ async def test_resume_can_be_disabled(seeded, initialised_db, monkeypatch):
     q = JobQueue(concurrency=0, db_path=initialised_db)
     stats = await q.recover()
     assert stats["requeued"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# Ingest failure and the meeting record
+# --------------------------------------------------------------------------- #
+
+
+async def test_a_terminally_failed_ingest_does_not_leave_the_meeting_processing(
+    seeded, initialised_db, monkeypatch
+):
+    """meetings.status is set to 'processing' at upload time and only cleared
+    to 'ready' by the `done` stage -- without this, a job that fails partway
+    leaves the meeting reading "processing" forever and blocks re-upload."""
+    import app.services.pipeline as pipeline_mod
+
+    seeded.execute("UPDATE meetings SET status = 'processing' WHERE id = 1")
+    job_id = _job(seeded, payload={"meeting_id": 1})
+    seeded.commit()
+
+    async def boom(ctx, meeting_id, model=None):
+        raise RuntimeError("diarizer is down")
+
+    monkeypatch.setattr(pipeline_mod, "_diarize_stage", boom)
+
+    ctx = JobContext(job_id, "ingest", {"meeting_id": 1}, db_path=initialised_db)
+    with pytest.raises(RuntimeError):
+        await pipeline_mod.run_ingest(ctx)
+
+    with get_conn(initialised_db) as c:
+        row = c.execute("SELECT status FROM meetings WHERE id = 1").fetchone()
+    assert row["status"] == "failed"

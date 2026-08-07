@@ -278,11 +278,14 @@ class JobQueue:
         self._workers.clear()
         self._watchdog = None
 
-        # Anything still marked running died with the process.
+        # Anything still marked running died with the process. It never
+        # finished this attempt on its own account, so give the attempt back
+        # rather than letting an involuntary kill burn the retry budget.
         with get_conn(self.db_path) as conn:
             conn.execute(
                 "UPDATE jobs SET status = 'interrupted', error = 'process stopped', "
-                "finished_at = ?, updated_at = ? WHERE status = 'running'",
+                "attempts = MAX(attempts - 1, 0), finished_at = ?, updated_at = ? "
+                "WHERE status = 'running'",
                 (utcnow(), utcnow()),
             )
 
@@ -305,9 +308,14 @@ class JobQueue:
                 "SELECT id FROM jobs WHERE status = 'running'"
             ).fetchall()
             for row in orphaned:
+                # Give the attempt back: `_run_job` charges it at dequeue time,
+                # before any work happens, so a bare crash would otherwise
+                # exhaust a fresh job's budget (default max_attempts=1) on its
+                # very first, involuntarily-killed run and never resume it.
                 conn.execute(
                     "UPDATE jobs SET status = 'interrupted', error = 'process restarted', "
-                    "finished_at = ?, updated_at = ? WHERE id = ?",
+                    "attempts = MAX(attempts - 1, 0), finished_at = ?, updated_at = ? "
+                    "WHERE id = ?",
                     (utcnow(), utcnow(), row["id"]),
                 )
                 conn.execute(

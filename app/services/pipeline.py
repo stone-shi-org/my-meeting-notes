@@ -13,7 +13,7 @@ from pathlib import Path
 
 from app.config import effective, get_settings
 from app.db import get_conn, utcnow
-from app.errors import AudioError
+from app.errors import AudioError, JobCancelled
 from app.jobs.queue import JobContext, register_job
 from app.logging_config import get_logger
 from app.services import audio as audio_svc
@@ -285,6 +285,18 @@ async def _summarize_stage(ctx: JobContext, meeting_id: int, **kwargs) -> int | 
 async def run_ingest(ctx: JobContext) -> dict:
     meeting_id = int(ctx.payload["meeting_id"])
 
+    try:
+        return await _run_ingest(ctx, meeting_id)
+    except JobCancelled:
+        raise
+    except Exception:
+        # A terminal failure here must not leave the meeting reading
+        # "processing" forever -- that also blocks re-upload.
+        mark_meeting_failed(ctx.db_path, meeting_id)
+        raise
+
+
+async def _run_ingest(ctx: JobContext, meeting_id: int) -> dict:
     ctx.stage("received", "Upload received")
     ctx.complete_stage()
 
