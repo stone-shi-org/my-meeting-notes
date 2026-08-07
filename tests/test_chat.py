@@ -258,6 +258,14 @@ def test_tool_hop_fetches_transcript_before_answering(user_client, isolated_sett
     # The tool-call line itself must never reach the client as a token.
     assert not any(e == "token" and "TOOL:" in d.get("text", "") for e, d in frames)
 
+    tool_call = next(d for e, d in frames if e == "tool_call")
+    assert tool_call == {"tool": "get_transcript", "arg": str(meeting_id)}
+    tool_result = next(d for e, d in frames if e == "tool_result")
+    assert tool_result["tool"] == "get_transcript"
+    assert "forty two thousand dollars" in tool_result["result"]
+    # In order: announce the call, then its result, before the round is done.
+    assert events.index("tool_call") < events.index("tool_result") < events.index("done")
+
     done_data = next(d for e, d in frames if e == "done")
     assert done_data["role"] == "assistant"
     assert "forty two thousand dollars" in done_data["content"]

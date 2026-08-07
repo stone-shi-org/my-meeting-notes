@@ -582,11 +582,13 @@ async def _produce(
                 break
 
             verb, arg = match.group(1).lower(), match.group(2).strip()
+            await queue.put(_sse("tool_call", {"tool": verb, "arg": arg}))
             messages.append({"role": "assistant", "content": content})
             with get_conn(db_path) as conn:
                 tool_result = await _run_tool(
                     conn, db_path, thread_id, user_id, verb, arg, found
                 )
+            await queue.put(_sse("tool_result", {"tool": verb, "arg": arg, "result": tool_result}))
             messages.append({"role": "user", "content": tool_result})
         else:
             # Ran out of hops still asking for a tool -- never show the raw

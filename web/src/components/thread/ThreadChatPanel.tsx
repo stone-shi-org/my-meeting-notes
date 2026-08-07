@@ -1,9 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
-import { useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
+import { ToolCallBubble, type ToolCall } from '@/components/chat/ToolCallBubble';
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
 import { useChatModel } from '@/hooks/useChatModel';
@@ -38,6 +39,15 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   // Chips suggested from the turn that just finished. Ephemeral -- lost on
   // reload, and replaced (never merged) by the next round's own suggestions.
   const [followUps, setFollowUps] = useState<string[]>([]);
+  // The tool hops of the round currently streaming, in order. Moved onto
+  // `toolCallsByMessageId` once that round's answer is saved, so a hop stays
+  // attached to the message it informed rather than to "whatever's live".
+  const [toolCalls, setToolCalls] = useState<ToolCall[]>([]);
+  const [toolCallsByMessageId, setToolCallsByMessageId] = useState<Record<number, ToolCall[]>>({});
+  // Mirrors `toolCalls` synchronously -- `onDone` needs the hops from *this*
+  // round the instant it fires, and reading state from inside a callback
+  // closed over an earlier render would risk missing ones added since.
+  const toolCallsRef = useRef<ToolCall[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -59,12 +69,13 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
       queryClient.setQueryData<ChatMessage[]>(['thread-chat', threadId], []);
       setStreamError(null);
       setFollowUps([]);
+      setToolCallsByMessageId({});
     },
   });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, streamingText, expanded, followUps]);
+  }, [messages.length, streamingText, expanded, followUps, toolCalls]);
 
   // Abandoning the read on unmount/collapse doesn't stop the answer being
   // generated and saved server-side -- it just stops watching it arrive.
@@ -96,6 +107,8 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
     setDraft('');
     setStreamError(null);
     setFollowUps([]);
+    toolCallsRef.current = [];
+    setToolCalls([]);
 
     const optimisticUser: ChatMessage = {
       id: -Date.now(),
@@ -126,6 +139,14 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
               ...(prev ?? []),
               assistantMessage,
             ]);
+            if (toolCallsRef.current.length) {
+              setToolCallsByMessageId((prev) => ({
+                ...prev,
+                [assistantMessage.id]: toolCallsRef.current,
+              }));
+            }
+            toolCallsRef.current = [];
+            setToolCalls([]);
             setStreamingText(null);
           },
           onError: (err) => {
@@ -133,6 +154,17 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
             setStreamingText(null);
           },
           onSuggestions: (suggestions) => setFollowUps(suggestions),
+          onToolCall: (tool, arg) => {
+            toolCallsRef.current = [...toolCallsRef.current, { tool, arg }];
+            setToolCalls(toolCallsRef.current);
+          },
+          onToolResult: (_tool, _arg, result) => {
+            const next = [...toolCallsRef.current];
+            const last = next.length - 1;
+            if (last >= 0) next[last] = { ...next[last], result };
+            toolCallsRef.current = next;
+            setToolCalls(next);
+          },
         },
         controller.signal,
         chatModel.selected,
@@ -246,21 +278,26 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
           )}
 
           {messages.map((message, i) => (
-            <div
-              key={message.id}
-              className={cn('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}
-            >
-              <MessageBubble
-                role={message.role}
-                content={message.content}
-                scope={noteScope}
-                // The turn this answered, for the generated note title.
-                question={messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined}
-                model={message.model}
-                promptTokens={message.prompt_tokens}
-                completionTokens={message.completion_tokens}
-              />
-            </div>
+            <Fragment key={message.id}>
+              {message.role === 'assistant' &&
+                toolCallsByMessageId[message.id]?.map((call, j) => (
+                  <div key={j} className="flex justify-start">
+                    <ToolCallBubble call={call} />
+                  </div>
+                ))}
+              <div className={cn('flex', message.role === 'user' ? 'justify-end' : 'justify-start')}>
+                <MessageBubble
+                  role={message.role}
+                  content={message.content}
+                  scope={noteScope}
+                  // The turn this answered, for the generated note title.
+                  question={messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined}
+                  model={message.model}
+                  promptTokens={message.prompt_tokens}
+                  completionTokens={message.completion_tokens}
+                />
+              </div>
+            </Fragment>
           ))}
 
           {streamingText === null && messages.at(-1)?.role === 'assistant' && (
@@ -270,13 +307,20 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
           {/* No scope while the reply is still arriving: there is nothing to
               copy or file until it is finished and saved. */}
           {streamingText !== null && (
-            <div className="flex justify-start">
-              {streamingText === '' ? (
-                <ThinkingBubble />
-              ) : (
-                <MessageBubble role="assistant" content={streamingText} />
-              )}
-            </div>
+            <>
+              {toolCalls.map((call, i) => (
+                <div key={i} className="flex justify-start">
+                  <ToolCallBubble call={call} />
+                </div>
+              ))}
+              <div className="flex justify-start">
+                {streamingText === '' ? (
+                  <ThinkingBubble />
+                ) : (
+                  <MessageBubble role="assistant" content={streamingText} />
+                )}
+              </div>
+            </>
           )}
 
           <div ref={bottomRef} />

@@ -41,6 +41,12 @@ export interface ChatStreamHandlers<T = ChatMessage> {
    * after `onDone`, from a second LLM call -- may never arrive at all if
    * that call fails, since a missing suggestion is not a chat error. */
   onSuggestions?: (suggestions: string[]) => void;
+  /** A thread-chat tool hop was dispatched -- only thread chat's tool-hop
+   * loop ever sends these; meeting chat has no on-demand tool. */
+  onToolCall?: (tool: string, arg: string) => void;
+  /** The same hop's result, once the tool has run. Always follows the
+   * matching `onToolCall` before the next one (or `onDone`) fires. */
+  onToolResult?: (tool: string, arg: string, result: string) => void;
 }
 
 /**
@@ -104,6 +110,8 @@ export async function streamChat<T = ChatMessage>(
       else if (frame.event === 'done') handlers.onDone(data as T);
       else if (frame.event === 'error') handlers.onError(data);
       else if (frame.event === 'suggestions') handlers.onSuggestions?.(data.suggestions);
+      else if (frame.event === 'tool_call') handlers.onToolCall?.(data.tool, data.arg);
+      else if (frame.event === 'tool_result') handlers.onToolResult?.(data.tool, data.arg, data.result);
     }
   }
 }
