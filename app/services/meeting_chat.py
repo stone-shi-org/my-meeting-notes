@@ -44,7 +44,8 @@ def build_meeting_digest(conn: sqlite3.Connection, meeting_id: int) -> tuple[str
     lines: list[str] = []
 
     for seg in transcript["segments"]:
-        line = f"[{transcript_svc.fmt_clock(seg['start'] or 0)}] {seg['speaker_name']}: {seg['text'].strip()}"
+        name = transcript_svc.label_with_me(seg["speaker_name"], seg["is_me"])
+        line = f"[{transcript_svc.fmt_clock(seg['start'] or 0)}] {name}: {seg['text'].strip()}"
         line_tokens = llm_svc.estimate_tokens(line)
         if lines and used + line_tokens > budget:
             truncated = True

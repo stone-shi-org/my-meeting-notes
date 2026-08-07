@@ -129,6 +129,17 @@ def test_digest_includes_full_transcript_text(seeded):
     assert "forty two thousand dollars" in digest
 
 
+def test_digest_tags_the_me_marked_speaker(seeded):
+    seeded.execute(
+        "INSERT INTO speaker_map (meeting_id, speaker_id, is_me, source, updated_at) "
+        "VALUES (1, 'SPEAKER_00', 1, 'user', ?)",
+        (utcnow(),),
+    )
+    digest, _truncated = meeting_chat_svc.build_meeting_digest(seeded, meeting_id=1)
+
+    assert "SPEAKER_00 (me): Let's kick off the budget review." in digest
+
+
 def test_digest_truncates_when_over_budget(seeded, monkeypatch):
     monkeypatch.setenv("MMN_SUMMARY_MAX_INPUT_TOKENS", "5")
     from app.config import reset_settings_cache

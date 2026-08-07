@@ -1,5 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { CheckSquare, Download, FileText, RefreshCw, Square, Sparkles } from 'lucide-react';
+import {
+  CheckSquare,
+  Download,
+  Eye,
+  EyeOff,
+  FileText,
+  RefreshCw,
+  Square,
+  Sparkles,
+  User,
+} from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -23,6 +33,14 @@ import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript 
 
 const TRANSCRIPT_PREF_KEY = 'mmn.showTranscript';
 
+type SpeakerPatch = {
+  speaker_id: string;
+  display_name?: string;
+  hidden?: boolean;
+  is_me?: boolean;
+  merge_into?: string;
+};
+
 function SpeakerLegend({
   meetingId,
   transcript,
@@ -34,30 +52,50 @@ function SpeakerLegend({
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState<string | null>(null);
 
-  const rename = useMutation({
-    mutationFn: (payload: { speaker_id: string; display_name: string }) =>
-      api.put(`/meetings/${meetingId}/speakers`, [payload]),
-    onMutate: async ({ speaker_id, display_name }) => {
+  const update = useMutation({
+    mutationFn: (payload: SpeakerPatch[]) => api.put(`/meetings/${meetingId}/speakers`, payload),
+    onMutate: async (payload) => {
       const key = ['transcript', String(meetingId)];
       await queryClient.cancelQueries({ queryKey: key });
       const previous = queryClient.getQueryData<Transcript>(key);
 
-      // Optimistic: renaming is a map edit, never a walk over the segments.
-      queryClient.setQueryData<Transcript>(key, (old) =>
-        old
-          ? {
-              ...old,
-              speakers: old.speakers.map((s) =>
-                s.id === speaker_id ? { ...s, display_name: display_name || null } : s,
-              ),
-              segments: old.segments.map((seg) =>
-                seg.speaker === speaker_id
-                  ? { ...seg, speaker_name: display_name || speaker_id }
-                  : seg,
-              ),
-            }
-          : old,
-      );
+      // Optimistic for rename/hide/me: a map edit over speakers (and, for a
+      // rename, the segments that carry that name). A merge changes segment
+      // identity and colour across the whole transcript, so it skips this
+      // and just waits for the refetch below.
+      const merging = payload.some((p) => p.merge_into !== undefined);
+      if (!merging) {
+        queryClient.setQueryData<Transcript>(key, (old) => {
+          if (!old) return old;
+          let speakers = old.speakers;
+          for (const p of payload) {
+            speakers = speakers.map((s) => {
+              if (s.id !== p.speaker_id) {
+                // Setting "me" on one speaker clears every other one.
+                return p.is_me === true && s.is_me ? { ...s, is_me: false } : s;
+              }
+              return {
+                ...s,
+                ...(p.display_name !== undefined ? { display_name: p.display_name || null } : {}),
+                ...(p.hidden !== undefined ? { hidden: p.hidden } : {}),
+                ...(p.is_me !== undefined ? { is_me: p.is_me } : {}),
+              };
+            });
+          }
+          const renamed = payload.find((p) => p.display_name !== undefined);
+          return {
+            ...old,
+            speakers,
+            segments: renamed
+              ? old.segments.map((seg) =>
+                  seg.speaker === renamed.speaker_id
+                    ? { ...seg, speaker_name: renamed.display_name || renamed.speaker_id }
+                    : seg,
+                )
+              : old.segments,
+          };
+        });
+      }
       return { previous };
     },
     onError: (_err, _vars, context) => {
@@ -65,9 +103,11 @@ function SpeakerLegend({
         queryClient.setQueryData(['transcript', String(meetingId)], context.previous);
       }
     },
-    onSuccess: (_data, vars) => {
-      setSaved(vars.speaker_id);
-      window.setTimeout(() => setSaved(null), 1500);
+    onSuccess: (_data, payload) => {
+      if (payload.length === 1 && payload[0].display_name !== undefined) {
+        setSaved(payload[0].speaker_id);
+        window.setTimeout(() => setSaved(null), 1500);
+      }
     },
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ['transcript', String(meetingId)] });
@@ -78,63 +118,157 @@ function SpeakerLegend({
   function commit(speakerId: string) {
     const value = drafts[speakerId];
     if (value === undefined) return;
-    rename.mutate({ speaker_id: speakerId, display_name: value.trim() });
+    update.mutate([{ speaker_id: speakerId, display_name: value.trim() }]);
   }
 
+  const canonical = transcript.speakers.filter((s) => !s.merged_into);
+  const mergedAway = transcript.speakers.filter((s) => s.merged_into);
+  const nameForCanonical = (id: string) => canonical.find((s) => s.id === id)?.display_name || id;
+  const anyHidden = canonical.some((s) => s.hidden);
+  const allHidden = canonical.length > 0 && canonical.every((s) => s.hidden);
+
   return (
-    <ul className="space-y-2">
-      {transcript.speakers.map((speaker) => {
-        const value = drafts[speaker.id] ?? speaker.display_name ?? '';
-        return (
-          <li key={speaker.id} className="flex items-center gap-2" style={speakerVars(speaker.id)}>
-            <span
-              aria-hidden
-              className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
-              style={{
-                backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
-                color: 'var(--sp-ink)',
-              }}
-            >
-              {initials(speaker.display_name || speaker.id)}
-            </span>
+    <div className="space-y-2">
+      {canonical.length > 0 && (
+        <div className="flex items-center justify-end gap-1">
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={!anyHidden}
+            onClick={() => update.mutate(canonical.map((s) => ({ speaker_id: s.id, hidden: false })))}
+          >
+            Show all
+          </Button>
+          <Button
+            size="xs"
+            variant="ghost"
+            disabled={allHidden}
+            onClick={() => update.mutate(canonical.map((s) => ({ speaker_id: s.id, hidden: true })))}
+          >
+            Hide all
+          </Button>
+        </div>
+      )}
 
-            <Input
-              className="h-8 flex-1 border-transparent bg-transparent px-2 hover:border-border-strong focus:border-border-strong"
-              value={value}
-              placeholder={speaker.id}
-              aria-label={`Name for ${speaker.id}`}
-              onChange={(e) => setDrafts((d) => ({ ...d, [speaker.id]: e.target.value }))}
-              onBlur={() => commit(speaker.id)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter') {
-                  e.currentTarget.blur();
-                } else if (e.key === 'Escape') {
-                  setDrafts((d) => {
-                    const next = { ...d };
-                    delete next[speaker.id];
-                    return next;
-                  });
-                  e.currentTarget.blur();
-                }
-              }}
-            />
-
-            <span className="shrink-0 whitespace-nowrap text-right text-xs text-fg-subtle tabular">
-              {speaker.duration_human} · {Math.round(speaker.share * 100)}%
-            </span>
-
-            {saved === speaker.id && (
-              <span className="text-xs text-success-ink" role="status">
-                ✓
+      <ul className="space-y-2">
+        {canonical.map((speaker) => {
+          const value = drafts[speaker.id] ?? speaker.display_name ?? '';
+          return (
+            <li key={speaker.id} className="flex items-center gap-2" style={speakerVars(speaker.id)}>
+              <span
+                aria-hidden
+                className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
+                style={{
+                  backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
+                  color: 'var(--sp-ink)',
+                }}
+              >
+                {initials(speaker.display_name || speaker.id)}
               </span>
-            )}
+
+              <Input
+                className="h-8 flex-1 border-transparent bg-transparent px-2 hover:border-border-strong focus:border-border-strong"
+                value={value}
+                placeholder={speaker.id}
+                aria-label={`Name for ${speaker.id}`}
+                onChange={(e) => setDrafts((d) => ({ ...d, [speaker.id]: e.target.value }))}
+                onBlur={() => commit(speaker.id)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    e.currentTarget.blur();
+                  } else if (e.key === 'Escape') {
+                    setDrafts((d) => {
+                      const next = { ...d };
+                      delete next[speaker.id];
+                      return next;
+                    });
+                    e.currentTarget.blur();
+                  }
+                }}
+              />
+
+              {speaker.is_me && (
+                <Badge variant="primary" size="sm">
+                  You
+                </Badge>
+              )}
+
+              <span className="shrink-0 whitespace-nowrap text-right text-xs text-fg-subtle tabular">
+                {speaker.duration_human} · {Math.round(speaker.share * 100)}%
+              </span>
+
+              <button
+                onClick={() => update.mutate([{ speaker_id: speaker.id, hidden: !speaker.hidden }])}
+                aria-pressed={speaker.hidden}
+                aria-label={speaker.hidden ? `Show ${speaker.id} in the transcript` : `Hide ${speaker.id} from the transcript`}
+                className="shrink-0 rounded p-1 text-fg-faint hover:text-fg"
+              >
+                {speaker.hidden ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
+              </button>
+
+              <button
+                onClick={() => update.mutate([{ speaker_id: speaker.id, is_me: !speaker.is_me }])}
+                aria-pressed={speaker.is_me}
+                aria-label={speaker.is_me ? `Unmark ${speaker.id} as me` : `Mark ${speaker.id} as me`}
+                className={cn(
+                  'shrink-0 rounded p-1 text-fg-faint hover:text-fg',
+                  speaker.is_me && 'text-primary',
+                )}
+              >
+                <User className="size-3.5" />
+              </button>
+
+              {canonical.length > 1 && (
+                <Select
+                  className="h-7 w-auto shrink-0 text-xs"
+                  aria-label={`Merge ${speaker.id} into another speaker`}
+                  value=""
+                  onChange={(e) => {
+                    if (!e.target.value) return;
+                    update.mutate([{ speaker_id: speaker.id, merge_into: e.target.value }]);
+                  }}
+                >
+                  <option value="">Merge into…</option>
+                  {canonical
+                    .filter((other) => other.id !== speaker.id)
+                    .map((other) => (
+                      <option key={other.id} value={other.id}>
+                        {other.display_name || other.id}
+                      </option>
+                    ))}
+                </Select>
+              )}
+
+              {saved === speaker.id && (
+                <span className="text-xs text-success-ink" role="status">
+                  ✓
+                </span>
+              )}
+            </li>
+          );
+        })}
+
+        {mergedAway.map((speaker) => (
+          <li key={speaker.id} className="flex items-center gap-2 text-sm text-fg-subtle">
+            <span className="min-w-0 flex-1 truncate">
+              {speaker.id} → merged into {nameForCanonical(speaker.merged_into!)}
+            </span>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => update.mutate([{ speaker_id: speaker.id, merge_into: '' }])}
+            >
+              Unmerge
+            </Button>
           </li>
-        );
-      })}
-      <li className="pt-1 text-xs text-fg-subtle">
-        Renaming only changes how the transcript is displayed. The original is kept untouched.
-      </li>
-    </ul>
+        ))}
+
+        <li className="pt-1 text-xs text-fg-subtle">
+          Renaming, hiding and merging only change how the transcript is displayed. The
+          original is kept untouched.
+        </li>
+      </ul>
+    </div>
   );
 }
 
@@ -412,6 +546,18 @@ export function TranscriptPage() {
     retry: (_, error) => !(error instanceof ApiError && error.status === 404),
   });
 
+  // Hiding is display-only (exports and AI chat call the API directly, not
+  // this array), so both the transcript pane and the player -- which tracks
+  // "active segment" by index into whatever array it's given -- read the
+  // same filtered list, or their indices would drift apart.
+  const visibleSegments = useMemo(() => {
+    const segments = transcript.data?.segments ?? [];
+    const hiddenIds = new Set(
+      transcript.data?.speakers.filter((s) => s.hidden).map((s) => s.id) ?? [],
+    );
+    return hiddenIds.size ? segments.filter((s) => !hiddenIds.has(s.speaker)) : segments;
+  }, [transcript.data]);
+
   if (meeting.isError) return <ErrorState error={meeting.error} />;
   if (meeting.isLoading || !meeting.data) return <Skeleton className="h-96 w-full" />;
 
@@ -457,7 +603,7 @@ export function TranscriptPage() {
   return (
     <PlayerProvider
       src={`/api/meetings/${m.id}/audio`}
-      segments={transcript.data?.segments ?? []}
+      segments={visibleSegments}
     >
       <DeepLinkSeek />
 
@@ -599,7 +745,7 @@ export function TranscriptPage() {
               {transcript.data && (
                 <div className="min-h-0 flex-1 overflow-y-auto">
                   <TranscriptView
-                    segments={transcript.data.segments}
+                    segments={visibleSegments}
                     meetingId={m.id}
                     onRename={() =>
                       speakersRef.current?.scrollIntoView({

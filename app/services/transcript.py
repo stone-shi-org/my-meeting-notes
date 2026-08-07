@@ -87,6 +87,35 @@ def display_name_for(speaker_id: str, mapping: dict[str, sqlite3.Row]) -> str:
     return speaker_id
 
 
+def canonical_speaker_id(speaker_id: str, mapping: dict[str, sqlite3.Row]) -> str:
+    """Resolve a merge target. One hop only -- the router reparents any
+    existing followers whenever a merge target itself gets merged, so a
+    chain never has to be walked here."""
+    row = mapping.get(speaker_id)
+    if row is not None and row["merged_into"]:
+        return row["merged_into"]
+    return speaker_id
+
+
+def is_me_for(speaker_id: str, mapping: dict[str, sqlite3.Row]) -> bool:
+    row = mapping.get(speaker_id)
+    return bool(row is not None and row["is_me"])
+
+
+def label_with_me(name: str, is_me: bool) -> str:
+    return f"{name} (me)" if is_me else name
+
+
+def me_speaker_id(conn: sqlite3.Connection, meeting_id: int) -> str | None:
+    """The one speaker_id marked as the logged-in user for this meeting, if any."""
+    row = conn.execute(
+        "SELECT speaker_id FROM speaker_map WHERE meeting_id = ? AND is_me = 1 "
+        "AND source != 'user_hint' LIMIT 1",
+        (meeting_id,),
+    ).fetchone()
+    return row["speaker_id"] if row else None
+
+
 # --------------------------------------------------------------------------- #
 # Rendering
 # --------------------------------------------------------------------------- #
@@ -110,7 +139,8 @@ def build_transcript(
         if non_speech and not include_nonspeech:
             continue
 
-        speaker_id = seg.get("speaker") or ""
+        raw_speaker_id = seg.get("speaker") or ""
+        speaker_id = canonical_speaker_id(raw_speaker_id, mapping)
         segments.append(
             {
                 "id": seg.get("id"),
@@ -123,13 +153,20 @@ def build_transcript(
                 "end": seg.get("end"),
                 "text": text,
                 "non_speech": non_speech,
+                "is_me": is_me_for(speaker_id, mapping),
             }
         )
 
     speakers = []
     for sp in raw_speakers:
         sid = sp.get("id") or ""
+        # Each entry reports its own identity, not the merge target's --
+        # is_me/hidden are transferred on merge (see the router), so a
+        # merged-away row must not appear to inherit them from the target it
+        # no longer speaks for. The frontend resolves the target's name for
+        # "merged into ..." by looking up its entry in this same list.
         row = mapping.get(sid)
+        merged_into = row["merged_into"] if (row is not None and row["merged_into"]) else None
         speakers.append(
             {
                 "id": sid,
@@ -138,6 +175,9 @@ def build_transcript(
                 "color": (row["color"] if row is not None else None),
                 "total_speech_duration": sp.get("total_speech_duration"),
                 "segment_count": sp.get("segment_count"),
+                "hidden": bool(row["hidden"]) if row is not None else False,
+                "is_me": bool(row["is_me"]) if row is not None else False,
+                "merged_into": merged_into,
             }
         )
 
@@ -154,7 +194,8 @@ def render_text(transcript: dict) -> str:
     lines = []
     for seg in transcript["segments"]:
         stamp = fmt_clock(seg["start"] or 0)
-        lines.append(f"[{stamp}] {seg['speaker_name']}: {seg['text'].strip()}")
+        name = label_with_me(seg["speaker_name"], seg["is_me"])
+        lines.append(f"[{stamp}] {name}: {seg['text'].strip()}")
     return "\n".join(lines)
 
 
@@ -169,7 +210,7 @@ def render_markdown(transcript: dict) -> str:
 
     previous = None
     for seg in transcript["segments"]:
-        name = seg["speaker_name"]
+        name = label_with_me(seg["speaker_name"], seg["is_me"])
         stamp = fmt_clock(seg["start"] or 0)
         if name != previous:
             lines.append(f"**{name}** `{stamp}`")
@@ -183,9 +224,10 @@ def render_markdown(transcript: dict) -> str:
 def render_vtt(transcript: dict) -> str:
     lines = ["WEBVTT", ""]
     for i, seg in enumerate(transcript["segments"], start=1):
+        name = label_with_me(seg["speaker_name"], seg["is_me"])
         lines.append(str(i))
         lines.append(f"{fmt_vtt(seg['start'] or 0)} --> {fmt_vtt(seg['end'] or 0)}")
-        lines.append(f"<v {seg['speaker_name']}>{seg['text'].strip()}")
+        lines.append(f"<v {name}>{seg['text'].strip()}")
         lines.append("")
     return "\n".join(lines)
 
@@ -211,19 +253,29 @@ def transcript_sha256(transcript: dict) -> str:
 
 
 def speaker_stats(transcript: dict) -> list[dict]:
-    """Talk time per speaker, for the legend and the share bar."""
-    total = sum(sp.get("total_speech_duration") or 0 for sp in transcript["speakers"]) or 1
+    """Talk time per speaker, for the legend and the share bar.
+
+    A merged-away speaker keeps its own row (so the legend can offer
+    "Unmerge") but is excluded from the total: its speech now renders under
+    the target's identity, and counting both would double the total.
+    """
+    canonical = [sp for sp in transcript["speakers"] if not sp.get("merged_into")]
+    total = sum(sp.get("total_speech_duration") or 0 for sp in canonical) or 1
     stats = []
     for sp in transcript["speakers"]:
         duration = sp.get("total_speech_duration") or 0
+        merged = bool(sp.get("merged_into"))
         stats.append(
             {
                 **sp,
-                "share": duration / total,
+                "share": 0.0 if merged else duration / total,
                 "duration_human": fmt_clock(duration),
             }
         )
-    return sorted(stats, key=lambda s: s["total_speech_duration"] or 0, reverse=True)
+    return sorted(
+        stats,
+        key=lambda s: (bool(s.get("merged_into")), -(s["total_speech_duration"] or 0)),
+    )
 
 
 def get_transcript(

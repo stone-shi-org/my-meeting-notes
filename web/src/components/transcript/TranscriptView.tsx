@@ -1,5 +1,6 @@
 import { Link2, Pencil } from 'lucide-react';
 import { memo, useEffect, useRef, useState } from 'react';
+import { Badge } from '@/components/ui/primitives';
 import { cn } from '@/lib/cn';
 import { initials, speakerVars } from '@/lib/speakerColors';
 import { fmtClock } from '@/lib/time';
@@ -12,11 +13,13 @@ export function SpeakerChip({
   name,
   onRename,
   size = 'md',
+  isMe = false,
 }: {
   speakerId: string;
   name: string;
   onRename?: () => void;
   size?: 'sm' | 'md';
+  isMe?: boolean;
 }) {
   return (
     <span className="inline-flex items-center gap-1.5" style={speakerVars(speakerId)}>
@@ -41,6 +44,11 @@ export function SpeakerChip({
       >
         {name}
       </span>
+      {isMe && (
+        <Badge variant="primary" size="sm">
+          You
+        </Badge>
+      )}
       {onRename && (
         <button
           onClick={onRename}
@@ -109,6 +117,7 @@ const SegmentRow = memo(function SegmentRow({
           speakerId={segment.speaker}
           name={segment.speaker_name}
           onRename={() => onRename(segment.speaker)}
+          isMe={segment.is_me}
         />
         <button
           onClick={() => seek(segment.start)}

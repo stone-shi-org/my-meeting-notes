@@ -102,7 +102,9 @@ def build_prompt_values(
     thread = threads_svc.require_thread(conn, meeting["thread_id"])
 
     speakers = ", ".join(
-        s["display_name"] or s["id"] for s in transcript.get("speakers", [])
+        transcript_svc.label_with_me(s["display_name"] or s["id"], s["is_me"])
+        for s in transcript.get("speakers", [])
+        if not s.get("merged_into")
     )
     duration = transcript.get("duration") or meeting["audio_duration_sec"] or 0
     related_context = _render_related_context(matching_svc.attached_context(conn, meeting_id))
@@ -140,7 +142,8 @@ def _chunk_segments(segments: list[dict], max_chars: int) -> list[list[dict]]:
 
 def _render_segments(segments: list[dict]) -> str:
     return "\n".join(
-        f"[{transcript_svc.fmt_clock(s['start'] or 0)}] {s['speaker_name']}: "
+        f"[{transcript_svc.fmt_clock(s['start'] or 0)}] "
+        f"{transcript_svc.label_with_me(s['speaker_name'], s['is_me'])}: "
         f"{(s['text'] or '').strip()}"
         for s in segments
     )

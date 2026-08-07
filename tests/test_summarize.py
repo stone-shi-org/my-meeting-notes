@@ -344,6 +344,31 @@ def test_related_context_defaults_to_none_when_nothing_confirmed(user_client, me
     assert "{{related_context}}" not in user_message
 
 
+def test_a_me_marked_speaker_is_tagged_in_the_prompt(user_client, meeting, mock_llm):
+    """The (me) suffix must reach the actual LLM request, not just the stored
+    template -- prompt_text is unsubstituted, so this reads the mocked call.
+    The initial auto-summary (run during upload) already inferred "Stan" for
+    SPEAKER_00, so that's the label "(me)" attaches to here, not the raw id.
+    """
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "is_me": True}],
+    )
+    _wait(
+        user_client,
+        user_client.post(f"/api/meetings/{mid}/summary/regenerate", json={}).json()["job_id"],
+    )
+
+    body = json.loads(mock_llm.calls[-1].request.content)
+    user_message = body["messages"][1]["content"]
+    assert "Stan (me):" in user_message
+    assert "Donna (me):" not in user_message
+    assert "Donna:" in user_message
+    # The roster line too, not just the transcript body.
+    assert "Stan (me)" in user_message.split("TRANSCRIPT:")[0]
+
+
 def test_regenerate_needs_a_transcript(user_client):
     m = user_client.post(
         "/api/meetings", json={"new_thread_title": "T", "title": "No audio"}

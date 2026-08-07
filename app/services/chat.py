@@ -102,11 +102,18 @@ def _format_meeting_block(conn: sqlite3.Connection, meeting: sqlite3.Row) -> str
         lines.append("Open questions:")
         lines.extend(f"- {q}" for q in summary["open_questions"])
 
-    names = ", ".join(
-        p.get("inferred_name") or p.get("speaker")
-        for p in summary["participants"]
-        if p.get("inferred_name") or p.get("speaker")
-    )
+    speaker_map = transcript_svc.load_speaker_map(conn, meeting_id)
+    me_id = transcript_svc.me_speaker_id(conn, meeting_id)
+    parts = []
+    for p in summary["participants"]:
+        label = p.get("inferred_name") or p.get("speaker")
+        if not label:
+            continue
+        raw_speaker = p.get("speaker")
+        if me_id and raw_speaker and transcript_svc.canonical_speaker_id(raw_speaker, speaker_map) == me_id:
+            label = transcript_svc.label_with_me(label, True)
+        parts.append(label)
+    names = ", ".join(parts)
     if names:
         lines.append(f"Participants: {names}")
 

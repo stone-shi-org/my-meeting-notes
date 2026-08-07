@@ -251,6 +251,220 @@ def test_upload_name_hints_are_offered_back(user_client):
 
 
 # --------------------------------------------------------------------------- #
+# Hide / show
+# --------------------------------------------------------------------------- #
+
+
+def test_hiding_a_speaker_does_not_change_the_transcript(user_client, meeting):
+    """Hidden is display-only: the API's segment list is untouched."""
+    mid = meeting["meeting_id"]
+    before = user_client.get(f"/api/meetings/{mid}/transcript").json()
+
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "hidden": True}],
+    )
+    assert resp.status_code == 200
+
+    after = user_client.get(f"/api/meetings/{mid}/transcript").json()
+    assert after["segments"] == before["segments"]
+
+    speakers = user_client.get(f"/api/meetings/{mid}/speakers").json()["speakers"]
+    hidden = {s["id"]: s["hidden"] for s in speakers}
+    assert hidden == {"SPEAKER_00": True, "SPEAKER_01": False}
+
+
+def test_hiding_one_speaker_does_not_touch_another(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "display_name": "Stan"}],
+    )
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "hidden": True}],
+    )
+
+    speakers = user_client.get(f"/api/meetings/{mid}/speakers").json()["speakers"]
+    stan = next(s for s in speakers if s["id"] == "SPEAKER_00")
+    assert stan["hidden"] is True
+    assert stan["display_name"] == "Stan"  # a hidden-only patch must not clear the name
+
+
+# --------------------------------------------------------------------------- #
+# "Me"
+# --------------------------------------------------------------------------- #
+
+
+def test_marking_me_is_exclusive(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "is_me": True}],
+    )
+    speakers = user_client.get(f"/api/meetings/{mid}/speakers").json()["speakers"]
+    assert {s["id"]: s["is_me"] for s in speakers} == {
+        "SPEAKER_00": True,
+        "SPEAKER_01": False,
+    }
+
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_01", "is_me": True}],
+    )
+    speakers = user_client.get(f"/api/meetings/{mid}/speakers").json()["speakers"]
+    assert {s["id"]: s["is_me"] for s in speakers} == {
+        "SPEAKER_00": False,
+        "SPEAKER_01": True,
+    }
+
+
+def test_me_marker_reaches_the_rendered_transcript(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "is_me": True}],
+    )
+
+    text = user_client.get(
+        f"/api/meetings/{mid}/transcript", params={"format": "text"}
+    ).text
+    assert "SPEAKER_00 (me):" in text
+    assert "SPEAKER_01 (me):" not in text
+    assert "SPEAKER_01:" in text
+
+
+# --------------------------------------------------------------------------- #
+# Merge
+# --------------------------------------------------------------------------- #
+
+
+def test_merging_canonicalises_segments_and_speakers(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_01", "display_name": "Stan"}],
+    )
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_01"}],
+    )
+    assert resp.status_code == 200
+
+    transcript = user_client.get(f"/api/meetings/{mid}/transcript").json()
+    assert {s["speaker"] for s in transcript["segments"]} == {"SPEAKER_01"}
+    assert {s["speaker_name"] for s in transcript["segments"]} == {"Stan"}
+
+    speakers = {s["id"]: s for s in transcript["speakers"]}
+    assert speakers["SPEAKER_00"]["merged_into"] == "SPEAKER_01"
+    assert speakers["SPEAKER_01"]["merged_into"] is None
+    # The merged-away speaker's own share must not double-count against the target.
+    assert speakers["SPEAKER_00"]["share"] == 0.0
+    assert speakers["SPEAKER_01"]["share"] == pytest.approx(1.0)
+
+
+def test_cannot_merge_into_self(user_client, meeting):
+    mid = meeting["meeting_id"]
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_00"}],
+    )
+    assert resp.status_code == 400
+
+
+def test_cannot_merge_into_an_unknown_speaker(user_client, meeting):
+    mid = meeting["meeting_id"]
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_99"}],
+    )
+    assert resp.status_code == 400
+
+
+def test_cannot_merge_into_an_already_merged_speaker(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_01"}],
+    )
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_01", "merge_into": "SPEAKER_00"}],
+    )
+    assert resp.status_code == 400
+
+
+def test_a_follower_is_reparented_when_its_target_is_merged_again(
+    user_client, meeting, isolated_settings
+):
+    """C -> B, then B -> A must leave C -> A, never a two-hop chain."""
+    mid = meeting["meeting_id"]
+    # The fixture only produces two speakers; exercise the three-way chain by
+    # inserting a third id straight into speaker_map (the router only ever
+    # needs the row -- it doesn't require a matching segment to exist).
+    with get_conn(isolated_settings.db_path) as conn:
+        conn.execute(
+            "INSERT INTO speaker_map (meeting_id, speaker_id, source, updated_at) "
+            "VALUES (?, 'SPEAKER_02', 'diarizer', datetime('now'))",
+            (mid,),
+        )
+        conn.commit()
+
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_02", "merge_into": "SPEAKER_01"}],
+    )
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_01", "merge_into": "SPEAKER_00"}],
+    )
+    assert resp.status_code == 200
+
+    with get_conn(isolated_settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT merged_into FROM speaker_map WHERE meeting_id = ? AND speaker_id = 'SPEAKER_02'",
+            (mid,),
+        ).fetchone()
+    assert row["merged_into"] == "SPEAKER_00"
+
+
+def test_is_me_transfers_to_the_merge_target(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "is_me": True}],
+    )
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_01"}],
+    )
+
+    speakers = user_client.get(f"/api/meetings/{mid}/speakers").json()["speakers"]
+    assert {s["id"]: s["is_me"] for s in speakers} == {
+        "SPEAKER_00": False,
+        "SPEAKER_01": True,
+    }
+
+
+def test_unmerging_restores_independence(user_client, meeting):
+    mid = meeting["meeting_id"]
+    user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": "SPEAKER_01"}],
+    )
+    resp = user_client.put(
+        f"/api/meetings/{mid}/speakers",
+        json=[{"speaker_id": "SPEAKER_00", "merge_into": ""}],
+    )
+    assert resp.status_code == 200
+
+    transcript = user_client.get(f"/api/meetings/{mid}/transcript").json()
+    assert {s["speaker"] for s in transcript["segments"]} == {"SPEAKER_00", "SPEAKER_01"}
+    speakers = {s["id"]: s for s in transcript["speakers"]}
+    assert speakers["SPEAKER_00"]["merged_into"] is None
+
+
+# --------------------------------------------------------------------------- #
 # Audio
 # --------------------------------------------------------------------------- #
 

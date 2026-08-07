@@ -632,6 +632,19 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # Snapshotted at attach time so a later "fetch the full body" tool call can
     # reach the right endpoint without re-searching to relocate it.
     ("thread_emails", "folder_id", "TEXT"),
+    # Display-only: hides a speaker's lines from the transcript view. Never
+    # read by the summarizer or chat -- hiding a speaker to declutter your own
+    # screen must not silently degrade a summary.
+    ("speaker_map", "hidden", "INTEGER NOT NULL DEFAULT 0"),
+    # At most one speaker per meeting. Enforced in the router (clearing every
+    # other row on write), not a DB constraint, same as other single-writer
+    # SQLite invariants in this codebase.
+    ("speaker_map", "is_me", "INTEGER NOT NULL DEFAULT 0"),
+    # Points at another speaker_id in the same meeting when the diarizer split
+    # one person into two ids. Always one hop -- the router reparents any
+    # existing followers when a merge target itself gets merged, so
+    # transcript.py never has to walk a chain.
+    ("speaker_map", "merged_into", "TEXT"),
 )
 
 # Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that

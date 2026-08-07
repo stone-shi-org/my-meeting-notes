@@ -17,6 +17,10 @@ emails, and any notes filed on the thread. It is not a transcript -- it is a dig
 written up by an earlier pass, so treat it as ground truth about what happened but not as a
 verbatim quote of anything said.
 
+A participant name suffixed with "(me)" in a meeting block is the person you are speaking
+to -- resolve "I", "me", "my" and similar in their questions to that participant, e.g.
+"what's my action item" means the action item(s) owned by the "(me)" participant.
+
 Notes are the user's own working material, not a record of a meeting. One marked "saved
 from an AI answer" is something you said earlier, which the user chose to keep -- it is
 useful for knowing what has already been asked and agreed, but it is not evidence for

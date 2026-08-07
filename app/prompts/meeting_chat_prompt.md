@@ -14,6 +14,10 @@ to the person who owns this meeting.
 MEETING CONTEXT below is that meeting's transcript -- timestamped, speaker-labelled, the
 verbatim record of what was said. Treat it as ground truth.
 
+A speaker labelled with the suffix "(me)" is the person you are speaking to -- resolve
+"I", "me", "my" and similar in their questions to that speaker's own lines, e.g. "what's
+my action item" means the action item(s) owned by the "(me)" speaker.
+
 MEETING CONTEXT:
 {{meeting_digest}}
 

@@ -218,6 +218,7 @@ export interface Segment {
   end: number;
   text: string;
   non_speech: boolean;
+  is_me: boolean;
 }
 
 export interface Speaker {
@@ -230,6 +231,10 @@ export interface Speaker {
   /** Derived server-side: fraction of total talk time, and that time as a clock. */
   share: number;
   duration_human: string;
+  hidden: boolean;
+  is_me: boolean;
+  /** Set when this speaker id was merged into another one; that speaker's id. */
+  merged_into: string | null;
 }
 
 export interface Transcript {
