@@ -582,12 +582,17 @@ async def _produce(
                 break
 
             verb, arg = match.group(1).lower(), match.group(2).strip()
+            log.info("tool hop for thread %s: %s %s", thread_id, verb, arg)
             await queue.put(_sse("tool_call", {"tool": verb, "arg": arg}))
             messages.append({"role": "assistant", "content": content})
             with get_conn(db_path) as conn:
                 tool_result = await _run_tool(
                     conn, db_path, thread_id, user_id, verb, arg, found
                 )
+            log.info(
+                "tool hop for thread %s: %s %s -> %d char(s)",
+                thread_id, verb, arg, len(tool_result),
+            )
             await queue.put(_sse("tool_result", {"tool": verb, "arg": arg, "result": tool_result}))
             messages.append({"role": "user", "content": tool_result})
         else:
