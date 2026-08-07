@@ -295,4 +295,22 @@ class MCPClient:
             },
         )
 
+    async def fetch_full_email(
+        self, message_id: str, *, account_type: str | None = None, profile: str | None = None
+    ) -> dict | None:
+        """Full headers and body of one email, by internal id or Message-ID.
+
+        Unlike search_events/search_emails, this is never the configured
+        ``tool_name`` -- it's a second, optional tool a server may or may not
+        expose, not the one the "Test connection" check validates against.
+        """
+        args: dict = {
+            "message_id": message_id,
+            "profile": profile or self.config.default_profile or "default",
+        }
+        if account_type:
+            args["account_type"] = account_type
+        results = await self.call_tool("fetch_full_email", args)
+        return results[0] if results else None
+
 

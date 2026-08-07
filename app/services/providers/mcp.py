@@ -149,6 +149,14 @@ class McpEmailProvider(_McpBase):
         """Exposed so the match run can record the exact query that was sent."""
         return build_gmail_query(keywords, start, end)
 
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        # folder_id is meaningless here -- the server auto-detects Gmail vs
+        # IMAP from its own triage cache rather than needing a folder.
+        result = await self._client().fetch_full_email(native_id)
+        return result.get("body") if result else None
+
     def _to_email(self, item: dict) -> EmailCandidate:
         native = item.get("message_id") or ""
         return EmailCandidate(

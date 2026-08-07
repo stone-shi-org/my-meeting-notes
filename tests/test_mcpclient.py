@@ -205,6 +205,40 @@ class TestCalls:
         assert name == "search_emails"
         assert args == {"query": "atlas after:2026/03/11", "profile": "stone"}
 
+    async def test_fetch_full_email_passes_message_id_and_profile(self):
+        session = FakeSession(
+            result=ToolResult(
+                content=[Block(json.dumps({"sender": "a@b", "body": "The full text."}))]
+            )
+        )
+        c = client_with(
+            session, name="email", kind="email", tool_name="search_emails",
+            default_profile="stone",
+        )
+        result = await c.fetch_full_email("msg-1")
+
+        name, args = session.calls[0]
+        assert name == "fetch_full_email"
+        assert args == {"message_id": "msg-1", "profile": "stone"}
+        assert result == {"sender": "a@b", "body": "The full text."}
+
+    async def test_fetch_full_email_omits_account_type_when_not_given(self):
+        session = FakeSession(result=ToolResult(content=[Block(json.dumps({"body": "x"}))]))
+        c = client_with(session)
+        await c.fetch_full_email("msg-1")
+        assert "account_type" not in session.calls[0][1]
+
+    async def test_fetch_full_email_passes_an_explicit_account_type(self):
+        session = FakeSession(result=ToolResult(content=[Block(json.dumps({"body": "x"}))]))
+        c = client_with(session)
+        await c.fetch_full_email("msg-1", account_type="imap")
+        assert session.calls[0][1]["account_type"] == "imap"
+
+    async def test_fetch_full_email_with_no_result_is_none(self):
+        session = FakeSession(result=ToolResult(content=[]))
+        c = client_with(session)
+        assert await c.fetch_full_email("msg-1") is None
+
     async def test_an_explicit_profile_overrides_the_default(self):
         session = FakeSession(result=ToolResult(content=[]))
         c = client_with(session, default_profile="stone")

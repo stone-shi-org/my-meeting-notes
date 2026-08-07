@@ -408,11 +408,14 @@ async def _tool_get_email(
         (ref["integration_id"], user_id),
     ).fetchone()
     provider = providers_svc.build_provider(conn, row) if row is not None else None
-    body = (
-        await provider.get_email_body(native_id=ref["native_id"], folder_id=ref["folder_id"])
-        if provider is not None
-        else None
-    )
+    try:
+        body = (
+            await provider.get_email_body(native_id=ref["native_id"], folder_id=ref["folder_id"])
+            if provider is not None
+            else None
+        )
+    except AppError as exc:
+        return f"[Could not fetch that email's body: {exc.message}]"
     if body is None:
         return "[Full body is not available for that email's account. Use the snippet already shown.]"
 
