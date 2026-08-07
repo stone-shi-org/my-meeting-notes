@@ -628,6 +628,10 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # ON DELETE SET NULL because deleting a folder must not delete the work --
     # its threads fall back to Ungrouped.
     ("threads", "group_id", "INTEGER REFERENCES thread_groups(id) ON DELETE SET NULL"),
+    # Zoho's message-content endpoint needs a folder id, not just a message id.
+    # Snapshotted at attach time so a later "fetch the full body" tool call can
+    # reach the right endpoint without re-searching to relocate it.
+    ("thread_emails", "folder_id", "TEXT"),
 )
 
 # Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that

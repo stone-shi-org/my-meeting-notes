@@ -237,6 +237,13 @@ class FakeIMAP:
         return "OK", [b"1 2"]
 
     def fetch(self, num, parts):
+        if parts == _imap.FETCH_BODY_PARTS:
+            raw = (
+                b"Content-Type: text/plain; charset=utf-8\r\n"
+                b"Subject: Re: cutover window\r\n\r\n"
+                b"The rollback rehearsal is booked for Friday at noon."
+            )
+            return "OK", [(b"1 (BODY[])", raw), b")"]
         raw = (
             b"Subject: =?utf-8?B?UmU6IGN1dG92ZXIgd2luZG93?=\r\n"
             b"From: priya@acme.com\r\n"
@@ -244,6 +251,17 @@ class FakeIMAP:
             b"Message-ID: <cutover-" + num + b"@acme.com>\r\n\r\n"
         )
         return "OK", [(b"1 (BODY[HEADER.FIELDS ...]", raw), b")"]
+
+    def uid(self, command, *args):
+        # Real imaplib exposes SEARCH/FETCH by sequence number and by UID as
+        # two different entry points with identical (typ, data) shapes; the
+        # fake doesn't need to tell them apart to stand in for either.
+        command = command.lower()
+        if command == "search":
+            return self.search(*args)
+        if command == "fetch":
+            return self.fetch(*args)
+        raise NotImplementedError(command)
 
     def logout(self):
         return "BYE", [b"bye"]
@@ -317,6 +335,28 @@ class TestImapSearch:
         assert opened["readonly"] is True
 
 
+class TestImapFetchBody:
+    async def test_it_decodes_a_plain_text_body(self):
+        text = await _imap.fetch_body(
+            host="imap.test", username="u", password="p",
+            native_id="1", connect_fn=FakeIMAP,
+        )
+        assert "rollback rehearsal" in text
+
+    async def test_a_rejected_login_names_the_app_specific_password(self):
+        def failing(host, port=993):
+            client = FakeIMAP(host, port)
+            client.fail_login = True
+            return client
+
+        with pytest.raises(IntegrationAuthError) as exc:
+            await _imap.fetch_body(
+                host="imap.test", username="u", password="wrong",
+                native_id="1", connect_fn=failing,
+            )
+        assert "app-specific password" in str(exc.value)
+
+
 class TestAppleEmail:
     async def test_identity_prefers_the_rfc_message_id(self, provider, monkeypatch):
         """IMAP sequence numbers are per-session and get reused, so they cannot
@@ -334,6 +374,25 @@ class TestAppleEmail:
         assert mail.rfc_message_id == "<stable@acme.com>"
         assert mail.snippet is None, "header-only fetch has no body to snippet"
         assert mail.url is None
+
+    async def test_get_email_body_delegates_to_imap(self, provider, monkeypatch):
+        async def fake_fetch_body(**kwargs):
+            return "The rollback rehearsal is booked for Friday."
+
+        monkeypatch.setattr(_imap, "fetch_body", fake_fetch_body)
+        body = await provider.get_email_body(native_id="1")
+        assert "rollback rehearsal" in body
+
+    async def test_get_email_body_rejected_login_names_the_app_specific_password(
+        self, provider, monkeypatch
+    ):
+        async def fake_fetch_body(**kwargs):
+            raise IntegrationAuthError("AUTHENTICATIONFAILED")
+
+        monkeypatch.setattr(_imap, "fetch_body", fake_fetch_body)
+        with pytest.raises(IntegrationAuthError) as exc:
+            await provider.get_email_body(native_id="1")
+        assert "app-specific password" in str(exc.value)
 
 
 class TestErrorTyping:

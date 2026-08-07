@@ -17,19 +17,23 @@ import json
 import re
 import sqlite3
 
-from app.config import get_settings
+from app.config import effective, get_settings
 from app.db import get_conn, utcnow
-from app.errors import AppError, NotFoundError
+from app.errors import AppError, NoIntegrationsError, NotFoundError
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
+from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import summarize as summarize_svc
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
+from app.services.providers import loader as providers_svc
 
 log = get_logger("chat")
 
-MAX_TOOL_HOPS = 2
+# One hop more than a transcript-only answer ever needed: search_context ->
+# get_email (verify wording) -> attach_email/attach_event -> final prose.
+MAX_TOOL_HOPS = 3
 MAX_HISTORY_MESSAGES = 20
 
 # Notes are included whole, unlike the one-line snippets events and emails get:
@@ -37,12 +41,25 @@ MAX_HISTORY_MESSAGES = 20
 # half of one is worse than none. The cap is a backstop against a pasted
 # document, not a routine truncation.
 NOTE_BODY_LIMIT = 4000
-TOOL_LINE_RE = re.compile(r"^\s*TOOL:\s*get_transcript\s+(\d+)\s*$", re.IGNORECASE)
+# Same backstop, for a fetched email body: bounds a message that turns out to
+# be a forwarded thread or an attachment dump rather than routine truncation.
+EMAIL_BODY_LIMIT = 8000
+# How many new candidates search_context surfaces per call -- kept well below
+# match_max_candidates, since these are read back into a chat reply rather
+# than rendered as a picker.
+SEARCH_MAX_CANDIDATES = 10
+
+TOOL_RE = re.compile(
+    r"^\s*TOOL:\s*(get_transcript|search_context|get_email|attach_email|attach_event)"
+    r"\s+(.+?)\s*$",
+    re.IGNORECASE,
+)
 
 # How many characters of a hop's answer to withhold before deciding it isn't
-# becoming "TOOL: get_transcript <id>" and can be streamed to the client. The
+# becoming a "TOOL: <verb> <arg>" line and can be streamed to the client. The
 # tool line is always short and on its own line per chat_prompt.md's contract,
-# so this stays well clear of it without needing per-character lookahead.
+# so this stays well clear of the longest verb without needing per-character
+# lookahead.
 TOOL_SNIFF_LIMIT = 48
 KEEPALIVE_SEC = 15.0
 
@@ -103,7 +120,7 @@ def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
         (thread_id,),
     ).fetchall()
     emails = conn.execute(
-        "SELECT subject, sender, date, snippet FROM thread_emails "
+        "SELECT message_id, subject, sender, date, snippet FROM thread_emails "
         "WHERE thread_id = ? ORDER BY date",
         (thread_id,),
     ).fetchall()
@@ -128,7 +145,10 @@ def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
         lines.append("### Emails")
         for m in emails:
             meta = ", ".join(b for b in (m["sender"], (m["date"] or "")[:10]) if b)
-            lines.append(f"- {m['subject'] or '(no subject)'}" + (f" ({meta})" if meta else ""))
+            lines.append(
+                f"- {m['subject'] or '(no subject)'}" + (f" ({meta})" if meta else "")
+                + f" [email_id: {m['message_id']}, ask for its full body if needed]"
+            )
             if m["snippet"]:
                 lines.append(f"  {m['snippet'].strip()}")
 
@@ -210,6 +230,228 @@ def fetch_meeting_transcript_text(conn: sqlite3.Connection, thread_id: int, meet
     return transcript_svc.render(transcript, "text")
 
 
+async def _run_tool(
+    conn: sqlite3.Connection,
+    db_path,
+    thread_id: int,
+    user_id: int,
+    verb: str,
+    arg: str,
+    found: dict[str, dict[str, dict]],
+) -> str:
+    """Dispatch one `TOOL: <verb> <arg>` line to its implementation.
+
+    Every branch catches its own AppError and turns it into a bracketed tool
+    result string instead of raising, so a transient provider hiccup mid-chat
+    becomes something the model can explain rather than a failed request.
+    """
+    if verb == "get_transcript":
+        return _tool_get_transcript(conn, thread_id, arg)
+    if verb == "search_context":
+        return await _tool_search_context(conn, db_path, thread_id, user_id, arg, found)
+    if verb == "get_email":
+        return await _tool_get_email(conn, thread_id, user_id, arg, found)
+    return _tool_attach(conn, thread_id, user_id, verb, arg, found)
+
+
+def _tool_get_transcript(conn: sqlite3.Connection, thread_id: int, arg: str) -> str:
+    try:
+        meeting_id = int(arg)
+    except ValueError:
+        return "[Invalid meeting id]"
+    try:
+        transcript_text = fetch_meeting_transcript_text(conn, thread_id, meeting_id)
+        return f"[Transcript for meeting {meeting_id}]\n{transcript_text}"
+    except NotFoundError as exc:
+        return f"[No transcript available for meeting {meeting_id}: {exc.message}]"
+
+
+def _format_search_results(gathered: dict) -> str:
+    events = gathered["events"]
+    emails = gathered["emails"]
+    lines: list[str] = []
+
+    if events:
+        lines.append("Calendar events found (not yet attached to this thread):")
+        for e in events:
+            when = (e.get("start") or "")[:16].replace("T", " ")
+            where = e.get("location") or e.get("calendar_name") or ""
+            bits = ", ".join(b for b in (when, where) if b)
+            lines.append(
+                f"- {e.get('summary') or 'Untitled'}" + (f" ({bits})" if bits else "")
+                + f" [event_id: {e['uid']}]"
+            )
+            if e.get("description"):
+                lines.append(f"  {e['description'].strip()}")
+
+    if emails:
+        lines.append("Emails found (not yet attached to this thread):")
+        for m in emails:
+            meta = ", ".join(b for b in (m.get("sender"), (m.get("date") or "")[:10]) if b)
+            lines.append(
+                f"- {m.get('subject') or '(no subject)'}" + (f" ({meta})" if meta else "")
+                + f" [email_id: {m['message_id']}]"
+            )
+            if m.get("snippet"):
+                lines.append(f"  {m['snippet'].strip()}")
+
+    if gathered.get("calendar_error"):
+        lines.append(f"(calendar search failed: {gathered['calendar_error']})")
+    if gathered.get("email_error"):
+        lines.append(f"(email search failed: {gathered['email_error']})")
+
+    if not lines:
+        return "[No new calendar events or emails found for that search]"
+    return "\n".join(lines)
+
+
+async def _tool_search_context(
+    conn: sqlite3.Connection,
+    db_path,
+    thread_id: int,
+    user_id: int,
+    arg: str,
+    found: dict[str, dict[str, dict]],
+) -> str:
+    keywords = [w for w in arg.split() if w][:8]
+    if not keywords:
+        return "[search_context needs at least one keyword]"
+
+    days_before = effective(conn, "match_window_days_before")
+    days_after = effective(conn, "match_window_days_after")
+    cal_days_before = effective(conn, "match_window_calendar_days_before")
+    cal_days_after = effective(conn, "match_window_calendar_days_after")
+    # Anchored on now, not a meeting -- this is an ad-hoc chat-triggered search,
+    # not the meeting-anchored search run_match does.
+    start, end = matching_svc.date_window(None, days_before, days_after)
+    cal_start, cal_end = matching_svc.date_window(None, cal_days_before, cal_days_after)
+
+    try:
+        gathered = await matching_svc.gather_candidates(
+            lambda: get_conn(db_path),
+            thread_id=thread_id,
+            keywords=keywords,
+            start=start,
+            end=end,
+            calendar_start=cal_start,
+            calendar_end=cal_end,
+            max_candidates=SEARCH_MAX_CANDIDATES,
+            user_id=user_id,
+        )
+    except NoIntegrationsError as exc:
+        return f"[{exc.message}]"
+
+    for event in gathered["events"]:
+        if event.get("uid"):
+            found["events"][event["uid"]] = event
+    for email in gathered["emails"]:
+        if email.get("message_id"):
+            found["emails"][email["message_id"]] = email
+
+    return _format_search_results(gathered)
+
+
+def _resolve_email_ref(
+    conn: sqlite3.Connection, thread_id: int, message_id: str, found: dict[str, dict[str, dict]]
+) -> dict | None:
+    """Where to fetch a full body from, for an id from search_context or the digest.
+
+    Only ever resolves an id that was either just surfaced by this turn's own
+    search, or already attached to this thread -- never an arbitrary id, which
+    is what keeps get_email from being a way to probe other integrations.
+    """
+    cached = found["emails"].get(message_id)
+    if cached is not None:
+        return {
+            "integration_id": cached.get("integration_id"),
+            "native_id": cached.get("id"),
+            "folder_id": cached.get("folder_id"),
+        }
+
+    row = conn.execute(
+        "SELECT mcp_id, folder_id FROM thread_emails WHERE thread_id = ? AND message_id = ?",
+        (thread_id, message_id),
+    ).fetchone()
+    if row is None:
+        return None
+
+    # thread_emails has no integration_id column of its own; message_id's own
+    # composite shape (`{provider}:{integration_id}:{...}`) is the only place
+    # it's recorded once attached.
+    parts = message_id.split(":", 2)
+    integration_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    return {
+        "integration_id": integration_id,
+        "native_id": row["mcp_id"],
+        "folder_id": row["folder_id"],
+    }
+
+
+async def _tool_get_email(
+    conn: sqlite3.Connection,
+    thread_id: int,
+    user_id: int,
+    message_id: str,
+    found: dict[str, dict[str, dict]],
+) -> str:
+    ref = _resolve_email_ref(conn, thread_id, message_id, found)
+    if ref is None or ref["integration_id"] is None or not ref["native_id"]:
+        return (
+            "[No such email in this thread's context. Run search_context first, "
+            "or use an email_id already shown in THREAD CONTEXT.]"
+        )
+
+    # Owner-scoped: someone else's integration id is "not found," same as any
+    # other object route in this app.
+    row = conn.execute(
+        "SELECT * FROM integrations WHERE id = ? AND user_id = ?",
+        (ref["integration_id"], user_id),
+    ).fetchone()
+    provider = providers_svc.build_provider(conn, row) if row is not None else None
+    body = (
+        await provider.get_email_body(native_id=ref["native_id"], folder_id=ref["folder_id"])
+        if provider is not None
+        else None
+    )
+    if body is None:
+        return "[Full body is not available for that email's account. Use the snippet already shown.]"
+
+    if len(body) > EMAIL_BODY_LIMIT:
+        body = body[:EMAIL_BODY_LIMIT] + "\n(email truncated)"
+    return f"[Email {message_id}]\n{body}"
+
+
+def _tool_attach(
+    conn: sqlite3.Connection,
+    thread_id: int,
+    user_id: int,
+    verb: str,
+    arg: str,
+    found: dict[str, dict[str, dict]],
+) -> str:
+    if verb == "attach_email":
+        item = found["emails"].get(arg)
+        if item is None:
+            return "[No email with that id found this turn -- run search_context first.]"
+        matching_svc.attach_email(
+            conn, thread_id=thread_id, meeting_id=None, email=item, user_id=user_id, auto=False
+        )
+        label = item.get("subject") or "(no subject)"
+    elif verb == "attach_event":
+        item = found["events"].get(arg)
+        if item is None:
+            return "[No event with that id found this turn -- run search_context first.]"
+        matching_svc.attach_event(
+            conn, thread_id=thread_id, meeting_id=None, event=item, user_id=user_id, auto=False
+        )
+        label = item.get("summary") or "Untitled"
+    else:
+        return "[Unknown tool]"
+
+    threads_svc.touch_thread(conn, thread_id)
+    return f"[Attached: {label}]"
+
+
 def _history_messages(conn: sqlite3.Connection, thread_id: int) -> list[dict]:
     rows = conn.execute(
         "SELECT role, content FROM chat_messages WHERE thread_id = ? "
@@ -253,9 +495,9 @@ async def _run_hop(
     config: llm_svc.LLMConfig, payload: dict, queue: asyncio.Queue[str | None]
 ) -> tuple[str, dict]:
     """Stream one LLM turn, forwarding visible text to `queue` as it arrives --
-    except while it might still turn into a `TOOL: get_transcript <id>` line,
-    which must never reach the client. Chunks were observed arriving in large
-    lumps rather than per character, so a bounded sniff window is enough: keep
+    except while it might still turn into a `TOOL: <verb> <arg>` line, which
+    must never reach the client. Chunks were observed arriving in large lumps
+    rather than per character, so a bounded sniff window is enough: keep
     withholding while the buffer is still short and has no newline, then decide
     once and either flush-and-go-live or (if it matched the tool line) stay
     silent for the rest of this hop.
@@ -274,7 +516,7 @@ async def _run_hop(
         passthrough = True
         await queue.put(_sse("token", {"text": buf}))
 
-    if not passthrough and not TOOL_LINE_RE.match(buf.strip()):
+    if not passthrough and not TOOL_RE.match(buf.strip()):
         # A short normal answer never tripped the sniff window -- flush it now.
         await queue.put(_sse("token", {"text": buf}))
 
@@ -312,6 +554,12 @@ async def _produce(
             {"role": "user", "content": message},
         ]
 
+        # Populated by search_context, read by get_email/attach_email/attach_event --
+        # scoped to this one request and never persisted. This is also the safety
+        # boundary: attach_* only ever act on an id this turn's own search just
+        # surfaced, never on an arbitrary model- or client-supplied id.
+        found: dict[str, dict[str, dict]] = {"events": {}, "emails": {}}
+
         content = ""
         usage: dict = {}
         for _ in range(MAX_TOOL_HOPS + 1):
@@ -323,24 +571,22 @@ async def _produce(
                 "include_reasoning": False,
             }
             content, usage = await _run_hop(config, payload, queue)
-            match = TOOL_LINE_RE.match(content.strip())
+            match = TOOL_RE.match(content.strip())
             if not match:
                 break
 
-            meeting_id = int(match.group(1))
+            verb, arg = match.group(1).lower(), match.group(2).strip()
             messages.append({"role": "assistant", "content": content})
             with get_conn(db_path) as conn:
-                try:
-                    transcript_text = fetch_meeting_transcript_text(conn, thread_id, meeting_id)
-                    tool_result = f"[Transcript for meeting {meeting_id}]\n{transcript_text}"
-                except NotFoundError as exc:
-                    tool_result = f"[No transcript available for meeting {meeting_id}: {exc.message}]"
+                tool_result = await _run_tool(
+                    conn, db_path, thread_id, user_id, verb, arg, found
+                )
             messages.append({"role": "user", "content": tool_result})
         else:
-            # Ran out of hops still asking for a transcript -- never show the raw
+            # Ran out of hops still asking for a tool -- never show the raw
             # "TOOL: ..." line to the user. Nothing was streamed for that last
             # hop (it matched the tool pattern), so send the fallback now.
-            if TOOL_LINE_RE.match(content.strip()):
+            if TOOL_RE.match(content.strip()):
                 content = (
                     "I wasn't able to find a direct answer within the context available. "
                     "Try asking about a specific meeting by name or date."

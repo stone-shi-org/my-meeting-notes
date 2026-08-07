@@ -11,6 +11,7 @@ import respx
 from app.db import get_conn, utcnow
 from app.errors import NotFoundError
 from app.services import chat as chat_svc
+from app.services.providers.base import EmailCandidate, EventCandidate, IntegrationRef
 
 LLM_URL = "https://llm.test/v1/chat/completions"
 
@@ -373,3 +374,240 @@ def test_a_model_outside_the_enabled_set_is_rejected(user_client, isolated_setti
     )
     assert resp.status_code == 400
     assert route.call_count == 0
+
+
+# --------------------------------------------------------------------------- #
+# search_context / get_email / attach_email / attach_event tool hops
+# --------------------------------------------------------------------------- #
+
+SEARCH_INTEGRATION_ID = 42
+
+
+class FakeSearchProvider:
+    """Stands in for one connected account, faked a level above the transport
+    -- same seam test_matching.py's FakeProvider uses at
+    ``app.services.matching.providers_svc.load_for_user``.
+    """
+
+    def __init__(self, kind: str, *, label: str):
+        self.ref = IntegrationRef(
+            id=SEARCH_INTEGRATION_ID, provider="fake", account_label=label,
+            calendar_enabled=kind == "calendar", email_enabled=kind == "email",
+        )
+
+    async def search_events(self, **kwargs):
+        return [
+            EventCandidate(
+                uid="evt-cutover", summary="Cutover planning",
+                description="Discuss the rollback window.", location="",
+                start="2026-03-18T09:00:00+00:00", end="2026-03-18T09:30:00+00:00",
+                calendar_name="work@x", account="work@x", type="google",
+                provider="fake", integration_id=SEARCH_INTEGRATION_ID,
+            )
+        ]
+
+    async def search_emails(self, **kwargs):
+        return [
+            EmailCandidate(
+                id="native-1", message_id="fake:42:native-1", sender="priya@acme.com",
+                subject="Re: cutover window", date="2026-03-17T17:42:00+00:00",
+                snippet="rollback rehearsal is booked", account="work@x",
+                provider="fake", integration_id=SEARCH_INTEGRATION_ID,
+            )
+        ]
+
+
+def _fake_load_for_user(conn, user_id, *, kind=None):
+    if user_id is None:
+        return []
+    sources = []
+    if kind in (None, "calendar"):
+        sources.append(FakeSearchProvider("calendar", label="cal@x"))
+    if kind in (None, "email"):
+        sources.append(FakeSearchProvider("email", label="mail@x"))
+    return sources
+
+
+@pytest.fixture
+def fake_search(monkeypatch):
+    monkeypatch.setattr(
+        "app.services.matching.providers_svc.load_for_user", _fake_load_for_user
+    )
+
+
+def _user_id(isolated_settings, username: str = "alice") -> int:
+    with get_conn(isolated_settings.db_path) as conn:
+        return conn.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        ).fetchone()["id"]
+
+
+@respx.mock
+def test_search_context_tool_hop_surfaces_new_candidates(
+    user_client, isolated_settings, fake_search
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: search_context cutover"]),
+            stream_response(["Found a matching email about the cutover window."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Did anyone email me about the cutover?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert route.call_count == 2
+
+    tool_turn = json.loads(route.calls[1].request.content)["messages"][-1]
+    assert tool_turn["role"] == "user"
+    assert "rollback rehearsal is booked" in tool_turn["content"]
+    assert "email_id: fake:42:native-1" in tool_turn["content"]
+    assert "event_id: evt-cutover" in tool_turn["content"]
+
+    # Ephemeral: a search alone must never write anything.
+    with get_conn(isolated_settings.db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM thread_emails WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+            == 0
+        )
+
+
+@respx.mock
+def test_get_email_tool_hop_fetches_the_full_body_after_a_search(
+    user_client, isolated_settings, fake_search, monkeypatch
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    user_id = _user_id(isolated_settings)
+    now = utcnow()
+    with get_conn(isolated_settings.db_path) as conn:
+        conn.execute(
+            "INSERT INTO integrations (id, user_id, provider, account_key, account_label, "
+            "calendar_enabled, email_enabled, auth_type, config_json, created_at, updated_at) "
+            "VALUES (?, ?, 'fake', 'fake-key', 'Fake', 0, 1, 'none', '{}', ?, ?)",
+            (SEARCH_INTEGRATION_ID, user_id, now, now),
+        )
+
+    class FakeBodyProvider:
+        async def get_email_body(self, *, native_id, folder_id=None):
+            return "The rollback rehearsal is booked for Friday at noon, per finance."
+
+    monkeypatch.setattr(
+        chat_svc.providers_svc, "build_provider", lambda conn, row: FakeBodyProvider()
+    )
+
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: search_context cutover"]),
+            stream_response(["TOOL: get_email fake:42:native-1"]),
+            stream_response(["The rehearsal is Friday at noon."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "What day exactly is the rollback rehearsal?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert route.call_count == 3
+
+    tool_turn = json.loads(route.calls[2].request.content)["messages"][-1]
+    assert tool_turn["role"] == "user"
+    assert "Friday at noon, per finance" in tool_turn["content"]
+
+
+@respx.mock
+def test_attach_email_tool_hop_writes_a_thread_email(
+    user_client, isolated_settings, fake_search
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: search_context cutover"]),
+            stream_response(["TOOL: attach_email fake:42:native-1"]),
+            stream_response(["Attached that email to this thread."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Attach the email you found about the cutover."},
+    )
+    assert resp.status_code == 200, resp.text
+    assert route.call_count == 3
+
+    with get_conn(isolated_settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM thread_emails WHERE thread_id = ? AND message_id = ?",
+            (thread_id, "fake:42:native-1"),
+        ).fetchone()
+    assert row is not None
+    assert row["subject"] == "Re: cutover window"
+    # A direct, human-directed action taken through chat -- not the unattended
+    # sweep, so it must not create an unread badge.
+    assert row["auto_attached"] == 0
+    assert row["seen_at"] is not None
+
+
+@respx.mock
+def test_attach_event_tool_hop_writes_a_thread_event(
+    user_client, isolated_settings, fake_search
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: search_context cutover"]),
+            stream_response(["TOOL: attach_event evt-cutover"]),
+            stream_response(["Attached the cutover planning meeting."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Attach that cutover planning meeting too."},
+    )
+    assert resp.status_code == 200, resp.text
+    assert route.call_count == 3
+
+    with get_conn(isolated_settings.db_path) as conn:
+        row = conn.execute(
+            "SELECT * FROM thread_calendar_events WHERE thread_id = ? AND uid = ?",
+            (thread_id, "evt-cutover"),
+        ).fetchone()
+    assert row is not None
+    assert row["summary"] == "Cutover planning"
+
+
+@respx.mock
+def test_attach_without_a_prior_search_is_rejected(
+    user_client, isolated_settings, fake_search
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: attach_email fake:42:native-1"]),
+            stream_response(["I wasn't able to attach that."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Attach the cutover email."},
+    )
+    assert resp.status_code == 200, resp.text
+    assert route.call_count == 2
+
+    tool_turn = json.loads(route.calls[1].request.content)["messages"][-1]
+    assert "search_context first" in tool_turn["content"]
+
+    with get_conn(isolated_settings.db_path) as conn:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM thread_emails WHERE thread_id = ?", (thread_id,)
+            ).fetchone()[0]
+            == 0
+        )

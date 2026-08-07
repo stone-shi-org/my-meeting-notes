@@ -179,6 +179,10 @@ class EmailCandidate:
     score: float | None = None
     provider: str | None = None
     integration_id: int | None = None
+    # Only Zoho's content endpoint needs this; every other provider leaves it
+    # None. Snapshotted through to `thread_emails.folder_id` on attach so a
+    # later full-body fetch can still reach it without re-searching.
+    folder_id: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -256,6 +260,18 @@ class BaseProvider:
         self, *, keywords: list[str], start: datetime, end: datetime
     ) -> list[EmailCandidate]:
         raise NotImplementedError(f"{self.provider_id} does not support email search")
+
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        """Full verbatim text of one email, or None if this provider can't fetch it.
+
+        Unlike search_events/search_emails, this is genuinely optional rather than
+        a "must override" contract -- the email MCP server exposes no fetch-by-id
+        tool at all, so None (not an exception) is the correct default: the caller
+        already has a snippet to fall back to.
+        """
+        return None
 
     async def test(self) -> dict:
         raise NotImplementedError

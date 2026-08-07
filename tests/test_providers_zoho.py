@@ -262,6 +262,9 @@ class TestMail:
         assert mail.snippet == "rollback rehearsal"
         assert mail.message_id == "zoho:5:m-1"
         assert mail.url == "https://mail.zoho.com/zm/#mail/folder/f-9/p/m-1"
+        # folder_id is snapshotted at attach time -- it's what a later
+        # get_email_body call needs to reach Zoho's content endpoint.
+        assert mail.folder_id == "f-9"
         # Zoho's search payload has no RFC 2822 header, so the Gmail-style
         # fallback link must not be attempted for it.
         assert mail.rfc_message_id is None
@@ -289,6 +292,43 @@ class TestMail:
 
         mails = await provider.search_emails(keywords=["x"], start=START, end=END)
         assert [m.subject for m in mails] == ["In window"]
+
+
+class TestMailBody:
+    @respx.mock
+    async def test_it_fetches_content_by_folder_and_message(self, provider):
+        accounts = respx.get(ACCOUNTS).mock(
+            return_value=httpx.Response(200, json={"data": [{"accountId": "1"}]})
+        )
+        content = respx.get(f"{ACCOUNTS}/1/folders/f-9/messages/m-1/content").mock(
+            return_value=httpx.Response(
+                200, json={"data": {"content": "Rollback rehearsal is booked."}}
+            )
+        )
+        body = await provider.get_email_body(native_id="m-1", folder_id="f-9")
+        assert accounts.called
+        assert content.called
+        assert body == "Rollback rehearsal is booked."
+
+    @respx.mock
+    async def test_it_asks_for_json_large(self, provider):
+        """Without this header Zoho omits the body entirely -- same trap as
+        calendar descriptions."""
+        respx.get(ACCOUNTS).mock(
+            return_value=httpx.Response(200, json={"data": [{"accountId": "1"}]})
+        )
+        route = respx.get(f"{ACCOUNTS}/1/folders/f-9/messages/m-1/content").mock(
+            return_value=httpx.Response(200, json={"data": {}})
+        )
+        await provider.get_email_body(native_id="m-1", folder_id="f-9")
+        assert route.calls[0].request.headers["accept"] == "application/json+large"
+
+    async def test_no_folder_id_means_not_fetchable(self, provider):
+        """The content endpoint is folder-scoped; a message this provider never
+        recorded a folder for (or one from before the field existed) can't be
+        reached at all -- returning None here, not raising, is what lets the
+        chat tool fall back to the snippet already shown."""
+        assert await provider.get_email_body(native_id="m-1", folder_id=None) is None
 
 
 class TestStampParsing:

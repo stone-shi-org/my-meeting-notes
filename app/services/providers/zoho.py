@@ -366,7 +366,32 @@ class ZohoProvider(BaseProvider):
             url=self._message_url(native, item.get("folderId")),
             provider=self.provider_id,
             integration_id=self.ref.id,
+            folder_id=str(item["folderId"]) if item.get("folderId") is not None else None,
         )
+
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        # The content endpoint is scoped by folder; a message found before this
+        # field existed (or from a source that never set it) can't be fetched.
+        if not folder_id:
+            return None
+
+        token = await self._token()
+        async with self._http(token, large=True) as http:
+            account_id = await self._account_id(http)
+            body = await self._get(
+                http,
+                f"https://mail.zoho.{self._dc()}/api/accounts/{account_id}"
+                f"/folders/{folder_id}/messages/{native_id}/content",
+            )
+
+        # Zoho's own docs are inconsistent about the field name here (seen
+        # documented as both "content" and "body" depending on API version) --
+        # this has not been checked against a live account. Verify against a
+        # real Zoho mailbox before relying on this in production.
+        data = body.get("data") or {}
+        return _plain(data.get("content") or data.get("body"))
 
     # --------------------------------------------------------------------- test
 

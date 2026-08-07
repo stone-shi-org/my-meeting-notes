@@ -229,6 +229,22 @@ class TestEmailSearch:
         assert [e.subject for e in found] == ["Re: Atlas cutover window"]
 
 
+class TestEmailBody:
+    async def test_returns_the_snippet_verbatim(self, seeded):
+        """Dev fixtures have no separate body column -- the snippet is the
+        whole fake email, which is the right amount of fidelity for a provider
+        that exists to exercise the pipeline rather than model every real
+        provider's body-fetch behaviour."""
+        add_email(seeded, snippet="Confirming the rollback plan for Friday.")
+        [found] = await provider().search_emails(keywords=[], start=WIDE_START, end=WIDE_END)
+
+        body = await provider().get_email_body(native_id=found.id)
+        assert body == "Confirming the rollback plan for Friday."
+
+    async def test_an_unknown_id_returns_none(self, seeded):
+        assert await provider().get_email_body(native_id="email-999") is None
+
+
 # --------------------------------------------------------------------------- #
 # Calendar search
 # --------------------------------------------------------------------------- #

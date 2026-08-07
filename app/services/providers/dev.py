@@ -171,6 +171,27 @@ class DevProvider(BaseProvider):
             integration_id=self.ref.id,
         )
 
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        """The snippet, verbatim -- dev fixtures have no separate body column.
+
+        The dev provider exists to exercise the pipeline, not to model every
+        real provider's body-fetch fidelity, so "the whole fake email is the
+        snippet" is the right amount of fidelity here.
+        """
+        row_id = native_id.removeprefix("email-")
+
+        def run() -> sqlite3.Row | None:
+            with get_conn() as conn:
+                return conn.execute(
+                    "SELECT snippet FROM dev_emails WHERE id = ? AND integration_id = ?",
+                    (row_id, self.ref.id),
+                ).fetchone()
+
+        row = await asyncio.to_thread(run)
+        return row["snippet"] if row else None
+
     # ------------------------------------------------------------- calendar
 
     async def search_events(

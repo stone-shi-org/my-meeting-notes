@@ -112,6 +112,7 @@ def _columns(conn, table: str) -> set[str]:
         ("thread_calendar_events", "source_uid"),
         ("match_runs", "source_errors_json"),
         ("threads", "group_id"),
+        ("thread_emails", "folder_id"),
     ],
 )
 def test_late_columns_are_applied(conn, table, column):

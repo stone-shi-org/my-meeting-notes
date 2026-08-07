@@ -10,7 +10,7 @@ import httpx
 import pytest
 import respx
 
-from app.db import get_conn
+from app.db import get_conn, utcnow
 from app.errors import MCPError
 from app.services import matching as m
 from app.services.providers.base import EmailCandidate, EventCandidate, IntegrationRef
@@ -526,6 +526,31 @@ class TestMatchJob:
         assert user_client.get(
             f"/api/meetings/{meeting['id']}/match/latest"
         ).status_code == 404
+
+
+class TestAttachEmail:
+    def test_folder_id_round_trips(self, conn):
+        """Zoho's content endpoint needs this later -- attach_email is the one
+        place that writes thread_emails, so this is where it must be kept."""
+        now = utcnow()
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, password_salt, "
+            "created_at, updated_at) VALUES (1, 'u', 'h', 's', ?, ?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO threads (id, owner_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 'T', ?, ?)", (now, now),
+        )
+
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={"message_id": "zoho:5:m-1", "subject": "S", "folder_id": "f-9"},
+        )
+
+        row = conn.execute(
+            "SELECT folder_id FROM thread_emails WHERE thread_id = 1 AND message_id = 'zoho:5:m-1'"
+        ).fetchone()
+        assert row["folder_id"] == "f-9"
 
 
 class TestConfirm:

@@ -172,6 +172,23 @@ class AppleProvider(BaseProvider):
             integration_id=self.ref.id,
         )
 
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        # folder_id is meaningless here -- IMAP's only notion of a folder is
+        # `mailbox`, which is fixed per integration rather than per message.
+        _, password = self._credentials()
+        try:
+            return await _imap.fetch_body(
+                host=self.config.get("imap_host") or IMAP_HOST,
+                username=self.imap_username,
+                password=password,
+                native_id=native_id,
+                mailbox=self.config.get("mailbox") or "INBOX",
+            )
+        except IntegrationAuthError as exc:
+            raise self._mail_auth_error(exc) from exc
+
     # --------------------------------------------------------------------- test
 
     async def test(self) -> dict:

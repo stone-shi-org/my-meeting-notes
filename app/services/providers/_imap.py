@@ -26,6 +26,8 @@ log = get_logger("providers.imap")
 DEFAULT_PORT = 993
 # Header-only fetches; bodies are never downloaded.
 FETCH_PARTS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+# The whole message, for the one caller that does want the body.
+FETCH_BODY_PARTS = "(BODY.PEEK[])"
 
 
 def connect(host: str, port: int = DEFAULT_PORT):
@@ -68,7 +70,12 @@ def _search_sync(client, criteria: list[str], limit: int, mailbox: str) -> list[
     if typ != "OK":
         raise ProviderError(f"Could not open mailbox {mailbox!r}", kind="email")
 
-    typ, data = client.search(None, *criteria)
+    # UID, not plain SEARCH/FETCH: a sequence number is only valid for the
+    # connection that issued it and gets reused once a message is expunged, so
+    # an id captured here would silently point at the wrong message (or none)
+    # by the time a later get_email_body call opens a fresh connection. UIDs
+    # are stable for the mailbox's lifetime.
+    typ, data = client.uid("search", None, *criteria)
     if typ != "OK":
         raise ProviderError("IMAP search was rejected", kind="email")
 
@@ -80,7 +87,7 @@ def _search_sync(client, criteria: list[str], limit: int, mailbox: str) -> list[
 
     out = []
     for message_id in ids:
-        typ, parts = client.fetch(message_id, FETCH_PARTS)
+        typ, parts = client.uid("fetch", message_id, FETCH_PARTS)
         if typ != "OK" or not parts:
             continue
         raw = next(
@@ -99,6 +106,41 @@ def _search_sync(client, criteria: list[str], limit: int, mailbox: str) -> list[
             }
         )
     return out
+
+
+def _extract_plain_text(parsed: email.message.Message) -> str | None:
+    if parsed.is_multipart():
+        for part in parsed.walk():
+            if (
+                part.get_content_type() == "text/plain"
+                and part.get_content_disposition() != "attachment"
+            ):
+                payload = part.get_payload(decode=True)
+                if payload:
+                    return payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+        return None
+    payload = parsed.get_payload(decode=True)
+    if not payload:
+        return None
+    return payload.decode(parsed.get_content_charset() or "utf-8", errors="replace")
+
+
+def _fetch_body_sync(client, native_id: str, mailbox: str) -> str | None:
+    typ, _ = client.select(mailbox, readonly=True)
+    if typ != "OK":
+        raise ProviderError(f"Could not open mailbox {mailbox!r}", kind="email")
+
+    uid = native_id.encode() if isinstance(native_id, str) else native_id
+    typ, parts = client.uid("fetch", uid, FETCH_BODY_PARTS)
+    if typ != "OK" or not parts:
+        return None
+    raw = next(
+        (p[1] for p in parts if isinstance(p, tuple) and len(p) > 1 and p[1]), None
+    )
+    if raw is None:
+        return None
+    parsed = email.message_from_bytes(raw if isinstance(raw, bytes) else raw.encode())
+    return _extract_plain_text(parsed)
 
 
 async def search(
@@ -127,6 +169,37 @@ async def search(
                     "It must be an app-specific password, not your account password."
                 ) from exc
             return _search_sync(client, criteria, limit, mailbox)
+        finally:
+            try:
+                client.logout()
+            except Exception:  # noqa: BLE001 - a failed logout must not mask results
+                pass
+
+    return await asyncio.to_thread(run)
+
+
+async def fetch_body(
+    *,
+    host: str,
+    username: str,
+    password: str,
+    native_id: str,
+    mailbox: str = "INBOX",
+    connect_fn=connect,
+) -> str | None:
+    """Full body of one message, by the UID a prior `search` returned."""
+
+    def run() -> str | None:
+        client = connect_fn(host)
+        try:
+            try:
+                client.login(username, password)
+            except imaplib.IMAP4.error as exc:
+                raise IntegrationAuthError(
+                    "The mail server rejected the Apple ID or app-specific password. "
+                    "It must be an app-specific password, not your account password."
+                ) from exc
+            return _fetch_body_sync(client, native_id, mailbox)
         finally:
             try:
                 client.logout()

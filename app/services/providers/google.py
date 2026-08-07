@@ -15,6 +15,7 @@ individual get drops one email instead of the whole search.
 from __future__ import annotations
 
 import asyncio
+import base64
 import time
 from datetime import datetime
 from urllib.parse import quote
@@ -103,6 +104,45 @@ def _when(node: dict | None) -> str | None:
     if not node:
         return None
     return node.get("dateTime") or node.get("date")
+
+
+def _decode_part_data(data: str | None) -> str | None:
+    if not data:
+        return None
+    # Gmail's body.data is base64url, not standard base64 -- padding is also
+    # frequently stripped, which urlsafe_b64decode alone will not tolerate.
+    padded = data + "=" * (-len(data) % 4)
+    try:
+        return base64.urlsafe_b64decode(padded).decode("utf-8", errors="replace")
+    except (ValueError, TypeError):
+        return None
+
+
+def _extract_gmail_text(payload: dict) -> str | None:
+    """Walk a ``format=full`` payload for the first text/plain part.
+
+    Falls back to text/html if that's all the message has -- returned as-is
+    rather than stripped, since a half-rendered tag soup would be a worse
+    "verbatim body" than the markup itself.
+    """
+    html_fallback: str | None = None
+
+    def walk(node: dict) -> str | None:
+        nonlocal html_fallback
+        mime = node.get("mimeType") or ""
+        if mime == "text/plain":
+            text = _decode_part_data((node.get("body") or {}).get("data"))
+            if text:
+                return text
+        if mime == "text/html" and html_fallback is None:
+            html_fallback = _decode_part_data((node.get("body") or {}).get("data"))
+        for part in node.get("parts") or []:
+            found = walk(part)
+            if found:
+                return found
+        return None
+
+    return walk(payload) or html_fallback
 
 
 class GoogleProvider(BaseProvider):
@@ -297,6 +337,20 @@ class GoogleProvider(BaseProvider):
             provider=self.provider_id,
             integration_id=self.ref.id,
         )
+
+    async def get_email_body(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> str | None:
+        token = await self._token()
+        async with httpx.AsyncClient(
+            timeout=REQUEST_TIMEOUT_SEC, headers={"Authorization": f"Bearer {token}"}
+        ) as http:
+            body = await self._get(
+                http,
+                f"{GMAIL_API}/users/me/messages/{native_id}",
+                {"format": "full"},
+            )
+        return _extract_gmail_text(body.get("payload") or {})
 
     # --------------------------------------------------------------------- test
 

@@ -7,6 +7,7 @@ collapse a weekly standup into one result.
 
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -355,6 +356,63 @@ class TestGmail:
         [email] = await provider.search_emails(keywords=["x"], start=START, end=END)
         assert email.snippet is None
         assert email.subject == "S"
+
+
+def _b64url(text: str) -> str:
+    return base64.urlsafe_b64encode(text.encode()).decode()
+
+
+class TestGmailBody:
+    @respx.mock
+    async def test_it_decodes_the_plain_text_part(self, provider):
+        text = "The rollback rehearsal is booked for Friday at noon."
+        respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "m1",
+                    "payload": {
+                        "mimeType": "multipart/alternative",
+                        "parts": [
+                            {"mimeType": "text/html", "body": {"data": _b64url("<p>hi</p>")}},
+                            {"mimeType": "text/plain", "body": {"data": _b64url(text)}},
+                        ],
+                    },
+                },
+            )
+        )
+        body = await provider.get_email_body(native_id="m1")
+        assert body == text
+
+    @respx.mock
+    async def test_it_requests_format_full(self, provider):
+        route = respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(200, json={"id": "m1", "payload": {}})
+        )
+        await provider.get_email_body(native_id="m1")
+        assert dict(route.calls[0].request.url.params)["format"] == "full"
+
+    @respx.mock
+    async def test_it_falls_back_to_html_when_theres_no_plain_part(self, provider):
+        html = "<p>hi there</p>"
+        respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "m1",
+                    "payload": {"mimeType": "text/html", "body": {"data": _b64url(html)}},
+                },
+            )
+        )
+        body = await provider.get_email_body(native_id="m1")
+        assert body == html
+
+    @respx.mock
+    async def test_no_body_at_all_returns_none(self, provider):
+        respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(200, json={"id": "m1", "payload": {}})
+        )
+        assert await provider.get_email_body(native_id="m1") is None
 
 
 class TestAuthFailure:

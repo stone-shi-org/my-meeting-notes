@@ -707,8 +707,8 @@ def attach_email(
             subject, date, snippet, account, triage_level, tag, reason, summary,
             score, raw_json, relevance_score, relevance_reason,
             url, rfc_message_id, provider, auto_attached, seen_at,
-            attached_by, attached_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attached_by, attached_at, folder_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id, message_id) DO UPDATE SET
             meeting_id = excluded.meeting_id,
             relevance_score = excluded.relevance_score,
@@ -724,7 +724,7 @@ def attach_email(
             email.get("relevance_reason"),
             email.get("url"), email.get("rfc_message_id"), email.get("provider"),
             auto_attached, seen_at,
-            user_id, utcnow(),
+            user_id, utcnow(), email.get("folder_id"),
         ),
     )
 
