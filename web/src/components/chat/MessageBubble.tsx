@@ -26,6 +26,8 @@ export function MessageBubble({
   scope,
   question,
   model,
+  promptTokens,
+  completionTokens,
 }: {
   role: 'user' | 'assistant';
   content: string;
@@ -34,6 +36,8 @@ export function MessageBubble({
   /** The turn this reply answered. Makes for much better generated titles. */
   question?: string;
   model?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
 }) {
   if (role === 'user') {
     return (
@@ -50,7 +54,14 @@ export function MessageBubble({
         dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
       />
       {scope && (
-        <AssistantActions content={content} scope={scope} question={question} model={model} />
+        <AssistantActions
+          content={content}
+          scope={scope}
+          question={question}
+          model={model}
+          promptTokens={promptTokens}
+          completionTokens={completionTokens}
+        />
       )}
     </div>
   );
@@ -61,11 +72,15 @@ function AssistantActions({
   scope,
   question,
   model,
+  promptTokens,
+  completionTokens,
 }: {
   content: string;
   scope: NoteScope;
   question?: string;
   model?: string | null;
+  promptTokens?: number | null;
+  completionTokens?: number | null;
 }) {
   const [copied, setCopied] = useState<'ok' | 'failed' | null>(null);
   const [picking, setPicking] = useState(false);
@@ -110,6 +125,17 @@ function AssistantActions({
         {saved && (
           <span role="status" className="min-w-0 truncate text-2xs text-success-ink">
             Saved to “{saved}”
+          </span>
+        )}
+
+        {(model || (promptTokens != null && completionTokens != null)) && (
+          <span className="ml-auto flex items-center gap-1.5 text-2xs text-fg-subtle">
+            {model && <span className="truncate">{model}</span>}
+            {promptTokens != null && completionTokens != null && (
+              <span className="shrink-0">
+                {promptTokens}→{completionTokens} tok
+              </span>
+            )}
           </span>
         )}
       </div>

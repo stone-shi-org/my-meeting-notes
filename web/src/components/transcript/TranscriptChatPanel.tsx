@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
@@ -11,6 +12,13 @@ import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
 import { ApiError, type MeetingChatMessage } from '@/types/api';
+
+const TRANSCRIPT_STARTER_PROMPTS = [
+  "What's next?",
+  'Summarize this meeting',
+  'What were the key decisions?',
+  'List the action items',
+];
 
 /**
  * Always-on assistant for asking questions about a single meeting's
@@ -25,9 +33,13 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   // null = idle, '' = waiting on the model, non-empty = tokens arriving.
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<{ code: string; message: string } | null>(null);
+  // Chips suggested from the turn that just finished. Ephemeral -- lost on
+  // reload, and replaced (never merged) by the next round's own suggestions.
+  const [followUps, setFollowUps] = useState<string[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
   // Saved answers are filed on the meeting, which puts them on its thread's
   // timeline with the meeting recorded alongside.
@@ -46,12 +58,13 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     onSuccess: () => {
       queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], []);
       setStreamError(null);
+      setFollowUps([]);
     },
   });
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, streamingText, expanded]);
+  }, [messages.length, streamingText, expanded, followUps]);
 
   // Abandoning the read on unmount/collapse doesn't stop the answer being
   // generated and saved server-side -- it just stops watching it arrive.
@@ -64,11 +77,25 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     if (expanded) textareaRef.current?.focus();
   }, [expanded]);
 
-  async function submit() {
-    const message = draft.trim();
+  // Collapse on any click that lands outside the panel -- mousedown, not
+  // click, so it fires before a focus change elsewhere steals the outcome.
+  useEffect(() => {
+    if (!expanded) return;
+    function handlePointerDown(e: MouseEvent) {
+      if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+        minimize();
+      }
+    }
+    document.addEventListener('mousedown', handlePointerDown);
+    return () => document.removeEventListener('mousedown', handlePointerDown);
+  }, [expanded]);
+
+  async function submit(overrideMessage?: string) {
+    const message = (overrideMessage ?? draft).trim();
     if (!message || streamingText !== null) return;
     setDraft('');
     setStreamError(null);
+    setFollowUps([]);
 
     const optimisticUser: MeetingChatMessage = {
       id: -Date.now(),
@@ -76,6 +103,8 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
       role: 'user',
       content: message,
       model: null,
+      prompt_tokens: null,
+      completion_tokens: null,
       created_at: new Date().toISOString(),
     };
     queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], (prev) => [
@@ -103,6 +132,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
             setStreamError(err);
             setStreamingText(null);
           },
+          onSuggestions: (suggestions) => setFollowUps(suggestions),
         },
         controller.signal,
         chatModel.selected,
@@ -128,6 +158,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
 
   return (
     <div
+      ref={panelRef}
       className={cn(
         'fixed z-30 flex flex-col overflow-hidden border-border bg-surface transition-all duration-slow ease-out motion-reduce:transition-none',
         expanded
@@ -196,11 +227,25 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
           )}
 
           {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && (
-            <p className="text-sm text-fg-subtle">
-              Ask about this meeting's transcript — what was said, who said it, exact
-              numbers or quotes, or anything else the recording covers. Any answer can be
-              copied or kept as a note on this meeting.
-            </p>
+            <>
+              <p className="text-sm text-fg-subtle">
+                Ask about this meeting's transcript — what was said, who said it, exact
+                numbers or quotes, or anything else the recording covers. Any answer can be
+                copied or kept as a note on this meeting.
+              </p>
+              <div className="mt-3 flex flex-wrap gap-2">
+                {TRANSCRIPT_STARTER_PROMPTS.map((prompt) => (
+                  <button
+                    key={prompt}
+                    type="button"
+                    onClick={() => void submit(prompt)}
+                    className="rounded-full border border-border bg-transparent px-3 py-1 text-sm text-fg-faint transition-colors duration-fast hover:border-border-strong hover:bg-surface hover:text-fg"
+                  >
+                    {prompt}
+                  </button>
+                ))}
+              </div>
+            </>
           )}
 
           {messages.map((message, i) => (
@@ -215,9 +260,15 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
                 // The turn this answered, for the generated note title.
                 question={messages[i - 1]?.role === 'user' ? messages[i - 1].content : undefined}
                 model={message.model}
+                promptTokens={message.prompt_tokens}
+                completionTokens={message.completion_tokens}
               />
             </div>
           ))}
+
+          {streamingText === null && messages.at(-1)?.role === 'assistant' && (
+            <FollowUpChips suggestions={followUps} onPick={(text) => void submit(text)} />
+          )}
 
           {/* No scope while the reply is still arriving: there is nothing to
               copy or file until it is finished and saved. */}

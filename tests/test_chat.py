@@ -280,6 +280,11 @@ def test_history_round_trips(user_client, isolated_settings):
     assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
     assert history[0]["content"] == "First question"
     assert history[2]["content"] == "Second question"
+    # Usage is captured on the assistant turn only -- a user message has no
+    # completion to have spent tokens on.
+    assert history[1]["prompt_tokens"] == 100
+    assert history[1]["completion_tokens"] == 20
+    assert history[0]["prompt_tokens"] is None
 
 
 @respx.mock
@@ -339,6 +344,58 @@ def test_other_users_thread_404s(user_client, other_user_client, isolated_settin
 
     resp = other_user_client.get(f"/api/threads/{thread_id}/chat")
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Follow-up suggestions
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_a_completed_answer_gets_a_suggestions_event(user_client, isolated_settings):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["Sure, here's an answer."]),
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": json.dumps({"suggestions": ["A", "B", "C"]})}}
+                    ],
+                    "usage": {"prompt_tokens": 40, "completion_tokens": 10},
+                },
+            ),
+        ]
+    )
+
+    resp = user_client.post(f"/api/threads/{thread_id}/chat", json={"message": "hi"})
+    assert resp.status_code == 200, resp.text
+
+    events = [e for e, _ in parse_sse_frames(resp.text)]
+    # After, not before -- the chips are for the round that just finished, not
+    # a replacement for the answer itself.
+    assert events.index("suggestions") > events.index("done")
+    suggestions_data = next(d for e, d in parse_sse_frames(resp.text) if e == "suggestions")
+    assert suggestions_data["suggestions"] == ["A", "B", "C"]
+
+
+@respx.mock
+def test_a_failed_suggestions_call_does_not_break_the_answer(user_client, isolated_settings):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["Sure, here's an answer."]),
+            httpx.Response(500, json={"error": "boom"}),
+        ]
+    )
+
+    resp = user_client.post(f"/api/threads/{thread_id}/chat", json={"message": "hi"})
+    assert resp.status_code == 200, resp.text
+
+    events = [e for e, _ in parse_sse_frames(resp.text)]
+    assert "done" in events
+    assert "suggestions" not in events
 
 
 # --------------------------------------------------------------------------- #

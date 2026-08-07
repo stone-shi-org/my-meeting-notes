@@ -21,6 +21,7 @@ from app.config import effective, get_settings
 from app.db import get_conn, utcnow
 from app.errors import AppError, NoIntegrationsError, NotFoundError
 from app.logging_config import get_logger
+from app.services import chat_followups as chat_followups_svc
 from app.services import llm as llm_svc
 from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
@@ -471,6 +472,8 @@ def _row_to_message(row: sqlite3.Row) -> dict:
         "role": row["role"],
         "content": row["content"],
         "model": row["model"],
+        "prompt_tokens": row["prompt_tokens"],
+        "completion_tokens": row["completion_tokens"],
         "created_at": row["created_at"],
     }
 
@@ -618,6 +621,13 @@ async def _produce(
 
         log.info("chat reply for thread %s (%s)", thread_id, config.model)
         await queue.put(_sse("done", _row_to_message(assistant_row)))
+
+        suggestions = await asyncio.to_thread(
+            chat_followups_svc.generate_sync,
+            db_path, question=message, answer=content, model=config.model,
+        )
+        if suggestions:
+            await queue.put(_sse("suggestions", {"suggestions": suggestions}))
     except AppError as exc:
         # Same "a failed send is never saved" behavior as before -- nothing is
         # persisted, the client just learns why.

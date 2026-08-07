@@ -183,7 +183,10 @@ def test_reply_uses_transcript_as_context(user_client, isolated_settings):
         json={"message": "What was the exact figure mentioned?"},
     )
     assert resp.status_code == 200, resp.text
-    assert route.call_count == 1
+    # 1 for the answer, 1 for the follow-up-suggestions call that fires after
+    # it -- this route always streams, so that second call fails harmlessly
+    # (stream=false expected) and just means no suggestions this round.
+    assert route.call_count == 2
 
     request_body = json.loads(route.calls[0].request.content)
     system_message = request_body["messages"][0]["content"]
@@ -208,6 +211,8 @@ def test_history_round_trips(user_client, isolated_settings):
     assert [m["role"] for m in history] == ["user", "assistant", "user", "assistant"]
     assert history[0]["content"] == "First question"
     assert history[2]["content"] == "Second question"
+    assert history[1]["prompt_tokens"] == 100
+    assert history[1]["completion_tokens"] == 20
 
 
 @respx.mock
@@ -254,6 +259,57 @@ def test_llm_failure_streams_an_error_frame_and_persists_nothing(user_client, is
 
     history = user_client.get(f"/api/meetings/{meeting_id}/chat").json()
     assert history == []
+
+
+# --------------------------------------------------------------------------- #
+# Follow-up suggestions
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_a_completed_answer_gets_a_suggestions_event(user_client, isolated_settings):
+    meeting_id = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["Sure, here's an answer."]),
+            httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {"message": {"content": json.dumps({"suggestions": ["A", "B", "C"]})}}
+                    ],
+                    "usage": {"prompt_tokens": 40, "completion_tokens": 10},
+                },
+            ),
+        ]
+    )
+
+    resp = user_client.post(f"/api/meetings/{meeting_id}/chat", json={"message": "hi"})
+    assert resp.status_code == 200, resp.text
+
+    frames = parse_sse_frames(resp.text)
+    events = [e for e, _ in frames]
+    assert events.index("suggestions") > events.index("done")
+    suggestions_data = next(d for e, d in frames if e == "suggestions")
+    assert suggestions_data["suggestions"] == ["A", "B", "C"]
+
+
+@respx.mock
+def test_a_failed_suggestions_call_does_not_break_the_answer(user_client, isolated_settings):
+    meeting_id = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["Sure, here's an answer."]),
+            httpx.Response(500, json={"error": "boom"}),
+        ]
+    )
+
+    resp = user_client.post(f"/api/meetings/{meeting_id}/chat", json={"message": "hi"})
+    assert resp.status_code == 200, resp.text
+
+    events = [e for e, _ in parse_sse_frames(resp.text)]
+    assert "done" in events
+    assert "suggestions" not in events
 
 
 # --------------------------------------------------------------------------- #

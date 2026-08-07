@@ -37,6 +37,10 @@ export interface ChatStreamHandlers<T = ChatMessage> {
   onToken: (text: string) => void;
   onDone: (message: T) => void;
   onError: (error: { code: string; message: string }) => void;
+  /** Follow-up chips generated from the turn that just finished. Arrives
+   * after `onDone`, from a second LLM call -- may never arrive at all if
+   * that call fails, since a missing suggestion is not a chat error. */
+  onSuggestions?: (suggestions: string[]) => void;
 }
 
 /**
@@ -99,6 +103,7 @@ export async function streamChat<T = ChatMessage>(
       if (frame.event === 'token') handlers.onToken(data.text);
       else if (frame.event === 'done') handlers.onDone(data as T);
       else if (frame.event === 'error') handlers.onError(data);
+      else if (frame.event === 'suggestions') handlers.onSuggestions?.(data.suggestions);
     }
   }
 }

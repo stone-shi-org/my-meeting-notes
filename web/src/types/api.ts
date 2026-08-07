@@ -505,6 +505,8 @@ export interface ChatMessage {
   role: 'user' | 'assistant';
   content: string;
   model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
   created_at: string;
 }
 
@@ -514,6 +516,8 @@ export interface MeetingChatMessage {
   role: 'user' | 'assistant';
   content: string;
   model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
   created_at: string;
 }
 
