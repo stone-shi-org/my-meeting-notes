@@ -1,11 +1,13 @@
 """Meeting chat: ask questions about a single meeting's transcript.
 
-Unlike ``chat.py`` (a thread's meetings, calendar events and emails, digested
-because the whole thread rarely fits), the context here is one meeting's own
-transcript -- already the thing being asked about, so it is sent close to
-verbatim rather than compressed through a summary. There is no on-demand
-tool: a single transcript either fits the budget or gets truncated in place,
-with a note saying so.
+Unlike ``chat.py`` (a thread's *many* meetings, digested because the whole
+thread rarely fits), the transcript here is one meeting's own -- already the
+thing being asked about, so it is sent close to verbatim rather than
+compressed through a summary. The calendar events, emails and notes attached
+to *this* meeting are few enough (``matching.attached_context`` is already
+scoped to one meeting) to inline the same way, so both go in the digest
+directly. There is no on-demand tool: a single meeting's material either fits
+the budget or gets truncated in place, with a note saying so.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from app.errors import AppError
 from app.logging_config import get_logger
 from app.services import chat_followups as chat_followups_svc
 from app.services import llm as llm_svc
+from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
@@ -29,6 +32,73 @@ log = get_logger("meeting_chat")
 MAX_HISTORY_MESSAGES = 20
 KEEPALIVE_SEC = 15.0
 
+# Same backstop as chat.py's NOTE_BODY_LIMIT, for the same reason -- a note is
+# short by construction, so this only guards against a pasted document.
+NOTE_BODY_LIMIT = 4000
+
+
+def _indent(text: str) -> str:
+    """Keep a multi-line note body inside its bullet -- same reasoning as
+    chat.py's twin: a note is markdown someone wrote, and its own headings and
+    bullets would otherwise read as part of the digest's own structure.
+    """
+    return text.replace("\n", "\n  ")
+
+
+def _format_meeting_attachments(conn: sqlite3.Connection, meeting_id: int) -> str:
+    """Calendar events, emails and notes attached to *this* meeting.
+
+    Mirrors chat.py's ``_format_attachments``, scoped to one meeting instead
+    of a whole thread. Events and emails reuse ``matching.attached_context``,
+    which already queries them by ``meeting_id`` for the summarizer -- no
+    reason to re-derive the same filter here.
+    """
+    context = matching_svc.attached_context(conn, meeting_id)
+    notes = conn.execute(
+        "SELECT title, body, source, created_at FROM thread_notes "
+        "WHERE meeting_id = ? ORDER BY created_at",
+        (meeting_id,),
+    ).fetchall()
+
+    lines: list[str] = []
+    if context["events"]:
+        lines.append("### Calendar events")
+        for e in context["events"]:
+            when = (e["start_at"] or "")[:16].replace("T", " ")
+            where = e["location"] or e["calendar_name"] or ""
+            bits = ", ".join(b for b in (when, where) if b)
+            lines.append(f"- {e['summary'] or 'Untitled'}" + (f" ({bits})" if bits else ""))
+            if e["description"]:
+                lines.append(f"  {e['description'].strip()}")
+
+    if context["emails"]:
+        lines.append("### Emails")
+        for m in context["emails"]:
+            meta = ", ".join(b for b in (m["sender"], (m["date"] or "")[:10]) if b)
+            lines.append(f"- {m['subject'] or '(no subject)'}" + (f" ({meta})" if meta else ""))
+            if m["snippet"]:
+                lines.append(f"  {m['snippet'].strip()}")
+
+    if notes:
+        lines.append("### Notes")
+        for n in notes:
+            when = (n["created_at"] or "")[:10]
+            # Same rule as chat.py's twin: an AI-authored note is this
+            # assistant's own earlier output, not evidence.
+            origin = "saved from an AI answer" if n["source"] == "ai_chat" else "written by the user"
+            bits = ", ".join(b for b in (when, origin) if b)
+            lines.append(f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else ""))
+            body = (n["body"] or "").strip()
+            if body:
+                shown = body[:NOTE_BODY_LIMIT]
+                if len(body) > NOTE_BODY_LIMIT:
+                    shown += "\n(note truncated)"
+                lines.append(f"  {_indent(shown)}")
+
+    if not lines:
+        return "(no calendar events, emails or notes attached to this meeting)"
+    return "\n".join(lines)
+
 
 def build_meeting_digest(conn: sqlite3.Connection, meeting_id: int) -> tuple[str, bool]:
     """Compose the context sent to the model. Returns ``(digest, truncated)``."""
@@ -37,9 +107,16 @@ def build_meeting_digest(conn: sqlite3.Connection, meeting_id: int) -> tuple[str
     when = (meeting["meeting_at"] or "")[:16].replace("T", " ")
     header = f"# {title}" + (f" ({when})" if when else "")
 
+    preamble = (
+        header
+        + "\n\n## Calendar events, emails and notes attached to this meeting\n"
+        + _format_meeting_attachments(conn, meeting_id)
+        + "\n\n## Transcript"
+    )
+
     transcript = transcript_svc.get_transcript(conn, meeting_id)
     budget = get_settings().summary_max_input_tokens
-    used = llm_svc.estimate_tokens(header)
+    used = llm_svc.estimate_tokens(preamble)
     truncated = False
     lines: list[str] = []
 
@@ -60,7 +137,7 @@ def build_meeting_digest(conn: sqlite3.Connection, meeting_id: int) -> tuple[str
             "context limit)"
         )
 
-    return header + "\n\n" + "\n".join(lines), truncated
+    return preamble + "\n\n" + "\n".join(lines), truncated
 
 
 def _history_messages(conn: sqlite3.Connection, meeting_id: int) -> list[dict]:

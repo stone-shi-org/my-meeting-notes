@@ -140,6 +140,69 @@ def test_digest_tags_the_me_marked_speaker(seeded):
     assert "SPEAKER_00 (me): Let's kick off the budget review." in digest
 
 
+def test_digest_includes_attached_event_email_and_note(seeded):
+    now = utcnow()
+    seeded.execute(
+        "INSERT INTO thread_calendar_events (thread_id, meeting_id, uid, summary, description, "
+        "start_at, raw_json, attached_at) VALUES (1, 1, 'ev1', 'Budget sync', 'Bring the numbers', "
+        "'2026-07-15T10:00:00Z', '{}', ?)",
+        (now,),
+    )
+    seeded.execute(
+        "INSERT INTO thread_emails (thread_id, meeting_id, message_id, sender, subject, date, "
+        "snippet, raw_json, attached_at) VALUES (1, 1, 'm1', 'cfo@example.com', 'Re: budget', "
+        "'2026-07-14T00:00:00Z', 'See attached figures', '{}', ?)",
+        (now,),
+    )
+    seeded.execute(
+        "INSERT INTO thread_notes (thread_id, meeting_id, title, body, source, created_at, updated_at) "
+        "VALUES (1, 1, 'Follow up', 'Check with finance', 'user', ?, ?)",
+        (now, now),
+    )
+
+    digest, _truncated = meeting_chat_svc.build_meeting_digest(seeded, meeting_id=1)
+
+    assert "Budget sync" in digest
+    assert "Bring the numbers" in digest
+    assert "Re: budget" in digest
+    assert "See attached figures" in digest
+    assert "Follow up" in digest
+    assert "Check with finance" in digest
+    assert "written by the user" in digest
+
+
+def test_digest_notes_own_ai_authored_notes(seeded):
+    now = utcnow()
+    seeded.execute(
+        "INSERT INTO thread_notes (thread_id, meeting_id, title, body, source, created_at, updated_at) "
+        "VALUES (1, 1, 'Saved reply', 'The budget is forty two thousand.', 'ai_chat', ?, ?)",
+        (now, now),
+    )
+
+    digest, _truncated = meeting_chat_svc.build_meeting_digest(seeded, meeting_id=1)
+
+    assert "saved from an AI answer" in digest
+
+
+def test_digest_omits_another_meetings_attachments(seeded):
+    now = utcnow()
+    seeded.execute(
+        "INSERT INTO meetings (id, thread_id, owner_id, title, meeting_at, created_at, updated_at) "
+        "VALUES (2, 1, 1, 'Other meeting', '2026-07-16T10:00:00Z', ?, ?)",
+        (now, now),
+    )
+    seeded.execute(
+        "INSERT INTO thread_notes (thread_id, meeting_id, title, body, source, created_at, updated_at) "
+        "VALUES (1, 2, 'Unrelated note', 'Not about the budget meeting', 'user', ?, ?)",
+        (now, now),
+    )
+
+    digest, _truncated = meeting_chat_svc.build_meeting_digest(seeded, meeting_id=1)
+
+    assert "Unrelated note" not in digest
+    assert "no calendar events, emails or notes attached to this meeting" in digest
+
+
 def test_digest_truncates_when_over_budget(seeded, monkeypatch):
     monkeypatch.setenv("MMN_SUMMARY_MAX_INPUT_TOKENS", "5")
     from app.config import reset_settings_cache
