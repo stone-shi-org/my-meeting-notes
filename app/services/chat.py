@@ -56,12 +56,6 @@ TOOL_RE = re.compile(
     re.IGNORECASE,
 )
 
-# How many characters of a hop's answer to withhold before deciding it isn't
-# becoming a "TOOL: <verb> <arg>" line and can be streamed to the client. The
-# tool line is always short and on its own line per chat_prompt.md's contract,
-# so this stays well clear of the longest verb without needing per-character
-# lookahead.
-TOOL_SNIFF_LIMIT = 48
 KEEPALIVE_SEC = 15.0
 
 
@@ -509,11 +503,9 @@ async def _run_hop(
 ) -> tuple[str, dict]:
     """Stream one LLM turn, forwarding visible text to `queue` as it arrives --
     except while it might still turn into a `TOOL: <verb> <arg>` line, which
-    must never reach the client. Chunks were observed arriving in large lumps
-    rather than per character, so a bounded sniff window is enough: keep
-    withholding while the buffer is still short and has no newline, then decide
-    once and either flush-and-go-live or (if it matched the tool line) stay
-    silent for the rest of this hop.
+    must never reach the client. Once the output starts with ``TOOL:`` it stays
+    withheld until the complete line can be validated; tool arguments are not
+    length-bounded and therefore cannot safely use a fixed sniff window.
     """
     usage: dict = {}
     buf = ""
@@ -524,7 +516,10 @@ async def _run_hop(
         if passthrough:
             await queue.put(_sse("token", {"text": delta}))
             continue
-        if len(buf) < TOOL_SNIFF_LIMIT and "\n" not in buf:
+
+        candidate = buf.lstrip()
+        upper = candidate.upper()
+        if not candidate or "TOOL:".startswith(upper) or upper.startswith("TOOL:"):
             continue
         passthrough = True
         await queue.put(_sse("token", {"text": buf}))

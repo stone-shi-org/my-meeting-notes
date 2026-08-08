@@ -113,6 +113,51 @@ def test_a_rejected_upload_leaves_no_orphan_meeting(user_client, tmp_path, monke
     assert user_client.get("/api/meetings").json()["total"] == before
 
 
+def test_a_rejected_upload_leaves_no_orphan_thread(
+    user_client, isolated_settings, tmp_path, monkeypatch
+):
+    from app.config import reset_settings_cache
+
+    monkeypatch.setenv("MMN_MAX_UPLOAD_MB", "1")
+    reset_settings_cache()
+    with get_conn(isolated_settings.db_path) as conn:
+        before = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+
+    big = tmp_path / "big.wav"
+    big.write_bytes(b"\0" * (2 * 1024 * 1024))
+    upload(user_client, path=big, new_thread_title="Must not survive")
+
+    with get_conn(isolated_settings.db_path) as conn:
+        after = conn.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
+    assert after == before
+
+
+def test_upload_is_fully_staged_before_the_database_write(
+    user_client, monkeypatch
+):
+    """The large file copy must not run inside SQLite's writer transaction."""
+    from app.routers import meetings as meetings_router
+
+    staged = False
+    original_stream = meetings_router._stream_to_disk
+    original_resolve = meetings_router.resolve_thread
+
+    async def observed_stream(file, dest):
+        nonlocal staged
+        written = await original_stream(file, dest)
+        staged = True
+        return written
+
+    def observed_resolve(*args, **kwargs):
+        assert staged, "thread/meeting writes started before upload staging finished"
+        return original_resolve(*args, **kwargs)
+
+    monkeypatch.setattr(meetings_router, "_stream_to_disk", observed_stream)
+    monkeypatch.setattr(meetings_router, "resolve_thread", observed_resolve)
+
+    assert upload(user_client).status_code == 202
+
+
 def test_upload_needs_a_thread(user_client):
     resp = upload(user_client, new_thread_title=None)
     assert resp.status_code == 400
@@ -275,6 +320,34 @@ class TestAudioOntoAnExistingMeeting:
         assert self.add_audio(user_client, meeting["id"], path=empty).status_code == 400
         # The meeting predates the request, so a bad upload must not delete it.
         assert user_client.get(f"/api/meetings/{meeting['id']}").status_code == 200
+
+    def test_a_bad_replacement_preserves_the_previous_failed_audio(
+        self, user_client, isolated_settings, tmp_path
+    ):
+        meeting = self.blank_meeting(user_client)
+        meeting_dir = isolated_settings.audio_dir / str(meeting["id"])
+        meeting_dir.mkdir(parents=True)
+        original = meeting_dir / "original.wav"
+        original.write_bytes(b"only surviving recording")
+        with get_conn(isolated_settings.db_path) as conn:
+            conn.execute(
+                "UPDATE meetings SET status = 'failed', original_path = ?, "
+                "original_filename = 'original.wav', original_bytes = ? WHERE id = ?",
+                (str(original), original.stat().st_size, meeting["id"]),
+            )
+
+        empty = tmp_path / "empty.wav"
+        empty.write_bytes(b"")
+        assert self.add_audio(user_client, meeting["id"], path=empty).status_code == 400
+
+        assert original.read_bytes() == b"only surviving recording"
+        with get_conn(isolated_settings.db_path) as conn:
+            row = conn.execute(
+                "SELECT original_path, original_bytes FROM meetings WHERE id = ?",
+                (meeting["id"],),
+            ).fetchone()
+        assert row["original_path"] == str(original)
+        assert row["original_bytes"] == len(b"only surviving recording")
 
     def test_someone_elses_meeting_is_404(self, user_client, other_user_client):
         meeting = self.blank_meeting(user_client)

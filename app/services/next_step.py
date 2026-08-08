@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import weakref
 
 from app.db import get_conn, utcnow
 from app.logging_config import get_logger
@@ -31,6 +32,21 @@ RECENT_NOTES = 5
 # fetch cap CLAUDE.md documents for Gmail (8) -- this is page-load latency a
 # person is staring at, not a background sweep.
 LIST_REFRESH_CONCURRENCY = 4
+
+# One limiter per application event loop, shared by every concurrent list
+# request on that loop. A limiter created inside ``refresh_many`` only caps one
+# group section; the home page requests every group independently and could
+# otherwise multiply this limit by the number of groups.
+_LIST_REFRESH_LIMITERS: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
+
+
+def _list_refresh_limiter() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    limiter = _LIST_REFRESH_LIMITERS.get(loop)
+    if limiter is None:
+        limiter = asyncio.Semaphore(LIST_REFRESH_CONCURRENCY)
+        _LIST_REFRESH_LIMITERS[loop] = limiter
+    return limiter
 
 # Notes go in whole rather than as a snippet -- see chat.NOTE_BODY_LIMIT for
 # why -- but this payload holds five of them next to everything else, so the
@@ -172,7 +188,7 @@ async def refresh_many(db_path, thread_ids: list[int]) -> dict[int, dict]:
     already-slow LLM round trip by the page size. Capped by
     ``LIST_REFRESH_CONCURRENCY`` rather than left unbounded.
     """
-    sem = asyncio.Semaphore(LIST_REFRESH_CONCURRENCY)
+    sem = _list_refresh_limiter()
 
     async def _one(thread_id: int) -> tuple[int, dict]:
         async with sem:

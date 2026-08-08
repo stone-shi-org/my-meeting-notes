@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
+import uuid
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
@@ -156,7 +157,20 @@ async def _stream_to_disk(file: UploadFile, dest: Path) -> int:
     return written
 
 
-async def _queue_ingest(
+def _staged_upload_path(audio_dir: Path, suffix: str) -> Path:
+    """A same-filesystem temporary path for an upload awaiting validation.
+
+    Multipart parsing has already received the request, but copying a 100 MB
+    spooled file still must not happen while SQLite's single writer lock is
+    held. Keeping staging under ``audio_dir`` also makes the final rename
+    atomic rather than a cross-filesystem copy.
+    """
+    stage_dir = audio_dir / ".uploads"
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    return stage_dir / f"{uuid.uuid4().hex}{suffix}"
+
+
+def _create_ingest_job(
     conn: sqlite3.Connection,
     *,
     meeting_id: int,
@@ -166,6 +180,12 @@ async def _queue_ingest(
     summary_model: str | None,
     auto_summarize: bool,
 ) -> str:
+    """Persist an ingest job in the caller's transaction.
+
+    The routes commit the meeting, filesystem swap and job together before
+    enqueueing it. If enqueueing then fails, restart recovery still sees the
+    committed queued job.
+    """
     job_id = queue_mod.create_job(
         conn,
         job_type="ingest",
@@ -180,8 +200,6 @@ async def _queue_ingest(
             "user_id": user_id,
         },
     )
-    conn.commit()
-    await queue_mod.get_queue().enqueue(job_id)
     return job_id
 
 
@@ -210,53 +228,67 @@ async def upload_meeting(
     filename = file.filename or "upload"
     _check_extension(filename)
 
-    resolved_thread = resolve_thread(
-        conn,
-        user,
-        thread_id=thread_id,
-        new_thread_title=new_thread_title,
-        new_thread_description=new_thread_description,
-    )
-
-    meeting = threads_svc.create_meeting(
-        conn,
-        thread_id=resolved_thread,
-        owner_id=user.id,
-        title=title,
-        meeting_at=meeting_at,
-        notes=notes,
-    )
-    meeting_id = meeting["id"]
-
-    dest = settings.audio_dir / str(meeting_id) / f"original{Path(filename).suffix.lower()}"
+    suffix = Path(filename).suffix.lower()
+    staged = _staged_upload_path(settings.audio_dir, suffix)
     try:
-        written = await _stream_to_disk(file, dest)
+        written = await _stream_to_disk(file, staged)
     except Exception:
-        # This route created the meeting, so a failed upload takes it with it --
-        # unlike POST /{id}/audio, where the meeting predates the request.
-        conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
-        conn.commit()
+        staged.unlink(missing_ok=True)
         raise
 
-    conn.execute(
-        "UPDATE meetings SET original_filename = ?, original_path = ?, "
-        "original_mime = ?, original_bytes = ?, status = 'processing', "
-        "updated_at = ? WHERE id = ?",
-        (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
-    )
+    dest: Path | None = None
+    try:
+        # Nothing writes to SQLite until the complete file has passed the size
+        # and non-empty checks above. A rejected upload therefore creates
+        # neither an orphan meeting nor an orphan thread.
+        resolved_thread = resolve_thread(
+            conn,
+            user,
+            thread_id=thread_id,
+            new_thread_title=new_thread_title,
+            new_thread_description=new_thread_description,
+        )
+        meeting = threads_svc.create_meeting(
+            conn,
+            thread_id=resolved_thread,
+            owner_id=user.id,
+            title=title,
+            meeting_at=meeting_at,
+            notes=notes,
+        )
+        meeting_id = meeting["id"]
+        dest = settings.audio_dir / str(meeting_id) / f"original{suffix}"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        staged.replace(dest)
 
-    if speaker_names:
-        threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
+        conn.execute(
+            "UPDATE meetings SET original_filename = ?, original_path = ?, "
+            "original_mime = ?, original_bytes = ?, status = 'processing', "
+            "updated_at = ? WHERE id = ?",
+            (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
+        )
+        if speaker_names:
+            threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
 
-    job_id = await _queue_ingest(
-        conn,
-        meeting_id=meeting_id,
-        thread_id=resolved_thread,
-        user_id=user.id,
-        diarization_model=diarization_model,
-        summary_model=summary_model,
-        auto_summarize=auto_summarize,
-    )
+        job_id = _create_ingest_job(
+            conn,
+            meeting_id=meeting_id,
+            thread_id=resolved_thread,
+            user_id=user.id,
+            diarization_model=diarization_model,
+            summary_model=summary_model,
+            auto_summarize=auto_summarize,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        if dest is not None:
+            shutil.rmtree(dest.parent, ignore_errors=True)
+        raise
+    finally:
+        staged.unlink(missing_ok=True)
+
+    await queue_mod.get_queue().enqueue(job_id)
 
     log.info(
         "user %s uploaded %s (%d bytes) as meeting %s, job %s",
@@ -308,38 +340,60 @@ async def add_meeting_audio(
     filename = file.filename or "upload"
     _check_extension(filename)
 
-    # Clear out a previous failed attempt rather than leaving orphan files
-    # beside the new one; the directory is per-meeting.
     target_dir = get_settings().audio_dir / str(meeting_id)
-    if target_dir.is_dir():
+    suffix = Path(filename).suffix.lower()
+    staged = _staged_upload_path(get_settings().audio_dir, suffix)
+    try:
+        # Do not touch the failed attempt until its replacement is complete and
+        # valid. Browser recordings may have no other surviving copy.
+        written = await _stream_to_disk(file, staged)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        raise
+
+    backup = target_dir.parent / f".{meeting_id}-{uuid.uuid4().hex}.replaced"
+    dest = target_dir / f"original{suffix}"
+    had_previous = target_dir.is_dir()
+    try:
+        if had_previous:
+            target_dir.replace(backup)
+        target_dir.mkdir(parents=True, exist_ok=False)
+        staged.replace(dest)
+
+        conn.execute(
+            "UPDATE meetings SET original_filename = ?, original_path = ?, "
+            "original_mime = ?, original_bytes = ?, status = 'processing', "
+            # Reset what described the audio that is no longer there.
+            "audio_path = NULL, audio_converted = 0, audio_duration_sec = NULL, "
+            "audio_sample_rate = NULL, audio_channels = NULL, updated_at = ? WHERE id = ?",
+            (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
+        )
+        if speaker_names:
+            threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
+        threads_svc.touch_thread(conn, row["thread_id"])
+
+        job_id = _create_ingest_job(
+            conn,
+            meeting_id=meeting_id,
+            thread_id=row["thread_id"],
+            user_id=user.id,
+            diarization_model=diarization_model,
+            summary_model=summary_model,
+            auto_summarize=auto_summarize,
+        )
+        conn.commit()
+    except Exception:
+        conn.rollback()
         shutil.rmtree(target_dir, ignore_errors=True)
+        if had_previous and backup.exists():
+            backup.replace(target_dir)
+        raise
+    finally:
+        staged.unlink(missing_ok=True)
 
-    dest = target_dir / f"original{Path(filename).suffix.lower()}"
-    written = await _stream_to_disk(file, dest)
-
-    conn.execute(
-        "UPDATE meetings SET original_filename = ?, original_path = ?, "
-        "original_mime = ?, original_bytes = ?, status = 'processing', "
-        # Reset what described the audio that is no longer there.
-        "audio_path = NULL, audio_converted = 0, audio_duration_sec = NULL, "
-        "audio_sample_rate = NULL, audio_channels = NULL, updated_at = ? WHERE id = ?",
-        (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
-    )
-
-    if speaker_names:
-        threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
-
-    threads_svc.touch_thread(conn, row["thread_id"])
-
-    job_id = await _queue_ingest(
-        conn,
-        meeting_id=meeting_id,
-        thread_id=row["thread_id"],
-        user_id=user.id,
-        diarization_model=diarization_model,
-        summary_model=summary_model,
-        auto_summarize=auto_summarize,
-    )
+    if had_previous:
+        shutil.rmtree(backup, ignore_errors=True)
+    await queue_mod.get_queue().enqueue(job_id)
 
     log.info(
         "user %s added %s (%d bytes) to existing meeting %s, job %s",

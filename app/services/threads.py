@@ -254,10 +254,15 @@ def next_step_needs_refresh(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
     """
     keys = row.keys()
     checked_at = row["next_step_checked_at"] if "next_step_checked_at" in keys else None
-    if checked_at and _minutes_since(checked_at) < NEXT_STEP_RETRY_COOLDOWN_MINUTES:
+    generated_at = row["next_step_generated_at"] if "next_step_generated_at" in keys else None
+    # A successful generation stamps both columns with the exact same value.
+    # Cool down only a later failed check; otherwise content attached just
+    # after a successful generation would leave a known-stale suggestion on
+    # the home page for thirty minutes.
+    last_check_failed = bool(checked_at and checked_at != generated_at)
+    if last_check_failed and _minutes_since(checked_at) < NEXT_STEP_RETRY_COOLDOWN_MINUTES:
         return False
 
-    generated_at = row["next_step_generated_at"] if "next_step_generated_at" in keys else None
     if not generated_at:
         return True
     if _minutes_since(generated_at) > NEXT_STEP_MAX_AGE_DAYS * 24 * 60:

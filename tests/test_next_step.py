@@ -7,7 +7,10 @@ provider to fake here, just one chat completion.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import threading
+import time
 from datetime import datetime, timedelta, timezone
 
 import httpx
@@ -197,6 +200,20 @@ class TestListAutoRefresh:
         user_client.get("/api/threads")
         assert len(mock_llm.calls) == 1, "a recent, unchanged suggestion must not regenerate"
 
+    def test_new_content_after_success_bypasses_the_failure_cooldown(
+        self, user_client, meeting, mock_llm
+    ):
+        thread_id = meeting["thread_id"]
+        refresh(user_client, thread_id)
+        assert len(mock_llm.calls) == 1
+
+        user_client.post(
+            "/api/meetings",
+            json={"thread_id": thread_id, "title": "Immediate follow-up"},
+        )
+        user_client.get("/api/threads")
+        assert len(mock_llm.calls) == 2, "known-stale content must refresh immediately"
+
     def test_an_old_suggestion_is_regenerated_even_if_nothing_changed(
         self, user_client, meeting, mock_llm
     ):
@@ -236,3 +253,29 @@ class TestListAutoRefresh:
 
         user_client.get("/api/threads")
         assert len(mock_llm.calls) == 1  # only this user's own thread was generated
+
+
+@pytest.mark.asyncio
+async def test_list_refresh_concurrency_is_shared_across_requests(monkeypatch):
+    from app.services import next_step as next_step_svc
+
+    active = 0
+    maximum = 0
+    lock = threading.Lock()
+
+    def fake_generate(_db_path, thread_id):
+        nonlocal active, maximum
+        with lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.03)
+        with lock:
+            active -= 1
+        return {"next_step": str(thread_id), "error": None}
+
+    monkeypatch.setattr(next_step_svc, "generate_sync", fake_generate)
+    await asyncio.gather(
+        next_step_svc.refresh_many(None, list(range(10))),
+        next_step_svc.refresh_many(None, list(range(10, 20))),
+    )
+    assert maximum == next_step_svc.LIST_REFRESH_CONCURRENCY

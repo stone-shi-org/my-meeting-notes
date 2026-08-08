@@ -543,6 +543,32 @@ def test_search_context_tool_hop_surfaces_new_candidates(
 
 
 @respx.mock
+def test_long_tool_command_never_leaks_as_visible_tokens(
+    user_client, isolated_settings, fake_search
+):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    query = "cutover rollback rehearsal finance approval schedule"
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response([f"TOOL: search_context {query}"]),
+            stream_response(["I found the relevant cutover context."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Find the detailed cutover discussion."},
+    )
+    assert resp.status_code == 200, resp.text
+    frames = parse_sse_frames(resp.text)
+    assert not any(
+        event == "token" and "TOOL:" in data.get("text", "")
+        for event, data in frames
+    )
+    assert any(event == "tool_call" for event, _ in frames)
+
+
+@respx.mock
 def test_get_email_tool_hop_fetches_the_full_body_after_a_search(
     user_client, isolated_settings, fake_search, monkeypatch
 ):
