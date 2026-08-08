@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+from datetime import datetime, timedelta, timezone
 
 from app.db import utcnow
 from app.errors import ConflictError, NotFoundError, ValidationError
@@ -216,6 +217,54 @@ def is_next_step_stale(
     if not stored_fingerprint:
         return True
     return compute_next_step_fingerprint(conn, thread_id) != stored_fingerprint
+
+
+# A suggestion this old is refreshed even if nothing on the thread changed --
+# the world outside it moves (a due date passes, "next week" becomes last
+# week) in a way compute_next_step_fingerprint cannot see.
+NEXT_STEP_MAX_AGE_DAYS = 14
+
+# After a failed attempt, wait this long before trying again. Without this, a
+# thread whose generation keeps failing (LLM misconfigured, provider down)
+# would retry on every home-page poll -- the same request-storm shape
+# followups.py's auto_match_at stamp exists to prevent.
+NEXT_STEP_RETRY_COOLDOWN_MINUTES = 30
+
+
+def _minutes_since(timestamp: str) -> float:
+    """Minutes elapsed since an ISO-8601 timestamp from ``db.utcnow()``.
+
+    Same parsing as ``matching.date_window``: ``fromisoformat`` matches
+    ``utcnow()``'s own output exactly, with a naive-tzinfo guard for rows
+    written before this field existed.
+    """
+    parsed = datetime.fromisoformat(timestamp)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - parsed).total_seconds() / 60
+
+
+def next_step_needs_refresh(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
+    """Whether the thread list should regenerate this thread's next step now.
+
+    Three independent reasons, checked cheapest first: no suggestion yet,
+    a recent failed attempt still in its cooldown window, the suggestion
+    aged past ``NEXT_STEP_MAX_AGE_DAYS``, or its fingerprint no longer
+    matches (``is_next_step_stale``, the only one costing an extra query).
+    """
+    keys = row.keys()
+    checked_at = row["next_step_checked_at"] if "next_step_checked_at" in keys else None
+    if checked_at and _minutes_since(checked_at) < NEXT_STEP_RETRY_COOLDOWN_MINUTES:
+        return False
+
+    generated_at = row["next_step_generated_at"] if "next_step_generated_at" in keys else None
+    if not generated_at:
+        return True
+    if _minutes_since(generated_at) > NEXT_STEP_MAX_AGE_DAYS * 24 * 60:
+        return True
+
+    stored_fingerprint = row["next_step_fingerprint"] if "next_step_fingerprint" in keys else None
+    return is_next_step_stale(conn, row["id"], stored_fingerprint)
 
 
 def mark_seen(

@@ -41,7 +41,7 @@ log = get_logger("threads")
 
 
 @router.get("", response_model=Page[ThreadOut])
-def list_threads(
+async def list_threads(
     page: int = Query(1, ge=1),
     page_size: int | None = Query(None, ge=1),
     q: str | None = Query(None, max_length=200),
@@ -71,8 +71,27 @@ def list_threads(
         group=group,
     )
 
+    items = [threads_svc.row_to_thread(r) for r in rows]
+
+    # A page of the home screen doubles as "generate what's missing": any
+    # thread here with no next step, a stale one, or one old enough to have
+    # fallen out of date gets refreshed before the response goes out, capped
+    # and cooled-down by next_step_svc so this can't turn into an LLM call on
+    # every poll for a thread that keeps failing.
+    stale_ids = [r["id"] for r in rows if threads_svc.next_step_needs_refresh(conn, r)]
+    if stale_ids:
+        refreshed = await next_step_svc.refresh_many(get_settings().db_path, stale_ids)
+        by_id = {item["id"]: item for item in items}
+        for thread_id, result in refreshed.items():
+            if result.get("error"):
+                continue
+            item = by_id[thread_id]
+            item["next_step"] = result["next_step"]
+            item["next_step_generated_at"] = result["next_step_generated_at"]
+            item["next_step_stale"] = False
+
     return Page[ThreadOut](
-        items=[ThreadOut(**threads_svc.row_to_thread(r)) for r in rows],
+        items=[ThreadOut(**item) for item in items],
         page=p,
         page_size=size,
         total=total,

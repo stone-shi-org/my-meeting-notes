@@ -622,6 +622,12 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("threads", "next_step_generated_at", "TEXT"),
     ("threads", "next_step_fingerprint", "TEXT"),
     ("threads", "next_step_model", "TEXT"),
+    # Stamped on every generation attempt, success or failure -- unlike
+    # next_step_generated_at, which only moves on success. This is what lets
+    # the thread list back off after a failed attempt instead of retrying the
+    # same broken LLM call on every poll, the same request-storm risk the
+    # sweep's auto_match_at guards against.
+    ("threads", "next_step_checked_at", "TEXT"),
     # Which group the thread sits in on the home screen. NULL is "Ungrouped",
     # which is why this is nullable rather than pointing at a real default row:
     # every thread that predates groups is already in the right place.

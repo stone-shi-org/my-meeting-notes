@@ -2,11 +2,14 @@
 
 One LLM call, same fallback discipline as ``matching.rank_sync``: on failure
 the thread keeps whatever suggestion it already had rather than losing it.
-Staleness is derived, not stamped -- see ``threads_svc.compute_next_step_fingerprint``.
+Staleness is derived, not stamped -- see ``threads_svc.compute_next_step_fingerprint``
+and ``threads_svc.next_step_needs_refresh``, which the thread list uses to decide
+whether to call :func:`refresh_many` for a page of threads.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
@@ -22,6 +25,12 @@ RECENT_MEETINGS = 5
 RECENT_EVENTS = 8
 RECENT_EMAILS = 8
 RECENT_NOTES = 5
+
+# How many threads the list view will generate a next step for at once.
+# LLM round trips, not Gmail metadata fetches, so kept well below the N+1
+# fetch cap CLAUDE.md documents for Gmail (8) -- this is page-load latency a
+# person is staring at, not a background sweep.
+LIST_REFRESH_CONCURRENCY = 4
 
 # Notes go in whole rather than as a snippet -- see chat.NOTE_BODY_LIMIT for
 # why -- but this payload holds five of them next to everything else, so the
@@ -124,6 +133,14 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
             raise llm_svc.LLMError("Model returned an empty next step")
     except Exception as exc:
         log.warning("next-step generation failed for thread %s: %s", thread_id, exc)
+        # Stamped even on failure, unlike next_step_generated_at -- this is
+        # what lets a caller back off retrying a thread whose generation keeps
+        # failing rather than hitting the LLM again on the next poll.
+        with get_conn(db_path) as conn:
+            conn.execute(
+                "UPDATE threads SET next_step_checked_at = ? WHERE id = ?",
+                (utcnow(), thread_id),
+            )
         return {"next_step": None, "next_step_generated_at": None,
                 "next_step_stale": True, "error": str(exc)}
 
@@ -132,11 +149,11 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
         conn.execute(
             """
             UPDATE threads
-               SET next_step = ?, next_step_generated_at = ?,
+               SET next_step = ?, next_step_generated_at = ?, next_step_checked_at = ?,
                    next_step_fingerprint = ?, next_step_model = ?
              WHERE id = ?
             """,
-            (next_step, generated_at, fingerprint, config.model, thread_id),
+            (next_step, generated_at, generated_at, fingerprint, config.model, thread_id),
         )
 
     return {
@@ -145,3 +162,22 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
         "next_step_stale": False,
         "error": None,
     }
+
+
+async def refresh_many(db_path, thread_ids: list[int]) -> dict[int, dict]:
+    """Regenerate the next step for several threads at once, off the event loop.
+
+    Used by the thread list when a page loads: several threads can need a
+    refresh together, and generating them one at a time would multiply an
+    already-slow LLM round trip by the page size. Capped by
+    ``LIST_REFRESH_CONCURRENCY`` rather than left unbounded.
+    """
+    sem = asyncio.Semaphore(LIST_REFRESH_CONCURRENCY)
+
+    async def _one(thread_id: int) -> tuple[int, dict]:
+        async with sem:
+            result = await asyncio.to_thread(generate_sync, db_path, thread_id)
+        return thread_id, result
+
+    results = await asyncio.gather(*(_one(tid) for tid in thread_ids))
+    return dict(results)

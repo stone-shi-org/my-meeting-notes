@@ -273,4 +273,25 @@ describe('GroupedThreadList', () => {
     expect(await screen.findByText(/Drag a thread card here/)).toBeInTheDocument();
     expect(screen.queryByText('No threads yet')).not.toBeInTheDocument();
   });
+
+  it("shows a thread's cached next step on its card", async () => {
+    const withNextStep = {
+      ...thread(10, 'Atlas Migration', 1),
+      next_step: 'Send the cutover recap to Priya before Thursday.',
+    };
+    stubApi({ '1': page([withNextStep]), none: page([]) });
+    renderList();
+
+    expect(
+      await screen.findByText('Send the cutover recap to Priya before Thursday.'),
+    ).toBeInTheDocument();
+  });
+
+  it('shows nothing extra when a thread has no next step yet', async () => {
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    // The card's other content renders fine; there's just no next-step line.
+    expect(screen.queryByText(/before Thursday/)).not.toBeInTheDocument();
+  });
 });

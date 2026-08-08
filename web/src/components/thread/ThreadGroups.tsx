@@ -19,6 +19,7 @@ import {
   Mic,
   NotebookPen,
   Pencil,
+  Sparkles,
   Trash2,
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
@@ -229,6 +230,16 @@ function ThreadCard({
 
         {thread.description && (
           <p className="mt-1.5 line-clamp-2 text-sm text-fg-subtle">{thread.description}</p>
+        )}
+
+        {/* Same icon as the thread page's own Next step box -- one visual
+            vocabulary for "this is the AI's suggestion," not the thread's own
+            words like the description above it. */}
+        {thread.next_step && (
+          <p className="mt-2 flex items-start gap-1.5 text-sm text-fg-subtle">
+            <Sparkles className="mt-0.5 size-3.5 shrink-0 text-primary" aria-hidden />
+            <span className="line-clamp-2">{thread.next_step}</span>
+          </p>
         )}
 
         <div className="mt-4 flex items-center gap-4">
