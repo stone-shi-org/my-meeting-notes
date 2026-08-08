@@ -5,6 +5,7 @@ import {
   Eye,
   EyeOff,
   FileText,
+  Merge,
   RefreshCw,
   Square,
   Sparkles,
@@ -51,6 +52,26 @@ function SpeakerLegend({
   const queryClient = useQueryClient();
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [saved, setSaved] = useState<string | null>(null);
+  const [mergeMenuFor, setMergeMenuFor] = useState<string | null>(null);
+  const mergeMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!mergeMenuFor) return;
+    function onPointerDown(e: MouseEvent) {
+      if (mergeMenuRef.current && !mergeMenuRef.current.contains(e.target as Node)) {
+        setMergeMenuFor(null);
+      }
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setMergeMenuFor(null);
+    }
+    document.addEventListener('pointerdown', onPointerDown);
+    document.addEventListener('keydown', onKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [mergeMenuFor]);
 
   const update = useMutation({
     mutationFn: (payload: SpeakerPatch[]) => api.put(`/meetings/${meetingId}/speakers`, payload),
@@ -201,6 +222,7 @@ function SpeakerLegend({
                 onClick={() => update.mutate([{ speaker_id: speaker.id, hidden: !speaker.hidden }])}
                 aria-pressed={speaker.hidden}
                 aria-label={speaker.hidden ? `Show ${speaker.id} in the transcript` : `Hide ${speaker.id} from the transcript`}
+                title={speaker.hidden ? 'Show' : 'Hide'}
                 className="shrink-0 rounded p-1 text-fg-faint hover:text-fg"
               >
                 {speaker.hidden ? <EyeOff className="size-3.5" /> : <Eye className="size-3.5" />}
@@ -210,6 +232,7 @@ function SpeakerLegend({
                 onClick={() => update.mutate([{ speaker_id: speaker.id, is_me: !speaker.is_me }])}
                 aria-pressed={speaker.is_me}
                 aria-label={speaker.is_me ? `Unmark ${speaker.id} as me` : `Mark ${speaker.id} as me`}
+                title={speaker.is_me ? 'Unmark as me' : 'This is me'}
                 className={cn(
                   'shrink-0 rounded p-1 text-fg-faint hover:text-fg',
                   speaker.is_me && 'text-primary',
@@ -219,24 +242,46 @@ function SpeakerLegend({
               </button>
 
               {canonical.length > 1 && (
-                <Select
-                  className="h-7 w-auto shrink-0 text-xs"
-                  aria-label={`Merge ${speaker.id} into another speaker`}
-                  value=""
-                  onChange={(e) => {
-                    if (!e.target.value) return;
-                    update.mutate([{ speaker_id: speaker.id, merge_into: e.target.value }]);
-                  }}
-                >
-                  <option value="">Merge into…</option>
-                  {canonical
-                    .filter((other) => other.id !== speaker.id)
-                    .map((other) => (
-                      <option key={other.id} value={other.id}>
-                        {other.display_name || other.id}
-                      </option>
-                    ))}
-                </Select>
+                <div className="relative shrink-0">
+                  <button
+                    onClick={() => setMergeMenuFor((id) => (id === speaker.id ? null : speaker.id))}
+                    aria-haspopup="menu"
+                    aria-expanded={mergeMenuFor === speaker.id}
+                    aria-label={`Merge ${speaker.id} into another speaker`}
+                    title="Merge into"
+                    className={cn(
+                      'rounded p-1 text-fg-faint hover:text-fg',
+                      mergeMenuFor === speaker.id && 'text-primary',
+                    )}
+                  >
+                    <Merge className="size-3.5" />
+                  </button>
+
+                  {mergeMenuFor === speaker.id && (
+                    <div
+                      ref={mergeMenuRef}
+                      role="menu"
+                      aria-label={`Merge ${speaker.id} into`}
+                      className="absolute right-0 top-full z-10 mt-1 min-w-36 rounded-md border border-border bg-surface py-1 shadow-md"
+                    >
+                      {canonical
+                        .filter((other) => other.id !== speaker.id)
+                        .map((other) => (
+                          <button
+                            key={other.id}
+                            role="menuitem"
+                            onClick={() => {
+                              update.mutate([{ speaker_id: speaker.id, merge_into: other.id }]);
+                              setMergeMenuFor(null);
+                            }}
+                            className="block w-full truncate px-3 py-1.5 text-left text-xs text-fg hover:bg-surface-2"
+                          >
+                            {other.display_name || other.id}
+                          </button>
+                        ))}
+                    </div>
+                  )}
+                </div>
               )}
 
               {saved === speaker.id && (
