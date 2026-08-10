@@ -12,17 +12,22 @@
  */
 import { keepPreviousData, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
+  Archive,
+  ArchiveRestore,
   CalendarDays,
   ChevronDown,
+  ChevronLeft,
+  FolderInput,
   FolderPlus,
   Mail,
   Mic,
+  MoreVertical,
   NotebookPen,
   Pencil,
   Sparkles,
   Trash2,
 } from 'lucide-react';
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
@@ -117,6 +122,29 @@ function useMoveThread() {
   });
 }
 
+/** Same archive toggle as the thread page's own header button. */
+function useArchiveThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ threadId, archived }: { threadId: number; archived: boolean }) =>
+      api.patch<Thread>(`/threads/${threadId}`, { archived }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['threads'] }),
+  });
+}
+
+/** Same delete as the thread page's own header button — removes its meetings
+ * and their audio too, which is why the card menu confirms before calling it. */
+function useDeleteThread() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (threadId: number) => api.del(`/threads/${threadId}`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['threads'] });
+      void queryClient.invalidateQueries({ queryKey: ['thread-groups'] });
+    },
+  });
+}
+
 /* -------------------------------------------------------------------------- */
 /* Cards                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -141,35 +169,162 @@ function StatPill({
   );
 }
 
+const menuItemClass =
+  'flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm hover:bg-surface-2';
+
 /**
  * The keyboard route into a group, and the reason this feature is not
  * mouse-only: HTML5 drag and drop emits nothing a keyboard can trigger, so
- * every card carries the same move as a plain `<select>`.
+ * every card carries the same move — plus archive and delete — behind one
+ * "..." button and a plain, fully tabbable menu.
  */
-function GroupPicker({
+function ThreadCardMenu({
   thread,
   groups,
   onMove,
+  onArchive,
+  onDelete,
 }: {
   thread: Thread;
   groups: ThreadGroup[];
   onMove: (groupId: number | null) => void;
+  onArchive: () => void;
+  onDelete: () => void;
 }) {
+  const [open, setOpen] = useState(false);
+  const [view, setView] = useState<'main' | 'move'>('main');
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  function close() {
+    setOpen(false);
+    setView('main');
+  }
+
+  // A blur inside the menu (moving focus between its own buttons) must not
+  // close it — only focus, or a click, landing outside the whole control.
+  useEffect(() => {
+    if (!open) return;
+    function onPointerDown(e: MouseEvent) {
+      if (!rootRef.current?.contains(e.target as Node)) close();
+    }
+    document.addEventListener('mousedown', onPointerDown);
+    return () => document.removeEventListener('mousedown', onPointerDown);
+  }, [open]);
+
   return (
-    <select
-      aria-label={`Group for ${thread.title}`}
-      value={thread.group_id ?? UNGROUPED}
-      onChange={(e) => onMove(e.target.value === UNGROUPED ? null : Number(e.target.value))}
-      className="h-7 max-w-[10rem] rounded border border-border bg-surface px-1.5 text-xs
-                 text-fg-muted hover:border-border-strong focus:border-border-strong"
+    <div
+      ref={rootRef}
+      className="relative"
+      onKeyDown={(e) => {
+        if (e.key === 'Escape') close();
+      }}
     >
-      <option value={UNGROUPED}>Ungrouped</option>
-      {groups.map((g) => (
-        <option key={g.id} value={g.id}>
-          {g.name}
-        </option>
-      ))}
-    </select>
+      <Button
+        size="icon-sm"
+        variant="ghost"
+        aria-label={`Actions for ${thread.title}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+      >
+        <MoreVertical className="size-4" />
+      </Button>
+
+      {open && (
+        <div
+          role="menu"
+          className="absolute bottom-full right-0 z-50 mb-1 w-48 rounded-md border border-border
+                     bg-surface p-1 shadow-lg animate-fade-in"
+        >
+          {view === 'main' ? (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                className={menuItemClass}
+                onClick={() => setView('move')}
+              >
+                <FolderInput className="size-4" aria-hidden />
+                Move to…
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={menuItemClass}
+                onClick={() => {
+                  onArchive();
+                  close();
+                }}
+              >
+                {thread.archived ? (
+                  <ArchiveRestore className="size-4" aria-hidden />
+                ) : (
+                  <Archive className="size-4" aria-hidden />
+                )}
+                {thread.archived ? 'Unarchive' : 'Archive'}
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                className={cn(menuItemClass, 'text-danger-ink')}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      `Delete "${thread.title}" and all ${thread.meeting_count} of its meetings? This also removes the audio from disk.`,
+                    )
+                  ) {
+                    onDelete();
+                  }
+                  close();
+                }}
+              >
+                <Trash2 className="size-4" aria-hidden />
+                Delete
+              </button>
+            </>
+          ) : (
+            <>
+              <button
+                type="button"
+                role="menuitem"
+                className={menuItemClass}
+                onClick={() => setView('main')}
+              >
+                <ChevronLeft className="size-4" aria-hidden />
+                Back
+              </button>
+              <button
+                type="button"
+                role="menuitem"
+                aria-label={`Move ${thread.title} to Ungrouped`}
+                className={cn(menuItemClass, thread.group_id === null && 'font-semibold')}
+                onClick={() => {
+                  onMove(null);
+                  close();
+                }}
+              >
+                Ungrouped
+              </button>
+              {groups.map((g) => (
+                <button
+                  key={g.id}
+                  type="button"
+                  role="menuitem"
+                  aria-label={`Move ${thread.title} to ${g.name}`}
+                  className={cn(menuItemClass, thread.group_id === g.id && 'font-semibold')}
+                  onClick={() => {
+                    onMove(g.id);
+                    close();
+                  }}
+                >
+                  {g.name}
+                </button>
+              ))}
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -177,10 +332,14 @@ function ThreadCard({
   thread,
   groups,
   onMove,
+  onArchive,
+  onDelete,
 }: {
   thread: Thread;
   groups: ThreadGroup[];
   onMove: (groupId: number | null) => void;
+  onArchive: () => void;
+  onDelete: () => void;
 }) {
   const unread = thread.unread_count > 0;
   const [dragging, setDragging] = useState(false);
@@ -250,13 +409,19 @@ function ThreadCard({
         </div>
       </Link>
 
-      {/* Outside the link: a <select> nested in an <a> is a trap for both the
-          mouse and the keyboard. */}
+      {/* Outside the link: a menu button nested in an <a> is a trap for both
+          the mouse and the keyboard. */}
       <div className="flex items-center justify-between gap-2 border-t border-border py-2.5 pl-6 pr-4">
         <span className="text-xs text-fg-subtle">
           Updated <time dateTime={thread.updated_at}>{fmtRelative(thread.updated_at)}</time>
         </span>
-        <GroupPicker thread={thread} groups={groups} onMove={onMove} />
+        <ThreadCardMenu
+          thread={thread}
+          groups={groups}
+          onMove={onMove}
+          onArchive={onArchive}
+          onDelete={onDelete}
+        />
       </div>
     </Card>
   );
@@ -434,6 +599,8 @@ function GroupSection({
 }) {
   const sectionKey = group ? String(group.id) : UNGROUPED;
   const move = useMoveThread();
+  const archive = useArchiveThread();
+  const remove = useDeleteThread();
 
   const [page, setPage] = useState(1);
   const [over, setOver] = useState(false);
@@ -547,6 +714,8 @@ function GroupSection({
                     thread={thread}
                     groups={groups}
                     onMove={(groupId) => move.mutate({ threadId: thread.id, groupId })}
+                    onArchive={() => archive.mutate({ threadId: thread.id, archived: !thread.archived })}
+                    onDelete={() => remove.mutate(thread.id)}
                   />
                 ))}
               </div>

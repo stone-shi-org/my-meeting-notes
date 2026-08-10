@@ -183,15 +183,58 @@ describe('GroupedThreadList', () => {
     expect(api.put).not.toHaveBeenCalled();
   });
 
-  it('moves a thread from the keyboard-reachable picker too', async () => {
+  it('moves a thread from the keyboard-reachable card menu too', async () => {
     const user = userEvent.setup();
     renderList();
     await screen.findByText('Loose end');
 
-    await user.selectOptions(screen.getByLabelText('Group for Loose end'), '1');
+    await user.click(screen.getByRole('button', { name: 'Actions for Loose end' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Move to…' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Move Loose end to Clients' }));
+
     await waitFor(() =>
       expect(api.put).toHaveBeenCalledWith('/threads/20/group', { group_id: 1 }),
     );
+  });
+
+  it('archives a thread from the card menu', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.patch).mockResolvedValue(undefined as never);
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    await user.click(screen.getByRole('button', { name: 'Actions for Atlas Migration' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Archive' }));
+
+    await waitFor(() =>
+      expect(api.patch).toHaveBeenCalledWith('/threads/10', { archived: true }),
+    );
+  });
+
+  it('deletes a thread from the card menu after confirming', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.del).mockResolvedValue(undefined as never);
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    await user.click(screen.getByRole('button', { name: 'Actions for Atlas Migration' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(window.confirm).toHaveBeenCalled();
+    await waitFor(() => expect(api.del).toHaveBeenCalledWith('/threads/10'));
+  });
+
+  it('does not delete a thread when the confirmation is declined', async () => {
+    const user = userEvent.setup();
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    renderList();
+    await screen.findByText('Atlas Migration');
+
+    await user.click(screen.getByRole('button', { name: 'Actions for Atlas Migration' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    expect(api.del).not.toHaveBeenCalled();
   });
 
   it('collapses a section and remembers it', async () => {
