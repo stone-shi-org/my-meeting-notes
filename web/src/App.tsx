@@ -20,6 +20,7 @@ import {
   MatchingSettingsPage,
   PromptSettingsPage,
   SettingsPage,
+  TelegramSettingsPage,
   UsersSettingsPage,
 } from '@/pages/SettingsPage';
 import { ThreadDetailPage } from '@/pages/ThreadDetailPage';
@@ -76,6 +77,7 @@ export function App() {
                       <Route path="diarization" element={<DiarizationSettingsPage />} />
                       <Route path="integrations" element={<IntegrationsSettingsPage />} />
                       <Route path="matching" element={<MatchingSettingsPage />} />
+                      <Route path="telegram" element={<TelegramSettingsPage />} />
                       {/* Old path kept as a redirect: bookmarks, and error
                           deep-links from a cached bundle, both still land. */}
                       <Route

@@ -17,6 +17,7 @@ from app.errors import AudioError, JobCancelled
 from app.jobs.queue import JobContext, register_job
 from app.logging_config import get_logger
 from app.services import audio as audio_svc
+from app.services import telegram as telegram_svc
 from app.services import threads as threads_svc
 
 log = get_logger("pipeline")
@@ -154,29 +155,40 @@ async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = N
         stage="diarizing",
     )
 
-    if settings.diarize_fake:
-        payload = await _fake_diarize(ctx, duration)
-        request_ms = 0
-    else:
-        from app.services.diarize import diarize_file
+    try:
+        if settings.diarize_fake:
+            payload = await _fake_diarize(ctx, duration)
+            request_ms = 0
+        else:
+            from app.services.diarize import diarize_file
 
-        payload, request_ms = await diarize_file(
+            payload, request_ms = await diarize_file(
+                ctx,
+                Path(audio_path),
+                model=chosen_model,
+                duration_sec=duration,
+            )
+
+        diar_id = await asyncio.to_thread(
+            _persist_diarization,
             ctx,
-            Path(audio_path),
-            model=chosen_model,
-            duration_sec=duration,
+            meeting_id,
+            payload,
+            provider_url,
+            chosen_model,
+            request_ms,
         )
+    except JobCancelled:
+        raise
+    except Exception as exc:
+        await asyncio.to_thread(
+            telegram_svc.notify_transcript_failed,
+            ctx.db_path, meeting_id=meeting_id, error=str(exc),
+        )
+        raise
 
-    diar_id = await asyncio.to_thread(
-        _persist_diarization,
-        ctx,
-        meeting_id,
-        payload,
-        provider_url,
-        chosen_model,
-        request_ms,
-    )
     ctx.complete_stage("diarizing")
+    await asyncio.to_thread(telegram_svc.notify_transcript_ready, ctx.db_path, meeting_id=meeting_id)
     return diar_id
 
 

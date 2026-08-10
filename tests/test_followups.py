@@ -413,6 +413,41 @@ class TestOwnership:
         ).status_code == 404
 
 
+class TestTelegramNotification:
+    """The sweep tells Telegram about anything it auto-attaches -- see
+    telegram_svc.notify_new_attachments. Faked at the notify_* boundary rather
+    than over respx: test_telegram.py already covers the HTTP call itself."""
+
+    def test_a_confident_match_triggers_a_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            "app.services.followups.telegram_svc.notify_new_attachments",
+            lambda conn_factory, **kw: calls.append(kw),
+        )
+        sweep(user_client, meeting["thread_id"])
+
+        assert len(calls) == 1
+        assert calls[0]["thread_id"] == meeting["thread_id"]
+        assert calls[0]["thread_title"] == "Atlas Migration"
+        assert len(calls[0]["events"]) == 1
+        assert len(calls[0]["emails"]) == 1
+
+    def test_nothing_attached_triggers_no_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        mock_llm.post(LLM_URL).mock(return_value=httpx.Response(500, text="llm down"))
+        calls = []
+        monkeypatch.setattr(
+            "app.services.followups.telegram_svc.notify_new_attachments",
+            lambda conn_factory, **kw: calls.append(kw),
+        )
+        sweep(user_client, meeting["thread_id"])
+
+        assert calls == []
+
+
 # --------------------------------------------------------------------------- #
 # The scheduler
 #

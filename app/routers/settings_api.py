@@ -20,6 +20,7 @@ from app.logging_config import get_logger
 from app.services import diarize as diarize_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import telegram as telegram_svc
 
 router = APIRouter(prefix="/api", tags=["settings"])
 log = get_logger("settings")
@@ -52,6 +53,11 @@ class DiarizationTestRequest(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
+
+
+class TelegramTestRequest(BaseModel):
+    bot_token: str | None = Field(default=None, max_length=200)
+    chat_ids: str | None = Field(default=None, max_length=2000)
 
 
 # A cheap connectivity probe (GET /v1/models) doesn't need the multi-minute
@@ -185,6 +191,26 @@ def test_diarization(
         "admin %s tested diarization (%s): ok=%s %sms",
         admin.username, model, result["ok"], result["latency_ms"],
     )
+    return result
+
+
+@router.post("/telegram/test")
+def test_telegram(
+    payload: TelegramTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    bot_token = effective(conn, "telegram_bot_token")
+    chat_ids_raw = effective(conn, "telegram_chat_ids")
+
+    if payload is not None:
+        if payload.bot_token and not payload.bot_token.startswith(MASK):
+            bot_token = payload.bot_token
+        if payload.chat_ids is not None:
+            chat_ids_raw = payload.chat_ids
+
+    result = telegram_svc.test_connection(bot_token, telegram_svc.parse_chat_ids(chat_ids_raw))
+    log.info("admin %s tested Telegram: ok=%s", admin.username, result["ok"])
     return result
 
 

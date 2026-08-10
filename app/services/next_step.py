@@ -18,6 +18,7 @@ from app.db import get_conn, utcnow
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import telegram as telegram_svc
 from app.services import threads as threads_svc
 
 log = get_logger("next_step")
@@ -171,6 +172,10 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
             """,
             (next_step, generated_at, generated_at, fingerprint, config.model, thread_id),
         )
+
+    telegram_svc.notify_next_step(
+        db_path, thread_id=thread_id, thread_title=payload["thread_title"], next_step=next_step
+    )
 
     return {
         "next_step": next_step,

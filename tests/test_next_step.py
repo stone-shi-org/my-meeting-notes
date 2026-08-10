@@ -255,6 +255,40 @@ class TestListAutoRefresh:
         assert len(mock_llm.calls) == 1  # only this user's own thread was generated
 
 
+class TestTelegramNotification:
+    """generate_sync tells Telegram about a fresh next step -- see
+    telegram_svc.notify_next_step. Faked at the notify_* boundary rather than
+    over respx: test_telegram.py already covers the HTTP call itself."""
+
+    def test_a_successful_generation_triggers_a_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        calls = []
+        monkeypatch.setattr(
+            "app.services.next_step.telegram_svc.notify_next_step",
+            lambda db_path, **kw: calls.append(kw),
+        )
+        refresh(user_client, meeting["thread_id"])
+
+        assert len(calls) == 1
+        assert calls[0]["thread_id"] == meeting["thread_id"]
+        assert calls[0]["thread_title"] == "Atlas Migration"
+        assert calls[0]["next_step"] == NEXT_STEP
+
+    def test_a_failed_generation_triggers_no_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        mock_llm.post(LLM_URL).mock(return_value=httpx.Response(500, text="llm down"))
+        calls = []
+        monkeypatch.setattr(
+            "app.services.next_step.telegram_svc.notify_next_step",
+            lambda db_path, **kw: calls.append(kw),
+        )
+        refresh(user_client, meeting["thread_id"])
+
+        assert calls == []
+
+
 @pytest.mark.asyncio
 async def test_list_refresh_concurrency_is_shared_across_requests(monkeypatch):
     from app.services import next_step as next_step_svc

@@ -67,6 +67,18 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # Zoho is regional: an account lives in one data centre and its API hosts
     # carry that suffix. The wrong one authenticates fine and returns nothing.
     "zoho_dc": ("str", False),
+    # Telegram push notifications. Off by default, same reasoning as
+    # auto_match_enabled: a working bot token is enough to spam a channel, not
+    # something to switch on for an operator without them asking for it.
+    "telegram_enabled": ("bool", False),
+    "telegram_bot_token": ("str", True),
+    # Comma-separated chat/channel IDs rather than a JSON array: a plain text
+    # field, no dedicated list-editor UI needed.
+    "telegram_chat_ids": ("str", False),
+    "telegram_notify_new_attachments": ("bool", False),
+    "telegram_notify_next_steps": ("bool", False),
+    "telegram_notify_transcript_ready": ("bool", False),
+    "telegram_notify_transcript_failed": ("bool", False),
 }
 
 
@@ -185,6 +197,15 @@ class Settings(BaseSettings):
     zoho_client_id: str = ""
     zoho_client_secret: str = ""
     zoho_dc: str = "com"
+
+    # --- telegram -------------------------------------------------------------
+    telegram_enabled: bool = False
+    telegram_bot_token: str = ""
+    telegram_chat_ids: str = ""
+    telegram_notify_new_attachments: bool = False
+    telegram_notify_next_steps: bool = False
+    telegram_notify_transcript_ready: bool = False
+    telegram_notify_transcript_failed: bool = False
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20

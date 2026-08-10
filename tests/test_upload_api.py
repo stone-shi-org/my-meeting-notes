@@ -193,6 +193,54 @@ def test_ingest_runs_every_stage_and_marks_the_meeting_ready(user_client):
     assert meeting["has_transcript"] is True
 
 
+class TestTelegramNotification:
+    """The diarize stage tells Telegram when a transcript is ready or fails --
+    see telegram_svc.notify_transcript_ready/notify_transcript_failed. Faked
+    at the notify_* boundary rather than over respx: test_telegram.py already
+    covers the HTTP call itself."""
+
+    def test_a_successful_ingest_notifies_transcript_ready(self, user_client, monkeypatch):
+        calls = []
+        monkeypatch.setattr(
+            "app.services.pipeline.telegram_svc.notify_transcript_ready",
+            lambda db_path, **kw: calls.append(kw),
+        )
+        body = upload(user_client).json()
+        wait_for_job(user_client, body["job_id"])
+
+        assert len(calls) == 1
+        assert calls[0]["meeting_id"] == body["meeting_id"]
+
+    def test_a_failed_diarization_notifies_failed_not_ready(self, user_client, monkeypatch):
+        ready_calls = []
+        failed_calls = []
+        monkeypatch.setattr(
+            "app.services.pipeline.telegram_svc.notify_transcript_ready",
+            lambda db_path, **kw: ready_calls.append(kw),
+        )
+        monkeypatch.setattr(
+            "app.services.pipeline.telegram_svc.notify_transcript_failed",
+            lambda db_path, **kw: failed_calls.append(kw),
+        )
+
+        async def explode(ctx, duration):
+            raise RuntimeError("diarizer exploded")
+
+        monkeypatch.setattr("app.services.pipeline._fake_diarize", explode)
+
+        body = upload(user_client).json()
+        job = wait_for_job(user_client, body["job_id"])
+
+        assert job["status"] == "failed"
+        assert ready_calls == []
+        assert len(failed_calls) == 1
+        assert failed_calls[0]["meeting_id"] == body["meeting_id"]
+        assert "diarizer exploded" in failed_calls[0]["error"]
+
+        meeting = user_client.get(f"/api/meetings/{body['meeting_id']}").json()
+        assert meeting["status"] == "failed"
+
+
 def test_conversion_is_skipped_for_an_already_conformant_wav(user_client):
     body = upload(user_client)  # tiny16k.wav is already 16k mono pcm_s16le
     job_id = body.json()["job_id"]

@@ -34,6 +34,7 @@ from app.db import utcnow
 from app.errors import NoIntegrationsError
 from app.logging_config import get_logger
 from app.services import matching as matching_svc
+from app.services import telegram as telegram_svc
 from app.services import threads as threads_svc
 
 log = get_logger("followups")
@@ -227,10 +228,22 @@ async def sweep_thread(
             # Only when something landed: a sweep that found nothing must not
             # keep bumping the thread to the top of the list every half hour.
             threads_svc.touch_thread(conn, thread_id)
+            thread_title = threads_svc.require_thread(conn, thread_id)["title"]
 
         log.info(
             "thread %s: auto-attached %d event(s) and %d email(s) at or above %.2f",
             thread_id, len(events), len(emails), threshold,
+        )
+
+        # A Telegram HTTP call is exactly the blocking I/O this codebase
+        # routes off the event loop -- see rank_sync above.
+        await asyncio.to_thread(
+            telegram_svc.notify_new_attachments,
+            conn_factory,
+            thread_id=thread_id,
+            thread_title=thread_title,
+            events=events,
+            emails=emails,
         )
 
     _stamp(conn_factory, thread_id, gathered.get("calendar_error") or gathered.get("email_error"))

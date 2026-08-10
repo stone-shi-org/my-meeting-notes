@@ -32,6 +32,7 @@ const TABS = [
   { to: '/settings/diarization', label: 'Diarization' },
   { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/matching', label: 'Matching' },
+  { to: '/settings/telegram', label: 'Telegram', adminOnly: true },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/users', label: 'Users', adminOnly: true },
   // Only on a server with MMN_DEV_PROVIDER_ENABLED set. Detected by whether the
@@ -628,6 +629,30 @@ export function MatchingSettingsPage() {
         ]}
       />
     </div>
+  );
+}
+
+export function TelegramSettingsPage() {
+  return (
+    <SettingsForm
+      title="Telegram"
+      description="Sends a message when the sweep attaches a new email or calendar event to a watched thread, and when a fresh next step is generated."
+      testPath="/telegram/test"
+      testKeyMap={{ telegram_bot_token: 'bot_token', telegram_chat_ids: 'chat_ids' }}
+      keys={[
+        { key: 'telegram_enabled', label: 'Enabled' },
+        { key: 'telegram_bot_token', label: 'Bot token', hint: 'From @BotFather' },
+        {
+          key: 'telegram_chat_ids',
+          label: 'Chat / channel IDs',
+          hint: "Comma-separated, e.g. a group's numeric ID (-1001234567890) or a channel's @username",
+        },
+        { key: 'telegram_notify_new_attachments', label: 'Notify on new attachments' },
+        { key: 'telegram_notify_next_steps', label: 'Notify on new next steps' },
+        { key: 'telegram_notify_transcript_ready', label: 'Notify when a transcript is ready' },
+        { key: 'telegram_notify_transcript_failed', label: 'Notify when a transcript fails' },
+      ]}
+    />
   );
 }
 
