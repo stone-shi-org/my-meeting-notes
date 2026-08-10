@@ -526,6 +526,16 @@ export interface MeetingChatMessage {
   created_at: string;
 }
 
+export interface HomeChatMessage {
+  id: number;
+  role: 'user' | 'assistant';
+  content: string;
+  model: string | null;
+  prompt_tokens: number | null;
+  completion_tokens: number | null;
+  created_at: string;
+}
+
 /** One connected calendar/email account. Always the caller's own. */
 export interface Integration {
   id: number;

@@ -3,6 +3,7 @@ import { Layers, Plus, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { UpcomingPanel } from '@/components/calendar/UpcomingPanel';
+import { HomeChatPanel } from '@/components/home/HomeChatPanel';
 import { GroupedThreadList, NewGroupButton } from '@/components/thread/ThreadGroups';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
@@ -248,6 +249,8 @@ export function ThreadsPage() {
           paging belong to that list, so the calendar sits after it rather than
           between the heading and the thing the heading names. */}
       <UpcomingPanel />
+
+      <HomeChatPanel />
     </div>
   );
 }

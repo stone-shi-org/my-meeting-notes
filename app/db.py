@@ -407,6 +407,20 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_meeting_chat_meeting ON meeting_chat_messages(meeting_id, created_at)",
+    # -------------------------------------------------------- home_chat_messages
+    """
+    CREATE TABLE IF NOT EXISTS home_chat_messages (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id           INTEGER NOT NULL REFERENCES users(id),
+        role               TEXT NOT NULL,
+        content            TEXT NOT NULL,
+        model              TEXT,
+        prompt_tokens      INTEGER,
+        completion_tokens  INTEGER,
+        created_at         TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_home_chat_owner ON home_chat_messages(owner_id, created_at)",
     # ---------------------------------------------------------- mcp_servers
     """
     CREATE TABLE IF NOT EXISTS mcp_servers (

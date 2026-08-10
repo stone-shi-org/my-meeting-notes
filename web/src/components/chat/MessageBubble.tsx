@@ -1,10 +1,13 @@
+import { useQuery } from '@tanstack/react-query';
 import { Check, Copy, NotebookPen, Plus, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Spinner } from '@/components/ui/primitives';
 import { useNotes, type NoteScope } from '@/hooks/useNotes';
+import { api } from '@/lib/api';
 import { copyText } from '@/lib/clipboard';
 import { cn } from '@/lib/cn';
 import { renderMarkdown } from '@/lib/markdown';
+import type { Paginated, Thread } from '@/types/api';
 
 /** How long a "Copied"/"Saved" confirmation stays up before reverting. */
 const FLASH_MS = 2000;
@@ -24,6 +27,7 @@ export function MessageBubble({
   role,
   content,
   scope,
+  pickThread,
   question,
   model,
   promptTokens,
@@ -33,6 +37,10 @@ export function MessageBubble({
   content: string;
   /** Omitted while a reply is still streaming: there is nothing to save yet. */
   scope?: NoteScope;
+  /** Set instead of `scope` when a chat has no single obvious thread (home
+   * chat): "Add to note" asks which thread first, then behaves exactly like
+   * `scope` from there. */
+  pickThread?: boolean;
   /** The turn this reply answered. Makes for much better generated titles. */
   question?: string;
   model?: string | null;
@@ -53,10 +61,11 @@ export function MessageBubble({
         className="prose prose-sm max-w-none rounded-lg bg-surface-2 px-3 py-2 dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-ol:my-1"
         dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
       />
-      {scope && (
+      {(scope || pickThread) && (
         <AssistantActions
           content={content}
           scope={scope}
+          pickThread={pickThread}
           question={question}
           model={model}
           promptTokens={promptTokens}
@@ -70,13 +79,15 @@ export function MessageBubble({
 function AssistantActions({
   content,
   scope,
+  pickThread,
   question,
   model,
   promptTokens,
   completionTokens,
 }: {
   content: string;
-  scope: NoteScope;
+  scope?: NoteScope;
+  pickThread?: boolean;
   question?: string;
   model?: string | null;
   promptTokens?: number | null;
@@ -143,7 +154,19 @@ function AssistantActions({
       {/* In the flow rather than floating above it: this sits inside a
           scrolling history, where an absolutely positioned popover is clipped
           by the scroll container at whichever end it opens towards. */}
-      {picking && (
+      {picking && pickThread && (
+        <ThreadNotePicker
+          content={content}
+          question={question}
+          model={model}
+          onClose={() => setPicking(false)}
+          onSaved={(title) => {
+            setSaved(title);
+            setPicking(false);
+          }}
+        />
+      )}
+      {picking && scope && (
         <NotePicker
           content={content}
           scope={scope}
@@ -181,6 +204,102 @@ function ActionButton({
       <Icon className="size-3" aria-hidden />
       {children}
     </button>
+  );
+}
+
+/**
+ * "Which thread?" -- the step home chat's "Add to note" needs that thread and
+ * meeting chat never do, since an answer there is already scoped to one. Once
+ * a thread is picked this hands off to the exact same `NotePicker` those two
+ * use, unmodified.
+ */
+function ThreadNotePicker({
+  content,
+  question,
+  model,
+  onClose,
+  onSaved,
+}: {
+  content: string;
+  question?: string;
+  model?: string | null;
+  onClose: () => void;
+  onSaved: (title: string) => void;
+}) {
+  const [threadId, setThreadId] = useState<string | null>(null);
+  const ref = useRef<HTMLDivElement>(null);
+  // Same query key MoveToThread.tsx uses for its own thread picker, so the
+  // two share one cached fetch instead of each paying for their own.
+  const threads = useQuery({
+    queryKey: ['threads', 'picker'],
+    queryFn: () => api.get<Paginated<Thread>>('/threads', { page_size: 200 }),
+  });
+
+  useEffect(() => {
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === 'Escape') onClose();
+    }
+    document.addEventListener('keydown', onKeyDown);
+    ref.current?.scrollIntoView({ block: 'nearest' });
+    return () => document.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
+
+  if (threadId) {
+    return (
+      <NotePicker
+        content={content}
+        scope={{ kind: 'thread', threadId }}
+        question={question}
+        model={model}
+        onClose={onClose}
+        onSaved={onSaved}
+      />
+    );
+  }
+
+  return (
+    <div
+      ref={ref}
+      role="group"
+      aria-label="Choose a thread for this note"
+      className="mt-1 overflow-hidden rounded-lg border border-border bg-surface shadow-sm"
+    >
+      <div className="flex items-center gap-2 border-b border-border px-3 py-2">
+        <p className="flex-1 text-xs font-semibold">Save to which thread?</p>
+        <button
+          type="button"
+          onClick={onClose}
+          aria-label="Close"
+          className="rounded p-0.5 text-fg-faint hover:bg-surface-2 hover:text-fg"
+        >
+          <X className="size-3.5" aria-hidden />
+        </button>
+      </div>
+
+      {threads.isLoading && (
+        <p className="px-3 py-2 text-xs text-fg-subtle">Loading threads…</p>
+      )}
+
+      {threads.data && threads.data.items.length === 0 && (
+        <p className="px-3 py-2 text-xs text-fg-subtle">No threads yet.</p>
+      )}
+
+      {threads.data && threads.data.items.length > 0 && (
+        <ul className="max-h-48 overflow-y-auto py-1">
+          {threads.data.items.map((t) => (
+            <li key={t.id}>
+              <button
+                type="button"
+                onClick={() => setThreadId(String(t.id))}
+                className="block w-full truncate px-3 py-1.5 text-left text-sm hover:bg-surface-2"
+              >
+                {t.title}
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
