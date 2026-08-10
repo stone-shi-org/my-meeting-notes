@@ -101,6 +101,15 @@ class LLMReasoningTruncatedError(LLMError):
     code = "LLM_REASONING_TRUNCATED"
 
 
+class WebSearchError(AppError):
+    status_code = 502
+    code = "web_search_error"
+
+
+class WebSearchAuthError(WebSearchError):
+    code = "WEB_SEARCH_AUTH_FAILED"
+
+
 class ProviderError(AppError):
     """A connected calendar or inbox failed.
 

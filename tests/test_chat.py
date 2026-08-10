@@ -62,6 +62,8 @@ def llm_settings(monkeypatch):
     monkeypatch.setenv("MMN_LLM_BASE_URL", "https://llm.test/v1")
     monkeypatch.setenv("MMN_LLM_MODEL", "test/model")
     monkeypatch.setenv("MMN_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("MMN_WEB_SEARCH_BASE_URL", "https://search.test")
+    monkeypatch.setenv("MMN_WEB_SEARCH_API_KEY", "sk-search-test")
     from app.config import reset_settings_cache
 
     reset_settings_cache()
@@ -702,3 +704,53 @@ def test_attach_without_a_prior_search_is_rejected(
             ).fetchone()[0]
             == 0
         )
+
+
+# --------------------------------------------------------------------------- #
+# web_search tool hop
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_web_search_tool_hop_answers_from_real_results(user_client, isolated_settings):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    search_route = respx.post("https://search.test/v1/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Q3 planning best practices",
+                        "url": "https://example.com/q3",
+                        "snippet": "Ship in September for the smoothest rollout.",
+                    }
+                ]
+            },
+        )
+    )
+    llm_route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: web_search Q3 planning best practices"]),
+            stream_response(["Most guides suggest shipping in September."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "What's a good practice for Q3 planning in general?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert llm_route.call_count == 2
+    assert search_route.called
+
+    tool_turn = json.loads(llm_route.calls[1].request.content)["messages"][-1]
+    assert tool_turn["role"] == "user"
+    assert "Ship in September for the smoothest rollout." in tool_turn["content"]
+
+    frames = parse_sse_frames(resp.text)
+    events = [e for e, _ in frames]
+    assert not any(e == "token" and "TOOL:" in d.get("text", "") for e, d in frames)
+    assert events.index("tool_call") < events.index("tool_result") < events.index("done")
+
+    tool_call = next(d for e, d in frames if e == "tool_call")
+    assert tool_call["tool"] == "web_search"

@@ -21,6 +21,7 @@ from app.services import diarize as diarize_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 from app.services import telegram as telegram_svc
+from app.services import web_search as web_search_svc
 
 router = APIRouter(prefix="/api", tags=["settings"])
 log = get_logger("settings")
@@ -58,6 +59,11 @@ class DiarizationTestRequest(BaseModel):
 class TelegramTestRequest(BaseModel):
     bot_token: str | None = Field(default=None, max_length=200)
     chat_ids: str | None = Field(default=None, max_length=2000)
+
+
+class WebSearchTestRequest(BaseModel):
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
 
 
 # A cheap connectivity probe (GET /v1/models) doesn't need the multi-minute
@@ -134,10 +140,10 @@ def update_settings(
 
 
 # --------------------------------------------------------------------------- #
-# Test connection: LLM and diarization
+# Test connection: LLM, diarization, Telegram and web search
 #
-# Both accept an optional body so the Settings form can try unsaved edits before
-# Save, and both stay admin-only because that body can point the server at an
+# All accept an optional body so the Settings form can try unsaved edits before
+# Save, and all stay admin-only because that body can point the server at an
 # arbitrary host.
 # --------------------------------------------------------------------------- #
 
@@ -211,6 +217,28 @@ def test_telegram(
 
     result = telegram_svc.test_connection(bot_token, telegram_svc.parse_chat_ids(chat_ids_raw))
     log.info("admin %s tested Telegram: ok=%s", admin.username, result["ok"])
+    return result
+
+
+@router.post("/web-search/test")
+def test_web_search(
+    payload: WebSearchTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    config = web_search_svc.WebSearchConfig.from_db(conn)
+
+    if payload is not None:
+        if payload.base_url:
+            config.base_url = payload.base_url.rstrip("/")
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            config.api_key = payload.api_key
+
+    result = web_search_svc.test_connection(config)
+    log.info(
+        "admin %s tested web search: ok=%s %sms",
+        admin.username, result["ok"], result["latency_ms"],
+    )
     return result
 
 

@@ -1,4 +1,4 @@
-"""Home chat: cross-thread digest, its four tool hops, history, isolation."""
+"""Home chat: cross-thread digest, its five tool hops, history, isolation."""
 
 from __future__ import annotations
 
@@ -21,6 +21,8 @@ def llm_settings(monkeypatch):
     monkeypatch.setenv("MMN_LLM_BASE_URL", "https://llm.test/v1")
     monkeypatch.setenv("MMN_LLM_MODEL", "test/model")
     monkeypatch.setenv("MMN_LLM_API_KEY", "sk-test")
+    monkeypatch.setenv("MMN_WEB_SEARCH_BASE_URL", "https://search.test")
+    monkeypatch.setenv("MMN_WEB_SEARCH_API_KEY", "sk-search-test")
     from app.config import reset_settings_cache
 
     reset_settings_cache()
@@ -498,3 +500,52 @@ def test_a_failed_suggestions_call_does_not_break_the_answer(user_client, isolat
     events = [e for e, _ in parse_sse_frames(resp.text)]
     assert "done" in events
     assert "suggestions" not in events
+
+
+# --------------------------------------------------------------------------- #
+# web_search tool hop
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_web_search_tool_hop_answers_from_real_results(user_client, isolated_settings):
+    _seed_via_api(user_client, isolated_settings)
+    search_route = respx.post("https://search.test/v1/search").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "results": [
+                    {
+                        "title": "Hybrid work equipment guides",
+                        "url": "https://example.com/hybrid",
+                        "snippet": "Most companies issue a laptop and a docking station.",
+                    }
+                ]
+            },
+        )
+    )
+    llm_route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: web_search hybrid work equipment best practices"]),
+            stream_response(["Most companies issue a laptop plus a dock."]),
+        ]
+    )
+
+    resp = user_client.post(
+        "/api/home/chat",
+        json={"message": "In general, what do most companies do for hybrid work equipment?"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert llm_route.call_count == 2
+    assert search_route.called
+
+    tool_turn = json.loads(llm_route.calls[1].request.content)["messages"][-1]
+    assert "Most companies issue a laptop and a docking station." in tool_turn["content"]
+
+    frames = parse_sse_frames(resp.text)
+    events = [e for e, _ in frames]
+    assert not any(e == "token" and "TOOL:" in d.get("text", "") for e, d in frames)
+    assert events.index("tool_call") < events.index("tool_result") < events.index("done")
+
+    tool_call = next(d for e, d in frames if e == "tool_call")
+    assert tool_call["tool"] == "web_search"

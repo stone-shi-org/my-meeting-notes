@@ -22,6 +22,7 @@ import {
   SettingsPage,
   TelegramSettingsPage,
   UsersSettingsPage,
+  WebSearchSettingsPage,
 } from '@/pages/SettingsPage';
 import { ThreadDetailPage } from '@/pages/ThreadDetailPage';
 import { ThreadsPage } from '@/pages/ThreadsPage';
@@ -75,6 +76,7 @@ export function App() {
                       <Route index element={<Navigate to="/settings/llm" replace />} />
                       <Route path="llm" element={<LlmSettingsPage />} />
                       <Route path="diarization" element={<DiarizationSettingsPage />} />
+                      <Route path="web-search" element={<WebSearchSettingsPage />} />
                       <Route path="integrations" element={<IntegrationsSettingsPage />} />
                       <Route path="matching" element={<MatchingSettingsPage />} />
                       <Route path="telegram" element={<TelegramSettingsPage />} />

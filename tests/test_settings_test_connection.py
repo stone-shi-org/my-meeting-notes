@@ -1,4 +1,4 @@
-"""The Test button endpoints for LLM and diarization settings."""
+"""The Test button endpoints for LLM, diarization and web search settings."""
 
 from __future__ import annotations
 
@@ -8,9 +8,11 @@ import respx
 
 from app.services import diarize as diarize_svc
 from app.services import llm as llm_svc
+from app.services import web_search as web_search_svc
 
 LLM_URL = "https://llm.test/v1/chat/completions"
 DIARIZE_MODELS_URL = "http://diarizer.test/v1/models"
+WEB_SEARCH_URL = "https://search.test/v1/search"
 
 
 @pytest.fixture(autouse=True)
@@ -20,6 +22,8 @@ def base_settings(monkeypatch):
     monkeypatch.setenv("MMN_LLM_API_KEY", "sk-configured")
     monkeypatch.setenv("MMN_DIARIZATION_URL", "http://diarizer.test/v1/audio/diarization")
     monkeypatch.setenv("MMN_DIARIZATION_MODEL", "vibevoice-cpp-asr")
+    monkeypatch.setenv("MMN_WEB_SEARCH_BASE_URL", "https://search.test")
+    monkeypatch.setenv("MMN_WEB_SEARCH_API_KEY", "sk-search-configured")
     from app.config import reset_settings_cache
 
     reset_settings_cache()
@@ -256,6 +260,41 @@ class TestDiarizationTestConnection:
         assert not diarize_route.called
 
 
+class TestWebSearchTestConnection:
+    def config(self, **kw):
+        return web_search_svc.WebSearchConfig(
+            base_url=kw.get("base_url", "https://search.test"),
+            api_key=kw.get("api_key", "sk-search-test"),
+            timeout=20,
+        )
+
+    @respx.mock
+    def test_success_reports_latency_and_a_result_count(self):
+        respx.post(WEB_SEARCH_URL).mock(
+            return_value=httpx.Response(200, json={"results": [{"title": "x", "url": "y"}]})
+        )
+        result = web_search_svc.test_connection(self.config())
+
+        assert result["ok"] is True
+        assert result["error"] is None
+        assert result["response"] == "1 result(s)"
+        assert result["latency_ms"] >= 0
+
+    @respx.mock
+    def test_auth_failure_is_reported_not_raised(self):
+        respx.post(WEB_SEARCH_URL).mock(return_value=httpx.Response(401))
+        result = web_search_svc.test_connection(self.config())
+        assert result["ok"] is False
+        assert "reject" in result["error"].lower() or "auth" in result["error"].lower()
+
+    @respx.mock
+    def test_unreachable_service_is_reported_not_raised(self):
+        respx.post(WEB_SEARCH_URL).mock(side_effect=httpx.ConnectError("refused"))
+        result = web_search_svc.test_connection(self.config())
+        assert result["ok"] is False
+        assert "reach" in result["error"].lower()
+
+
 # --------------------------------------------------------------------------- #
 # API
 # --------------------------------------------------------------------------- #
@@ -327,3 +366,43 @@ def test_diarization_test_endpoint_can_try_unsaved_edits(admin_client):
 
 def test_diarization_test_endpoint_is_admin_only(user_client):
     assert user_client.post("/api/diarization/test").status_code == 403
+
+
+@respx.mock
+def test_web_search_test_endpoint_uses_the_saved_config(admin_client):
+    route = respx.post(WEB_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    resp = admin_client.post("/api/web-search/test")
+
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert route.calls[0].request.headers["authorization"] == "Bearer sk-search-configured"
+
+
+@respx.mock
+def test_web_search_test_endpoint_can_try_unsaved_edits(admin_client):
+    route = respx.post("https://other-search.test/v1/search").mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    resp = admin_client.post(
+        "/api/web-search/test", json={"base_url": "https://other-search.test"}
+    )
+    assert resp.status_code == 200
+    assert route.called
+
+
+@respx.mock
+def test_web_search_test_endpoint_ignores_a_masked_api_key_echo(admin_client):
+    """The form round-trips the masked placeholder; that must not become the
+    literal API key sent to the server."""
+    route = respx.post(WEB_SEARCH_URL).mock(
+        return_value=httpx.Response(200, json={"results": []})
+    )
+    admin_client.post("/api/web-search/test", json={"api_key": "••••1234"})
+
+    assert route.calls[0].request.headers["authorization"] == "Bearer sk-search-configured"
+
+
+def test_web_search_test_endpoint_is_admin_only(user_client):
+    assert user_client.post("/api/web-search/test").status_code == 403

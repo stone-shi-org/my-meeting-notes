@@ -27,6 +27,7 @@ from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
 from app.services import upcoming as upcoming_svc
+from app.services import web_search as web_search_svc
 
 log = get_logger("home_chat")
 
@@ -35,7 +36,7 @@ MAX_HISTORY_MESSAGES = 20
 SEARCH_MAX_CANDIDATES = 10
 
 TOOL_RE = re.compile(
-    r"^\s*TOOL:\s*(get_thread_detail|get_transcript|get_upcoming|search_context)"
+    r"^\s*TOOL:\s*(get_thread_detail|get_transcript|get_upcoming|search_context|web_search)"
     r"\s+(.+?)\s*$",
     re.IGNORECASE,
 )
@@ -132,6 +133,8 @@ async def _run_tool(conn: sqlite3.Connection, db_path, user_id: int, verb: str, 
         return _tool_get_transcript(conn, user_id, arg)
     if verb == "get_upcoming":
         return await _tool_get_upcoming(db_path, user_id, arg)
+    if verb == "web_search":
+        return await asyncio.to_thread(web_search_svc.format_tool_result, db_path, arg)
     return await _tool_search_context(conn, db_path, user_id, arg)
 
 

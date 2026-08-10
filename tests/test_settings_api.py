@@ -14,7 +14,10 @@ from app.db import get_conn
 
 def test_settings_list_every_runtime_key(user_client):
     body = user_client.get("/api/settings").json()["settings"]
-    for key in ("llm_base_url", "llm_model", "diarization_url", "match_max_candidates"):
+    for key in (
+        "llm_base_url", "llm_model", "diarization_url", "match_max_candidates",
+        "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
+    ):
         assert key in body
 
 
@@ -73,6 +76,19 @@ def test_a_masked_secret_sent_back_unchanged_is_ignored(admin_client, isolated_s
             "SELECT value FROM app_settings WHERE key = 'llm_api_key'"
         ).fetchone()[0]
     assert stored == "sk-real-key"
+
+
+def test_a_masked_web_search_key_sent_back_unchanged_is_ignored(admin_client, isolated_settings):
+    admin_client.put("/api/settings", json={"values": {"web_search_api_key": "sk-real-search-key"}})
+
+    shown = admin_client.get("/api/settings").json()["settings"]["web_search_api_key"]["value"]
+    admin_client.put("/api/settings", json={"values": {"web_search_api_key": shown}})
+
+    with get_conn(isolated_settings.db_path) as conn:
+        stored = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'web_search_api_key'"
+        ).fetchone()[0]
+    assert stored == "sk-real-search-key"
 
 
 def test_clearing_a_setting_falls_back_to_the_env_default(admin_client, isolated_settings):

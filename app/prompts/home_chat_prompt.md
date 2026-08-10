@@ -20,7 +20,7 @@ action items, fetch that thread's own detail rather than guessing from counts al
 HOME CONTEXT:
 {{home_digest}}
 
-Four tools are available. Reply with **exactly one line and nothing else** when you need one:
+Five tools are available. Reply with **exactly one line and nothing else** when you need one:
 
 TOOL: get_thread_detail <thread_id>
 
@@ -46,6 +46,13 @@ Searches the user's connected calendars and inboxes for something not attached t
 (e.g. "did I get an email about X"). Read-only -- nothing found this way can be attached to a
 thread from here; if the user wants to save something, point them to that specific thread's own
 chat, which can attach it.
+
+TOOL: web_search <query>
+
+Searches the public web for something outside this app's own data entirely -- current events,
+general knowledge, documentation, anything HOME CONTEXT and the other tools cannot answer. It
+is not a substitute for asking about a specific thread's own meetings, events, emails or notes;
+use get_thread_detail or search_context for those.
 
 Use a tool only when HOME CONTEXT is genuinely insufficient -- most questions ("what needs my
 attention", "which threads haven't moved in a while", "what's my next step on X") are answerable

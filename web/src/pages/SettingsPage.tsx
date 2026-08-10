@@ -30,6 +30,7 @@ import type {
 const TABS = [
   { to: '/settings/llm', label: 'LLM' },
   { to: '/settings/diarization', label: 'Diarization' },
+  { to: '/settings/web-search', label: 'Web Search' },
   { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/telegram', label: 'Telegram', adminOnly: true },
@@ -539,6 +540,26 @@ export function DiarizationSettingsPage() {
           type: 'number',
           hint: 'A 20-minute recording can take several minutes.',
         },
+      ]}
+    />
+  );
+}
+
+export function WebSearchSettingsPage() {
+  return (
+    <SettingsForm
+      title="Web search"
+      description="Lets the AI chat (home screen and thread) search the public web for things not in your threads or calendar."
+      testPath="/web-search/test"
+      testKeyMap={{ web_search_base_url: 'base_url', web_search_api_key: 'api_key' }}
+      keys={[
+        {
+          key: 'web_search_base_url',
+          label: 'Base URL',
+          hint: 'Searches {base URL}/v1/search',
+        },
+        { key: 'web_search_api_key', label: 'API key' },
+        { key: 'web_search_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
       ]}
     />
   );

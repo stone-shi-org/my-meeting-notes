@@ -28,6 +28,7 @@ from app.services import prompts as prompts_svc
 from app.services import summarize as summarize_svc
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
+from app.services import web_search as web_search_svc
 from app.services.providers import loader as providers_svc
 
 log = get_logger("chat")
@@ -51,7 +52,7 @@ EMAIL_BODY_LIMIT = 8000
 SEARCH_MAX_CANDIDATES = 10
 
 TOOL_RE = re.compile(
-    r"^\s*TOOL:\s*(get_transcript|search_context|get_email|attach_email|attach_event)"
+    r"^\s*TOOL:\s*(get_transcript|search_context|get_email|attach_email|attach_event|web_search)"
     r"\s+(.+?)\s*$",
     re.IGNORECASE,
 )
@@ -253,6 +254,8 @@ async def _run_tool(
         return await _tool_search_context(conn, db_path, thread_id, user_id, arg, found)
     if verb == "get_email":
         return await _tool_get_email(conn, thread_id, user_id, arg, found)
+    if verb == "web_search":
+        return await asyncio.to_thread(web_search_svc.format_tool_result, db_path, arg)
     return _tool_attach(conn, thread_id, user_id, verb, arg, found)
 
 

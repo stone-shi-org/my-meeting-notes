@@ -37,6 +37,9 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "llm_ssl_verify": ("bool", False),
     "llm_timeout_sec": ("int", False),
     "llm_temperature": ("float", False),
+    "web_search_base_url": ("str", False),
+    "web_search_api_key": ("str", True),
+    "web_search_timeout_sec": ("int", False),
     "summary_prompt_name": ("str", False),
     "match_window_days_before": ("int", False),
     "match_window_days_after": ("int", False),
@@ -127,6 +130,15 @@ class Settings(BaseSettings):
     llm_temperature: float = 0.2
     summary_prompt_name: str = "summary_prompt"
     summary_max_input_tokens: int = 24000
+
+    # --- web search -----------------------------------------------------------
+    # The AI chat's web_search tool -- an OpenAI-compatible-adjacent search API
+    # (POST {base_url}/v1/search, {"query": ...}), same key/base_url shape as
+    # the llm block above. Empty means the tool is off: format_tool_result()
+    # says so rather than trying to reach a blank host.
+    web_search_base_url: str = ""
+    web_search_api_key: str = ""
+    web_search_timeout_sec: int = 20
 
     # --- mcp ----------------------------------------------------------------
     mcp_calendar_url: str = "http://calendar-mcp.internal.example:4006"
