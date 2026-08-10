@@ -7,6 +7,7 @@ import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { ToolCallBubble, type ToolCall } from '@/components/chat/ToolCallBubble';
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
+import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatModel } from '@/hooks/useChatModel';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
@@ -50,6 +51,7 @@ export function HomeChatPanel() {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
+  useAutoResizeTextarea(textareaRef, draft);
 
   const messagesQuery = useQuery({
     queryKey: ['home-chat'],
@@ -95,6 +97,25 @@ export function HomeChatPanel() {
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [expanded]);
+
+  // Escape cancels a reply in flight -- this only aborts the client's read,
+  // same as unmounting does above; the server keeps generating and persisting
+  // the answer regardless of whether anyone's still listening.
+  useEffect(() => {
+    if (streamingText === null) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') cancelStream();
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [streamingText]);
+
+  function cancelStream() {
+    abortRef.current?.abort();
+    toolCallsRef.current = [];
+    setToolCalls([]);
+    setStreamingText(null);
+  }
 
   async function submit(overrideMessage?: string) {
     const message = (overrideMessage ?? draft).trim();
@@ -364,7 +385,10 @@ export function HomeChatPanel() {
               disabled={!draft.trim()}
               onClick={() => void submit()}
             >
-              <Send />
+              {/* Button's loading state prepends a spinner to its children --
+                  for an icon-only button that means dropping the arrow
+                  entirely while it spins, not stacking the two. */}
+              {streamingText === null && <Send />}
             </Button>
           ) : (
             <button

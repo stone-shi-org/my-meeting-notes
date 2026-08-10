@@ -6,6 +6,7 @@ import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
+import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatModel } from '@/hooks/useChatModel';
 import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
@@ -44,6 +45,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   // Saved answers are filed on the meeting, which puts them on its thread's
   // timeline with the meeting recorded alongside.
   const noteScope: NoteScope = { kind: 'meeting', meetingId };
+  useAutoResizeTextarea(textareaRef, draft);
 
   const messagesQuery = useQuery({
     queryKey: ['meeting-chat', meetingId],
@@ -89,6 +91,23 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     document.addEventListener('mousedown', handlePointerDown);
     return () => document.removeEventListener('mousedown', handlePointerDown);
   }, [expanded]);
+
+  // Escape cancels a reply in flight -- this only aborts the client's read,
+  // same as unmounting does above; the server keeps generating and persisting
+  // the answer regardless of whether anyone's still listening.
+  useEffect(() => {
+    if (streamingText === null) return;
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') cancelStream();
+    }
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [streamingText]);
+
+  function cancelStream() {
+    abortRef.current?.abort();
+    setStreamingText(null);
+  }
 
   async function submit(overrideMessage?: string) {
     const message = (overrideMessage ?? draft).trim();
@@ -329,7 +348,10 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
               disabled={!draft.trim()}
               onClick={() => void submit()}
             >
-              <Send />
+              {/* Button's loading state prepends a spinner to its children --
+                  for an icon-only button that means dropping the arrow
+                  entirely while it spins, not stacking the two. */}
+              {streamingText === null && <Send />}
             </Button>
           ) : (
             <button
