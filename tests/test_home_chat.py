@@ -549,3 +549,72 @@ def test_web_search_tool_hop_answers_from_real_results(user_client, isolated_set
 
     tool_call = next(d for e, d in frames if e == "tool_call")
     assert tool_call["tool"] == "web_search"
+
+
+# --------------------------------------------------------------------------- #
+# run_telegram_turn -- the non-streaming reply the Telegram poller uses
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+async def test_run_telegram_turn_persists_into_its_own_table(user_client, isolated_settings):
+    _seed_via_api(user_client, isolated_settings)
+    user_id = user_client.get("/api/auth/me").json()["id"]
+    respx.post(LLM_URL).mock(return_value=stream_response(["Nothing urgent right now."]))
+
+    reply = await home_chat_svc.run_telegram_turn(
+        isolated_settings.db_path, user_id, "What needs my attention?"
+    )
+
+    assert reply == "Nothing urgent right now."
+    with get_conn(isolated_settings.db_path) as conn:
+        telegram_rows = conn.execute(
+            "SELECT role, content FROM telegram_chat_messages WHERE owner_id = ? ORDER BY id",
+            (user_id,),
+        ).fetchall()
+        home_rows = conn.execute(
+            "SELECT COUNT(*) FROM home_chat_messages WHERE owner_id = ?", (user_id,)
+        ).fetchone()[0]
+    assert [r["role"] for r in telegram_rows] == ["user", "assistant"]
+    assert telegram_rows[1]["content"] == "Nothing urgent right now."
+    # A Telegram exchange must never show up in the web home chat's own panel.
+    assert home_rows == 0
+
+
+@respx.mock
+async def test_run_telegram_turn_still_runs_tool_hops(user_client, isolated_settings):
+    thread_id, _other_id, _meeting_id = _seed_via_api(user_client, isolated_settings)
+    user_id = user_client.get("/api/auth/me").json()["id"]
+    route = respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response([f"TOOL: get_thread_detail {thread_id}"]),
+            stream_response(["Here's the detail."]),
+        ]
+    )
+
+    reply = await home_chat_svc.run_telegram_turn(
+        isolated_settings.db_path, user_id, "Tell me about Q3 planning"
+    )
+
+    assert reply == "Here's the detail."
+    assert route.call_count == 2
+    tool_turn = json.loads(route.calls[1].request.content)["messages"][-1]
+    assert "Meeting" in tool_turn["content"]
+
+
+@respx.mock
+async def test_run_telegram_turn_on_failure_apologizes_and_persists_nothing(
+    user_client, isolated_settings
+):
+    _seed_via_api(user_client, isolated_settings)
+    user_id = user_client.get("/api/auth/me").json()["id"]
+    respx.post(LLM_URL).mock(return_value=httpx.Response(401, json={"error": "bad key"}))
+
+    reply = await home_chat_svc.run_telegram_turn(isolated_settings.db_path, user_id, "hello?")
+
+    assert "sorry" in reply.lower()
+    with get_conn(isolated_settings.db_path) as conn:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM telegram_chat_messages WHERE owner_id = ?", (user_id,)
+        ).fetchone()[0]
+    assert count == 0

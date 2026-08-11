@@ -24,6 +24,7 @@ import type {
   PromptSummary,
   ProviderSpec,
   SettingEntry,
+  TelegramLink,
   User,
 } from '@/types/api';
 
@@ -33,7 +34,7 @@ const TABS = [
   { to: '/settings/web-search', label: 'Web Search' },
   { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/matching', label: 'Matching' },
-  { to: '/settings/telegram', label: 'Telegram', adminOnly: true },
+  { to: '/settings/telegram', label: 'Telegram' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/users', label: 'Users', adminOnly: true },
   // Only on a server with MMN_DEV_PROVIDER_ENABLED set. Detected by whether the
@@ -653,27 +654,145 @@ export function MatchingSettingsPage() {
   );
 }
 
+/**
+ * One user's own Telegram link: generate a one-time code, send it to the bot
+ * from Telegram, done. This is the only way a bot can learn someone's chat id
+ * -- there's nowhere to send a code *to* until they've made contact -- so it
+ * doubles as the verification step, not just onboarding polish: whoever sends
+ * a given code is who that code's chat id gets linked to, and Telegram itself
+ * sets the sender on every message, which can't be spoofed.
+ */
+function MyTelegramCard() {
+  const queryClient = useQueryClient();
+  const link = useQuery({
+    queryKey: ['my-telegram'],
+    queryFn: () => api.get<TelegramLink>('/auth/me/telegram'),
+    // While a code is pending, poll so linking completes live the moment the
+    // user sends /start <code> from their phone -- no manual refresh needed.
+    refetchInterval: (query) => (query.state.data?.pending_code ? 3000 : false),
+  });
+
+  const generateCode = useMutation({
+    mutationFn: () => api.post('/auth/me/telegram/link-code'),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['my-telegram'] }),
+  });
+
+  const unlink = useMutation({
+    mutationFn: () => api.del('/auth/me/telegram'),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['my-telegram'] }),
+  });
+
+  const savePrefs = useMutation({
+    mutationFn: (values: Omit<TelegramLink, 'linked' | 'linked_at' | 'pending_code' | 'pending_code_expires_at'>) =>
+      api.put('/auth/me/telegram/preferences', values),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['my-telegram'] }),
+  });
+
+  if (link.isLoading) return <Skeleton className="h-48 w-full" />;
+  if (link.isError) return <ErrorState error={link.error} />;
+  const data = link.data!;
+
+  const prefKeys: { key: keyof TelegramLink; label: string }[] = [
+    { key: 'notify_new_attachments', label: 'Notify on new attachments' },
+    { key: 'notify_next_steps', label: 'Notify on new next steps' },
+    { key: 'notify_transcript_ready', label: 'Notify when a transcript is ready' },
+    { key: 'notify_transcript_failed', label: 'Notify when a transcript fails' },
+  ];
+
+  function togglePref(key: keyof TelegramLink, checked: boolean) {
+    savePrefs.mutate({
+      notify_new_attachments: data.notify_new_attachments,
+      notify_next_steps: data.notify_next_steps,
+      notify_transcript_ready: data.notify_transcript_ready,
+      notify_transcript_failed: data.notify_transcript_failed,
+      [key]: checked,
+    });
+  }
+
+  return (
+    <Card className="p-5">
+      <h2 className="font-display text-lg font-semibold">Your Telegram</h2>
+      <p className="mt-1 text-sm text-fg-subtle">
+        Link your own Telegram account to chat with the AI about your threads and get
+        notifications for your own work.
+      </p>
+
+      {data.linked ? (
+        <div className="mt-4 space-y-4">
+          <p className="text-sm text-success-ink">
+            Connected
+            {data.linked_at && ` since ${new Date(data.linked_at).toLocaleString()}`}.
+          </p>
+          <div className="space-y-2">
+            {prefKeys.map(({ key, label }) => (
+              <label key={key} className="flex items-center gap-2 text-sm">
+                <input
+                  type="checkbox"
+                  checked={Boolean(data[key])}
+                  onChange={(e) => togglePref(key, e.target.checked)}
+                  className="size-4 rounded border-border-strong"
+                />
+                {label}
+              </label>
+            ))}
+          </div>
+          <Button variant="secondary" onClick={() => unlink.mutate()} loading={unlink.isPending}>
+            Disconnect
+          </Button>
+        </div>
+      ) : data.pending_code ? (
+        <div className="mt-4 space-y-2">
+          <p className="text-sm">
+            Send this to the bot:{' '}
+            <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono">
+              /start {data.pending_code}
+            </code>
+          </p>
+          <p className="text-xs text-fg-subtle">
+            Expires{' '}
+            {data.pending_code_expires_at
+              ? new Date(data.pending_code_expires_at).toLocaleTimeString()
+              : 'soon'}
+            . Don&rsquo;t share this code — anyone who sends it links their own Telegram to your
+            account.
+          </p>
+          <Button
+            variant="secondary"
+            onClick={() => generateCode.mutate()}
+            loading={generateCode.isPending}
+          >
+            Generate a new code
+          </Button>
+        </div>
+      ) : (
+        <Button
+          className="mt-4"
+          variant="primary"
+          onClick={() => generateCode.mutate()}
+          loading={generateCode.isPending}
+        >
+          Generate a linking code
+        </Button>
+      )}
+    </Card>
+  );
+}
+
 export function TelegramSettingsPage() {
   return (
-    <SettingsForm
-      title="Telegram"
-      description="Sends a message when the sweep attaches a new email or calendar event to a watched thread, and when a fresh next step is generated."
-      testPath="/telegram/test"
-      testKeyMap={{ telegram_bot_token: 'bot_token', telegram_chat_ids: 'chat_ids' }}
-      keys={[
-        { key: 'telegram_enabled', label: 'Enabled' },
-        { key: 'telegram_bot_token', label: 'Bot token', hint: 'From @BotFather' },
-        {
-          key: 'telegram_chat_ids',
-          label: 'Chat / channel IDs',
-          hint: "Comma-separated, e.g. a group's numeric ID (-1001234567890) or a channel's @username",
-        },
-        { key: 'telegram_notify_new_attachments', label: 'Notify on new attachments' },
-        { key: 'telegram_notify_next_steps', label: 'Notify on new next steps' },
-        { key: 'telegram_notify_transcript_ready', label: 'Notify when a transcript is ready' },
-        { key: 'telegram_notify_transcript_failed', label: 'Notify when a transcript fails' },
-      ]}
-    />
+    <div className="space-y-4">
+      <SettingsForm
+        title="Telegram bot"
+        description="The bot every account links their own Telegram to. One bot for everyone; who it talks to is set below, not here."
+        testPath="/telegram/test"
+        testKeyMap={{ telegram_bot_token: 'bot_token' }}
+        keys={[
+          { key: 'telegram_enabled', label: 'Enabled' },
+          { key: 'telegram_bot_token', label: 'Bot token', hint: 'From @BotFather' },
+        ]}
+      />
+      <MyTelegramCard />
+    </div>
   );
 }
 

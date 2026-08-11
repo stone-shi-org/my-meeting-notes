@@ -421,6 +421,29 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_home_chat_owner ON home_chat_messages(owner_id, created_at)",
+    # ------------------------------------------------------ telegram_chat_messages
+    """
+    CREATE TABLE IF NOT EXISTS telegram_chat_messages (
+        id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        owner_id           INTEGER NOT NULL REFERENCES users(id),
+        role               TEXT NOT NULL,
+        content            TEXT NOT NULL,
+        model              TEXT,
+        prompt_tokens      INTEGER,
+        completion_tokens  INTEGER,
+        created_at         TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_telegram_chat_owner ON telegram_chat_messages(owner_id, created_at)",
+    # ---------------------------------------------------------- telegram_link_codes
+    """
+    CREATE TABLE IF NOT EXISTS telegram_link_codes (
+        code        TEXT PRIMARY KEY,
+        user_id     INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        created_at  TEXT NOT NULL,
+        expires_at  TEXT NOT NULL
+    )
+    """,
     # ---------------------------------------------------------- mcp_servers
     """
     CREATE TABLE IF NOT EXISTS mcp_servers (
@@ -665,12 +688,25 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # existing followers when a merge target itself gets merged, so
     # transcript.py never has to walk a chain.
     ("speaker_map", "merged_into", "TEXT"),
+    # Which Telegram chat this account is linked to, and when. NULL means never
+    # linked -- there is no other way a bot can learn a chat id except the
+    # owner messaging it first, so this is only ever set by consume_link_code,
+    # never typed in directly. Replaces the old app-wide telegram_chat_ids
+    # broadcast list: notifications now go to the owning user's own chat.
+    ("users", "telegram_chat_id", "TEXT"),
+    ("users", "telegram_linked_at", "TEXT"),
+    ("users", "telegram_notify_new_attachments", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "telegram_notify_next_steps", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "telegram_notify_transcript_ready", "INTEGER NOT NULL DEFAULT 0"),
+    ("users", "telegram_notify_transcript_failed", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that
 # runs first, so naming group_id there would fail on the boot that adds it.
 LATE_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(owner_id, group_id)",
+    # The poller looks up the sender of every inbound message by chat id.
+    "CREATE INDEX IF NOT EXISTS idx_users_telegram_chat_id ON users(telegram_chat_id)",
 )
 
 

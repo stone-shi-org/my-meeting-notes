@@ -599,6 +599,17 @@ export interface SettingEntry {
   overridden: boolean;
 }
 
+export interface TelegramLink {
+  linked: boolean;
+  linked_at: string | null;
+  pending_code: string | null;
+  pending_code_expires_at: string | null;
+  notify_new_attachments: boolean;
+  notify_next_steps: boolean;
+  notify_transcript_ready: boolean;
+  notify_transcript_failed: boolean;
+}
+
 export interface PromptSummary {
   name: string;
   version: string;

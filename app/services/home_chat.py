@@ -15,6 +15,7 @@ import asyncio
 import json
 import re
 import sqlite3
+from typing import Awaitable, Callable
 
 from app.config import effective, get_settings
 from app.db import get_conn, utcnow
@@ -303,13 +304,19 @@ def _sse(event: str, data: dict) -> str:
 
 
 async def _run_hop(
-    config: llm_svc.LLMConfig, payload: dict, queue: asyncio.Queue[str | None]
+    config: llm_svc.LLMConfig, payload: dict, on_token: Callable[[str], Awaitable[None]]
 ) -> tuple[str, dict]:
-    """Stream one LLM turn, forwarding visible text to `queue` as it arrives --
-    except while it might still turn into a `TOOL: <verb> <arg>` line, which
+    """Stream one LLM turn, forwarding visible text to `on_token` as it arrives
+    -- except while it might still turn into a `TOOL: <verb> <arg>` line, which
     must never reach the client. Once the output starts with ``TOOL:`` it stays
     withheld until the complete line can be validated; tool arguments are not
     length-bounded and therefore cannot safely use a fixed sniff window.
+
+    Generic over the sink so both the streaming web chat (`on_token` pushes an
+    SSE frame per delta) and the non-streaming Telegram reply (`on_token` is a
+    no-op -- there is no live-token UI to feed) share this exact loop; the
+    sniff window and the tool-hop detection it protects are subtle enough not
+    to want two copies of.
     """
     usage: dict = {}
     buf = ""
@@ -318,7 +325,7 @@ async def _run_hop(
     async for delta in llm_svc.achat_stream(config, payload, usage_out=usage):
         buf += delta
         if passthrough:
-            await queue.put(_sse("token", {"text": delta}))
+            await on_token(delta)
             continue
 
         candidate = buf.lstrip()
@@ -326,13 +333,87 @@ async def _run_hop(
         if not candidate or "TOOL:".startswith(upper) or upper.startswith("TOOL:"):
             continue
         passthrough = True
-        await queue.put(_sse("token", {"text": buf}))
+        await on_token(buf)
 
     if not passthrough and not TOOL_RE.match(buf.strip()):
         # A short normal answer never tripped the sniff window -- flush it now.
-        await queue.put(_sse("token", {"text": buf}))
+        await on_token(buf)
 
     return buf, usage
+
+
+async def _generate_reply(
+    db_path,
+    user_id: int,
+    message: str,
+    model: str | None,
+    emit: Callable[[str, dict], Awaitable[None]],
+) -> tuple[str, dict, str]:
+    """Digest + history + the tool-hop loop. Returns ``(content, usage,
+    resolved_model)``.
+
+    Shared by the streaming web chat (`_produce`) and the non-streaming
+    Telegram reply (`run_telegram_turn`) -- persistence and follow-up
+    suggestions are each caller's own concern, since they land in different
+    tables and only the web UI wants follow-up chips.
+    """
+    with get_conn(db_path) as conn:
+        digest, _truncated = build_home_digest(conn, user_id)
+        history = _history_messages(conn, user_id)
+        config = llm_svc.LLMConfig.from_db(conn, model_override=model)
+
+    prompt = prompts_svc.load("home_chat_prompt")
+    system, _ = prompt.render({"home_digest": digest})
+    if prompt.temperature is not None:
+        config.temperature = prompt.temperature
+
+    messages: list[dict] = [
+        {"role": "system", "content": system},
+        *history,
+        {"role": "user", "content": message},
+    ]
+
+    async def on_token(text: str) -> None:
+        await emit("token", {"text": text})
+
+    content = ""
+    usage: dict = {}
+    for _ in range(MAX_TOOL_HOPS + 1):
+        payload = {
+            "model": config.model,
+            "messages": messages,
+            "temperature": config.temperature,
+            "stream": True,
+            "include_reasoning": False,
+        }
+        content, usage = await _run_hop(config, payload, on_token)
+        match = TOOL_RE.match(content.strip())
+        if not match:
+            break
+
+        verb, arg = match.group(1).lower(), match.group(2).strip()
+        log.info("tool hop for user %s: %s %s", user_id, verb, arg)
+        await emit("tool_call", {"tool": verb, "arg": arg})
+        messages.append({"role": "assistant", "content": content})
+        with get_conn(db_path) as conn:
+            tool_result = await _run_tool(conn, db_path, user_id, verb, arg)
+        log.info(
+            "tool hop for user %s: %s %s -> %d char(s)",
+            user_id, verb, arg, len(tool_result),
+        )
+        await emit("tool_result", {"tool": verb, "arg": arg, "result": tool_result})
+        messages.append({"role": "user", "content": tool_result})
+    else:
+        # Ran out of hops still asking for a tool -- never show the raw
+        # "TOOL: ..." line to the user.
+        if TOOL_RE.match(content.strip()):
+            content = (
+                "I wasn't able to find a direct answer within the context available. "
+                "Try asking about a specific thread by name."
+            )
+            await emit("token", {"text": content})
+
+    return content, usage, config.model
 
 
 async def _produce(
@@ -347,58 +428,12 @@ async def _produce(
     the answer from being generated and saved.
     """
     try:
-        with get_conn(db_path) as conn:
-            digest, _truncated = build_home_digest(conn, user_id)
-            history = _history_messages(conn, user_id)
-            config = llm_svc.LLMConfig.from_db(conn, model_override=model)
+        async def emit(event: str, data: dict) -> None:
+            await queue.put(_sse(event, data))
 
-        prompt = prompts_svc.load("home_chat_prompt")
-        system, _ = prompt.render({"home_digest": digest})
-        if prompt.temperature is not None:
-            config.temperature = prompt.temperature
-
-        messages: list[dict] = [
-            {"role": "system", "content": system},
-            *history,
-            {"role": "user", "content": message},
-        ]
-
-        content = ""
-        usage: dict = {}
-        for _ in range(MAX_TOOL_HOPS + 1):
-            payload = {
-                "model": config.model,
-                "messages": messages,
-                "temperature": config.temperature,
-                "stream": True,
-                "include_reasoning": False,
-            }
-            content, usage = await _run_hop(config, payload, queue)
-            match = TOOL_RE.match(content.strip())
-            if not match:
-                break
-
-            verb, arg = match.group(1).lower(), match.group(2).strip()
-            log.info("tool hop for user %s: %s %s", user_id, verb, arg)
-            await queue.put(_sse("tool_call", {"tool": verb, "arg": arg}))
-            messages.append({"role": "assistant", "content": content})
-            with get_conn(db_path) as conn:
-                tool_result = await _run_tool(conn, db_path, user_id, verb, arg)
-            log.info(
-                "tool hop for user %s: %s %s -> %d char(s)",
-                user_id, verb, arg, len(tool_result),
-            )
-            await queue.put(_sse("tool_result", {"tool": verb, "arg": arg, "result": tool_result}))
-            messages.append({"role": "user", "content": tool_result})
-        else:
-            # Ran out of hops still asking for a tool -- never show the raw
-            # "TOOL: ..." line to the user.
-            if TOOL_RE.match(content.strip()):
-                content = (
-                    "I wasn't able to find a direct answer within the context available. "
-                    "Try asking about a specific thread by name."
-                )
-                await queue.put(_sse("token", {"text": content}))
+        content, usage, resolved_model = await _generate_reply(
+            db_path, user_id, message, model, emit
+        )
 
         now = utcnow()
         with get_conn(db_path) as conn:
@@ -412,7 +447,7 @@ async def _produce(
                 "prompt_tokens, completion_tokens, created_at) "
                 "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
                 (
-                    user_id, content, config.model,
+                    user_id, content, resolved_model,
                     usage.get("prompt_tokens"), usage.get("completion_tokens"), utcnow(),
                 ),
             )
@@ -420,12 +455,12 @@ async def _produce(
                 "SELECT * FROM home_chat_messages WHERE id = ?", (cur.lastrowid,)
             ).fetchone()
 
-        log.info("home chat reply for user %s (%s)", user_id, config.model)
+        log.info("home chat reply for user %s (%s)", user_id, resolved_model)
         await queue.put(_sse("done", _row_to_message(assistant_row)))
 
         suggestions = await asyncio.to_thread(
             chat_followups_svc.generate_sync,
-            db_path, question=message, answer=content, model=config.model,
+            db_path, question=message, answer=content, model=resolved_model,
         )
         if suggestions:
             await queue.put(_sse("suggestions", {"suggestions": suggestions}))
@@ -455,3 +490,45 @@ async def stream_chat_response(db_path, user_id: int, message: str, *, model: st
         if item is None:
             return
         yield item
+
+
+async def run_telegram_turn(db_path, user_id: int, message: str, model: str | None = None) -> str:
+    """One Telegram exchange: the same digest + tool-hop loop as the web home
+    chat, but returns the final text directly instead of streaming it --
+    Telegram has no live-token UI, so intermediate tool_call/tool_result
+    events are simply discarded (the tool hop itself still runs identically).
+    Persists into ``telegram_chat_messages``, a separate table from the web
+    panel's ``home_chat_messages``, so the two conversations don't mix.
+    """
+    async def _noop_emit(event: str, data: dict) -> None:
+        return None
+
+    try:
+        content, usage, resolved_model = await _generate_reply(
+            db_path, user_id, message, model, _noop_emit
+        )
+    except AppError as exc:
+        # A Telegram reply is the only channel available -- there is no
+        # separate error banner the way the web UI has one -- so the apology
+        # *is* the response, and (matching _produce) nothing is persisted.
+        return f"Sorry, I couldn't answer that: {exc.message}"
+
+    now = utcnow()
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "INSERT INTO telegram_chat_messages (owner_id, role, content, created_at) "
+            "VALUES (?, 'user', ?, ?)",
+            (user_id, message, now),
+        )
+        conn.execute(
+            "INSERT INTO telegram_chat_messages (owner_id, role, content, model, "
+            "prompt_tokens, completion_tokens, created_at) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            (
+                user_id, content, resolved_model,
+                usage.get("prompt_tokens"), usage.get("completion_tokens"), utcnow(),
+            ),
+        )
+
+    log.info("telegram chat reply for user %s (%s)", user_id, resolved_model)
+    return content

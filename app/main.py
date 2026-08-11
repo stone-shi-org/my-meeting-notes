@@ -16,6 +16,7 @@ from app.errors import register_exception_handlers
 from app.logging_config import configure_logging, get_logger
 from app.jobs.queue import JobQueue, set_queue
 from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
+from app.jobs.telegram_poller import TelegramPoller, set_poller
 from app.routers import (
     auth,
     calendar,
@@ -81,8 +82,16 @@ async def lifespan(app: FastAPI):
     set_scheduler(scheduler)
     scheduler.start()
 
+    # Same reasoning: always started, gated on telegram_enabled inside each
+    # poll cycle rather than at startup.
+    poller = TelegramPoller()
+    set_poller(poller)
+    poller.start()
+
     yield
 
+    await poller.stop()
+    set_poller(None)
     await scheduler.stop()
     set_scheduler(None)
     await queue.stop()

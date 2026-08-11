@@ -58,7 +58,6 @@ class DiarizationTestRequest(BaseModel):
 
 class TelegramTestRequest(BaseModel):
     bot_token: str | None = Field(default=None, max_length=200)
-    chat_ids: str | None = Field(default=None, max_length=2000)
 
 
 class WebSearchTestRequest(BaseModel):
@@ -206,16 +205,23 @@ def test_telegram(
     admin: CurrentUser = Depends(require_admin),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    """Sends a real message if the calling admin has their own Telegram
+    linked; otherwise just validates the bot token via a cheap ``getMe``
+    probe, since there's nowhere to send a real message until someone has
+    paired (see ``telegram_svc.test_connection``).
+    """
     bot_token = effective(conn, "telegram_bot_token")
-    chat_ids_raw = effective(conn, "telegram_chat_ids")
+    if payload is not None and payload.bot_token and not payload.bot_token.startswith(MASK):
+        bot_token = payload.bot_token
 
-    if payload is not None:
-        if payload.bot_token and not payload.bot_token.startswith(MASK):
-            bot_token = payload.bot_token
-        if payload.chat_ids is not None:
-            chat_ids_raw = payload.chat_ids
+    link = telegram_svc.get_link_status(conn, admin.id)
+    recipient_chat_id = None
+    if link["linked"]:
+        recipient_chat_id = conn.execute(
+            "SELECT telegram_chat_id FROM users WHERE id = ?", (admin.id,)
+        ).fetchone()["telegram_chat_id"]
 
-    result = telegram_svc.test_connection(bot_token, telegram_svc.parse_chat_ids(chat_ids_raw))
+    result = telegram_svc.test_connection(bot_token, recipient_chat_id)
     log.info("admin %s tested Telegram: ok=%s", admin.username, result["ok"])
     return result
 

@@ -1,10 +1,11 @@
-"""Login, logout, identity and password change."""
+"""Login, logout, identity, password change and each user's own Telegram link."""
 
 from __future__ import annotations
 
 import sqlite3
 
 from fastapi import APIRouter, Depends, Request, Response
+from pydantic import BaseModel
 
 from app.config import get_settings
 from app.deps import CurrentUser, active_user, current_user, get_db
@@ -18,10 +19,18 @@ from app.schemas import (
     UserOut,
 )
 from app.security import validate_password, verify_password
+from app.services import telegram as telegram_svc
 from app.services import users as users_svc
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 log = get_logger("auth")
+
+
+class TelegramPreferencesRequest(BaseModel):
+    notify_new_attachments: bool
+    notify_next_steps: bool
+    notify_transcript_ready: bool
+    notify_transcript_failed: bool
 
 
 def _set_session_cookie(response: Response, token: str) -> None:
@@ -167,4 +176,56 @@ def revoke_session(
     if row is None:
         raise NotFoundError("Session not found")
     users_svc.delete_session(conn, session_id)
+    return {"ok": True}
+
+
+# --------------------------------------------------------------------------- #
+# Telegram: each user's own link, not admin-gated -- the bot token itself
+# stays admin-only in Settings, but who it's linked to is each account's own
+# business, the same way a password is.
+# --------------------------------------------------------------------------- #
+
+
+@router.get("/me/telegram")
+def get_my_telegram(
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    return telegram_svc.get_link_status(conn, user.id)
+
+
+@router.post("/me/telegram/link-code")
+def create_my_telegram_link_code(
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    code, expires_at = telegram_svc.create_link_code(conn, user.id)
+    log.info("user %s generated a telegram linking code", user.username)
+    return {"code": code, "expires_at": expires_at}
+
+
+@router.delete("/me/telegram")
+def unlink_my_telegram(
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    telegram_svc.unlink_chat(conn, user.id)
+    log.info("user %s unlinked Telegram", user.username)
+    return {"ok": True}
+
+
+@router.put("/me/telegram/preferences")
+def update_my_telegram_preferences(
+    payload: TelegramPreferencesRequest,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    telegram_svc.set_notify_preferences(
+        conn,
+        user.id,
+        notify_new_attachments=payload.notify_new_attachments,
+        notify_next_steps=payload.notify_next_steps,
+        notify_transcript_ready=payload.notify_transcript_ready,
+        notify_transcript_failed=payload.notify_transcript_failed,
+    )
     return {"ok": True}

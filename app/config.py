@@ -73,15 +73,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # Telegram push notifications. Off by default, same reasoning as
     # auto_match_enabled: a working bot token is enough to spam a channel, not
     # something to switch on for an operator without them asking for it.
+    # The bot itself is app-wide, admin-configured infrastructure; who it
+    # actually messages is per-user now (users.telegram_chat_id and the four
+    # users.telegram_notify_* columns in LATE_COLUMNS), not a setting here.
     "telegram_enabled": ("bool", False),
     "telegram_bot_token": ("str", True),
-    # Comma-separated chat/channel IDs rather than a JSON array: a plain text
-    # field, no dedicated list-editor UI needed.
-    "telegram_chat_ids": ("str", False),
-    "telegram_notify_new_attachments": ("bool", False),
-    "telegram_notify_next_steps": ("bool", False),
-    "telegram_notify_transcript_ready": ("bool", False),
-    "telegram_notify_transcript_failed": ("bool", False),
 }
 
 
@@ -213,11 +209,6 @@ class Settings(BaseSettings):
     # --- telegram -------------------------------------------------------------
     telegram_enabled: bool = False
     telegram_bot_token: str = ""
-    telegram_chat_ids: str = ""
-    telegram_notify_new_attachments: bool = False
-    telegram_notify_next_steps: bool = False
-    telegram_notify_transcript_ready: bool = False
-    telegram_notify_transcript_failed: bool = False
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20
