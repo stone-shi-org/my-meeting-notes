@@ -127,6 +127,29 @@ def _check_extension(filename: str) -> None:
         )
 
 
+def _normalize_channel_fields(
+    channel_map: str | None, room_speakers: str | None
+) -> tuple[str | None, str]:
+    """Validate the two fields useRecorder sends for a channel-separated capture.
+
+    channel_map is empty/None for an ordinary recording -- the overwhelming
+    majority. room_speakers only means anything alongside it, and defaults to
+    the safe assumption, 'multiple', so an omitted value never silently
+    collapses several remote voices into one (see room_speakers' comment in
+    db.py).
+    """
+    if not channel_map:
+        return None, "multiple"
+    if channel_map != "mic_room":
+        raise ValidationError(f"Unknown channel_map {channel_map!r}")
+    resolved = room_speakers or "multiple"
+    if resolved not in ("single", "multiple"):
+        raise ValidationError(
+            f"room_speakers must be 'single' or 'multiple', got {resolved!r}"
+        )
+    return channel_map, resolved
+
+
 async def _stream_to_disk(file: UploadFile, dest: Path) -> int:
     """Write the upload out in chunks and return the byte count.
 
@@ -216,6 +239,12 @@ async def upload_meeting(
     summary_model: str | None = Form(None),
     auto_summarize: bool = Form(True),
     speaker_names: str | None = Form(None, description="Comma-separated, optional"),
+    channel_map: str | None = Form(
+        None, description="'mic_room' if the recorder kept mic and room audio on separate channels"
+    ),
+    room_speakers: str | None = Form(
+        None, description="'single' or 'multiple' -- only meaningful alongside channel_map"
+    ),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
@@ -227,6 +256,7 @@ async def upload_meeting(
     settings = get_settings()
     filename = file.filename or "upload"
     _check_extension(filename)
+    channel_map, room_speakers = _normalize_channel_fields(channel_map, room_speakers)
 
     suffix = Path(filename).suffix.lower()
     staged = _staged_upload_path(settings.audio_dir, suffix)
@@ -264,8 +294,12 @@ async def upload_meeting(
         conn.execute(
             "UPDATE meetings SET original_filename = ?, original_path = ?, "
             "original_mime = ?, original_bytes = ?, status = 'processing', "
+            "channel_map = ?, room_speakers = ?, "
             "updated_at = ? WHERE id = ?",
-            (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
+            (
+                filename, str(dest), file.content_type, written,
+                channel_map, room_speakers, utcnow(), meeting_id,
+            ),
         )
         if speaker_names:
             threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
@@ -310,6 +344,12 @@ async def add_meeting_audio(
     summary_model: str | None = Form(None),
     auto_summarize: bool = Form(True),
     speaker_names: str | None = Form(None, description="Comma-separated, optional"),
+    channel_map: str | None = Form(
+        None, description="'mic_room' if the recorder kept mic and room audio on separate channels"
+    ),
+    room_speakers: str | None = Form(
+        None, description="'single' or 'multiple' -- only meaningful alongside channel_map"
+    ),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
@@ -339,6 +379,7 @@ async def add_meeting_audio(
 
     filename = file.filename or "upload"
     _check_extension(filename)
+    channel_map, room_speakers = _normalize_channel_fields(channel_map, room_speakers)
 
     target_dir = get_settings().audio_dir / str(meeting_id)
     suffix = Path(filename).suffix.lower()
@@ -365,8 +406,12 @@ async def add_meeting_audio(
             "original_mime = ?, original_bytes = ?, status = 'processing', "
             # Reset what described the audio that is no longer there.
             "audio_path = NULL, audio_converted = 0, audio_duration_sec = NULL, "
-            "audio_sample_rate = NULL, audio_channels = NULL, updated_at = ? WHERE id = ?",
-            (filename, str(dest), file.content_type, written, utcnow(), meeting_id),
+            "audio_sample_rate = NULL, audio_channels = NULL, "
+            "channel_map = ?, room_speakers = ?, updated_at = ? WHERE id = ?",
+            (
+                filename, str(dest), file.content_type, written,
+                channel_map, room_speakers, utcnow(), meeting_id,
+            ),
         )
         if speaker_names:
             threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))

@@ -78,6 +78,16 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # users.telegram_notify_* columns in LATE_COLUMNS), not a setting here.
     "telegram_enabled": ("bool", False),
     "telegram_bot_token": ("str", True),
+    # Rolling-window text captions during an active recording, over the same
+    # LocalAI instance and model as batch diarization (see
+    # routers/live_caption.py). Off by default: every open connection adds
+    # periodic extra calls to a box that also serves the LLM and the real
+    # diarizer, and an operator should opt into that load deliberately --
+    # same reasoning as auto_match_enabled, not the env-only dev_provider_enabled
+    # bar, since nothing here is written anywhere for good.
+    "live_caption_enabled": ("bool", False),
+    "live_caption_window_sec": ("int", False),
+    "live_caption_interval_sec": ("int", False),
 }
 
 
@@ -209,6 +219,15 @@ class Settings(BaseSettings):
     # --- telegram -------------------------------------------------------------
     telegram_enabled: bool = False
     telegram_bot_token: str = ""
+
+    # --- live captions ----------------------------------------------------
+    # See RUNTIME_KEYS above for why this is a Settings toggle rather than an
+    # env-only flag. window_sec is how much trailing audio each rolling call
+    # covers; interval_sec is how often a channel gets a new call. Both reuse
+    # diarization_url's host/model/key -- see diarize.transcriptions_url.
+    live_caption_enabled: bool = False
+    live_caption_window_sec: int = 8
+    live_caption_interval_sec: int = 3
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20

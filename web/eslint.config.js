@@ -31,4 +31,19 @@ export default tseslint.config(
       'react-refresh/only-export-components': 'off',
     },
   },
+  {
+    // AudioWorkletProcessor code runs in the AudioWorkletGlobalScope, not the
+    // window -- a different global set (no DOM, but registerProcessor and
+    // friends) that globals.browser above does not cover.
+    files: ['**/*Worklet.js'],
+    languageOptions: {
+      globals: {
+        AudioWorkletProcessor: 'readonly',
+        registerProcessor: 'readonly',
+        sampleRate: 'readonly',
+        currentFrame: 'readonly',
+        currentTime: 'readonly',
+      },
+    },
+  },
 );

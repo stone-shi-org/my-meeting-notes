@@ -1,9 +1,11 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AudioInput } from '@/components/record/AudioInput';
+import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
+import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label } from '@/components/ui/primitives';
 import { watchJob } from '@/hooks/useJob';
+import type { ChannelMap } from '@/hooks/useRecorder';
 import { uploadMeetingAudio } from '@/lib/api';
 import type { Meeting } from '@/types/api';
 
@@ -19,6 +21,8 @@ import type { Meeting } from '@/types/api';
 export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
+  const [channelMap, setChannelMap] = useState<ChannelMap>(null);
+  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [speakerNames, setSpeakerNames] = useState('');
   const [autoSummarize, setAutoSummarize] = useState(true);
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
@@ -42,6 +46,10 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
     form.append('file', file);
     form.append('auto_summarize', String(autoSummarize));
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
+    if (channelMap) {
+      form.append('channel_map', channelMap);
+      form.append('room_speakers', roomSpeakers);
+    }
 
     abort.current = new AbortController();
     setProgress({ loaded: 0, total: file.size });
@@ -69,7 +77,15 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
       </p>
 
       <form onSubmit={submit} className="mt-4 space-y-5">
-        <AudioInput file={file} onFile={setFile} progress={progress} />
+        <AudioInput
+          file={file}
+          onFile={(next: File | null, meta: FileMeta) => {
+            setFile(next);
+            setChannelMap(meta.channelMap);
+            setRoomSpeakers(meta.roomSpeakers);
+          }}
+          progress={progress}
+        />
 
         {askForSpeakers && (
           <div>

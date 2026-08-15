@@ -699,6 +699,20 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "telegram_notify_next_steps", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_ready", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_failed", "INTEGER NOT NULL DEFAULT 0"),
+    # Set when a recording captured two distinct channels instead of mixing to
+    # mono -- currently only 'mic_room' (channel 0 = whatever the tab/system
+    # capture picked up, "the room"; channel 1 = the local microphone). NULL
+    # means an ordinary single-source recording. This is what lets the diarize
+    # stage use ground-truth channel identity instead of the model's voice
+    # clustering -- see services/diarize.py's diarize_channels_file.
+    ("meetings", "channel_map", "TEXT"),
+    # Only meaningful alongside channel_map. The channel split alone cannot
+    # tell a two-person call from a five-person one -- both look like one
+    # "everyone else" channel -- so this is a fact only the person recording
+    # knows. 'multiple' is the safe default: it costs one extra diarization
+    # call on the room channel, where 'single' assumed on an actually
+    # multi-person room would silently mislabel every remote voice as one.
+    ("meetings", "room_speakers", "TEXT NOT NULL DEFAULT 'multiple'"),
 )
 
 # Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that

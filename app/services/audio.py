@@ -141,28 +141,93 @@ def build_ffmpeg_command(src: Path, dest: Path) -> list[str]:
     ]
 
 
-def convert_to_wav16k_mono(src: Path, dest: Path) -> Path:
-    """Transcode to 16 kHz mono PCM. Blocking -- call via asyncio.to_thread."""
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    cmd = build_ffmpeg_command(src, dest)
+def build_ffmpeg_command_stereo(src: Path, dest: Path) -> list[str]:
+    """Same target sample rate/codec as build_ffmpeg_command, but keeps both
+    channels instead of downmixing to mono.
 
-    log.info("converting %s -> %s", src.name, dest.name)
+    Used only for channel-separated (mic + room) recordings: the two channels
+    carry two different speakers there, and downmixing to mono the way every
+    other recording does would sum them back into one signal -- exactly the
+    separation the whole feature exists to preserve.
+    """
+    return [
+        _require_binary("ffmpeg"),
+        "-nostdin",
+        "-y",
+        "-i", str(src),
+        "-ac", "2",
+        "-ar", str(TARGET_SAMPLE_RATE),
+        "-c:a", TARGET_CODEC,
+        str(dest),
+    ]
+
+
+def _run_ffmpeg(cmd: list[str], src_name: str, *outputs: Path) -> None:
+    """Shared subprocess plumbing for every ffmpeg call in this module.
+
+    One error-handling path so a stereo split fails exactly the same way a
+    mono conversion always has -- named timeout, stderr tail, "no output" --
+    rather than three subtly different messages for the same three failures.
+    """
+    for dest in outputs:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+
+    log.info("running ffmpeg on %s -> %s", src_name, ", ".join(o.name for o in outputs))
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT
         )
     except subprocess.TimeoutExpired as exc:
-        raise AudioError(f"ffmpeg timed out converting {src.name}") from exc
+        raise AudioError(f"ffmpeg timed out converting {src_name}") from exc
 
     if result.returncode != 0:
         # ffmpeg puts everything on stderr; the tail is the useful part.
         tail = result.stderr.strip().splitlines()[-5:]
         raise AudioError("ffmpeg failed: " + " | ".join(tail))
 
-    if not dest.exists() or dest.stat().st_size == 0:
-        raise AudioError("ffmpeg produced no output")
+    for dest in outputs:
+        if not dest.exists() or dest.stat().st_size == 0:
+            raise AudioError("ffmpeg produced no output")
 
+
+def convert_to_wav16k_mono(src: Path, dest: Path) -> Path:
+    """Transcode to 16 kHz mono PCM. Blocking -- call via asyncio.to_thread."""
+    cmd = build_ffmpeg_command(src, dest)
+    _run_ffmpeg(cmd, src.name, dest)
     return dest
+
+
+def convert_to_wav16k_stereo(src: Path, dest: Path) -> Path:
+    """Transcode to 16 kHz stereo PCM, preserving channel 0/1 identity.
+
+    Blocking -- call via asyncio.to_thread. Used only for channel-separated
+    (mic + room) recordings; see build_ffmpeg_command_stereo.
+    """
+    cmd = build_ffmpeg_command_stereo(src, dest)
+    _run_ffmpeg(cmd, src.name, dest)
+    return dest
+
+
+def split_stereo_channels(src: Path, left_dest: Path, right_dest: Path) -> None:
+    """Split a 2-channel wav into two mono wavs. Blocking -- call via asyncio.to_thread.
+
+    channel 0 -> left_dest, channel 1 -> right_dest.
+
+    ``channelsplit`` rather than ``-map_channel``: -map_channel on a source
+    that turns out to have only one channel silently produces a mono file
+    with no error, which would make a channel-separated recording collapse
+    back to one speaker without anyone noticing. channelsplit fails loudly on
+    a mismatched layout instead.
+    """
+    binary = _require_binary("ffmpeg")
+    cmd = [
+        binary, "-nostdin", "-y",
+        "-i", str(src),
+        "-filter_complex", "[0:a]channelsplit=channel_layout=stereo[left][right]",
+        "-map", "[left]", str(left_dest),
+        "-map", "[right]", str(right_dest),
+    ]
+    _run_ffmpeg(cmd, src.name, left_dest, right_dest)
 
 
 def is_allowed_extension(filename: str) -> bool:

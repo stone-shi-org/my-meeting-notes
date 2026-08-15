@@ -1,8 +1,9 @@
 import { FileAudio, Mic, Upload, X } from 'lucide-react';
 import { useRef, useState } from 'react';
-import { RecorderPanel } from '@/components/record/RecorderPanel';
+import { RecorderPanel, type RoomSpeakers } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/primitives';
+import type { ChannelMap } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
 
 /** Extensions the upload route accepts. Kept in step with audio.ALLOWED_EXTENSIONS. */
@@ -20,6 +21,12 @@ export interface FileMeta {
   /** Set when the file came from the recorder rather than the disk. */
   recorded: boolean;
   durationSec: number;
+  /** 'mic_room' when the recording kept mic and room audio on separate
+   * channels. Always null for an uploaded file -- there is no capture graph
+   * to have split anything. */
+  channelMap: ChannelMap;
+  /** Only meaningful alongside channelMap; see RecorderPanel's selector. */
+  roomSpeakers: RoomSpeakers;
 }
 
 /**
@@ -72,7 +79,7 @@ export function AudioInput({
               // Switching away drops whatever was staged: each mode owns its own
               // source, and a stale file behind the other tab is how you send
               // the wrong thing.
-              onFile(null, { recorded: false, durationSec: 0 });
+              onFile(null, { recorded: false, durationSec: 0, channelMap: null, roomSpeakers: 'multiple' });
             }}
             className={cn(
               'inline-flex items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium transition-colors duration-fast',
@@ -90,8 +97,8 @@ export function AudioInput({
       {mode === 'record' && (
         <RecorderPanel
           disabled={uploading || disabled}
-          onRecorded={(next, durationSec) =>
-            onFile(next, { recorded: true, durationSec })
+          onRecorded={(next, durationSec, channelMap, roomSpeakers) =>
+            onFile(next, { recorded: true, durationSec, channelMap, roomSpeakers })
           }
         />
       )}
@@ -106,7 +113,7 @@ export function AudioInput({
           onDrop={(e) => {
             e.preventDefault();
             setDragging(false);
-            onFile(e.dataTransfer.files[0] ?? null, { recorded: false, durationSec: 0 });
+            onFile(e.dataTransfer.files[0] ?? null, { recorded: false, durationSec: 0, channelMap: null, roomSpeakers: 'multiple' });
           }}
           className={cn(
             'rounded-xl border-2 border-dashed p-10 text-center transition-colors duration-fast',
@@ -124,7 +131,7 @@ export function AudioInput({
             className="sr-only"
             id="audio-file"
             onChange={(e) =>
-              onFile(e.target.files?.[0] ?? null, { recorded: false, durationSec: 0 })
+              onFile(e.target.files?.[0] ?? null, { recorded: false, durationSec: 0, channelMap: null, roomSpeakers: 'multiple' })
             }
           />
           <Button
@@ -169,7 +176,7 @@ export function AudioInput({
               size="icon"
               aria-label="Remove file"
               disabled={disabled}
-              onClick={() => onFile(null, { recorded: false, durationSec: 0 })}
+              onClick={() => onFile(null, { recorded: false, durationSec: 0, channelMap: null, roomSpeakers: 'multiple' })}
             >
               <X />
             </Button>

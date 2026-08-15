@@ -18,6 +18,16 @@ export default defineConfig({
     strictPort: true,
     host: true,
     proxy: {
+      // Live captions is a persistent websocket, not a request/response poll
+      // like everything else under /api -- it needs its own entry with
+      // ws:true, and it must come before the generic /api entry below or
+      // that one (ws:false) intercepts it first: Vite matches proxy keys in
+      // declaration order and stops at the first prefix match.
+      '/api/live-caption': {
+        target: API_TARGET,
+        changeOrigin: true,
+        ws: true,
+      },
       '/api': {
         target: API_TARGET,
         changeOrigin: true,

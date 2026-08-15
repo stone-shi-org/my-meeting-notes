@@ -12,7 +12,8 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Label, Select } from '@/components/ui/primitives';
-import { useAudioInputs, useRecorder } from '@/hooks/useRecorder';
+import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
+import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
 import {
   blockedReason,
@@ -21,6 +22,8 @@ import {
   sourceSupport,
   type Source,
 } from '@/lib/recording';
+
+export type RoomSpeakers = 'single' | 'multiple';
 
 const SOURCES: { id: Source; label: string; icon: typeof Mic }[] = [
   { id: 'mic', label: 'Microphone', icon: Mic },
@@ -71,8 +74,15 @@ export function RecorderPanel({
   onRecorded,
   disabled,
 }: {
-  /** Handed the finished clip as a File, ready for the normal upload path. */
-  onRecorded: (file: File | null, durationSec: number) => void;
+  /** Handed the finished clip as a File, ready for the normal upload path,
+   * plus whether it kept mic/room on separate channels and -- only
+   * meaningful alongside that -- how many people were on the room side. */
+  onRecorded: (
+    file: File | null,
+    durationSec: number,
+    channelMap: ChannelMap,
+    roomSpeakers: RoomSpeakers,
+  ) => void;
   disabled?: boolean;
 }) {
   const platform = useMemo(() => detectPlatform(), []);
@@ -82,6 +92,13 @@ export function RecorderPanel({
   const [source, setSource] = useState<Source>('mic');
   const [deviceId, setDeviceId] = useState('');
   const [withMic, setWithMic] = useState(true);
+  // Only meaningful once withMic actually produces a channel-separated
+  // recording (source !== 'mic' && withMic) -- see the select below. Default
+  // to the safe assumption: a mislabeled multi-person room is silent data
+  // loss, a redundant diarization call on a genuinely single remote voice is
+  // just a few wasted seconds.
+  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
+  const [liveCaptionsOn, setLiveCaptionsOn] = useState(false);
 
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
@@ -93,11 +110,18 @@ export function RecorderPanel({
   }, [recorder.phase, refresh]);
 
   useEffect(() => {
-    onRecorded(recorder.clip?.file ?? null, recorder.clip?.durationSec ?? 0);
-    // onRecorded is a setter from the page; re-running on identity changes
-    // would fight the page's own state.
+    onRecorded(
+      recorder.clip?.file ?? null,
+      recorder.clip?.durationSec ?? 0,
+      recorder.clip?.channelMap ?? null,
+      roomSpeakers,
+    );
+    // Re-fires on a roomSpeakers change too, not just a new clip -- the
+    // selector stays editable after Stop (see its disabled= below), and
+    // without this the page would keep whatever value was current the
+    // instant recording finished.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recorder.clip]);
+  }, [recorder.clip, roomSpeakers]);
 
   const chosen = support[source];
   const canStart = chosen.available && !disabled;
@@ -201,6 +225,30 @@ export function RecorderPanel({
         </label>
       )}
 
+      {/* Only meaningful once a mic and a room stream both exist to keep
+          apart -- see the ChannelMergerNode wiring in useRecorder. Editable
+          after Stop too: the roomSpeakers effect above re-fires on change. */}
+      {source !== 'mic' && withMic && chosen.available && (
+        <div>
+          <Label htmlFor="rec-room-speakers">On the other side</Label>
+          <Select
+            id="rec-room-speakers"
+            className="mt-1.5"
+            value={roomSpeakers}
+            disabled={disabled}
+            onChange={(e) => setRoomSpeakers(e.target.value as RoomSpeakers)}
+          >
+            <option value="multiple">Several people</option>
+            <option value="single">Just one other person</option>
+          </Select>
+          <p className="mt-1 text-xs text-fg-subtle">
+            We can tell your voice from everyone else's for free, from which side of the
+            recording it came from. Saying there's only one other person skips guessing who's
+            who on that side too.
+          </p>
+        </div>
+      )}
+
       {(source === 'mic' || withMic) && (
         <div>
           <div className="flex items-center justify-between">
@@ -259,6 +307,20 @@ export function RecorderPanel({
           )}
         </div>
       )}
+
+      <label className="flex items-center gap-2 text-sm text-fg-muted">
+        <input
+          type="checkbox"
+          checked={liveCaptionsOn}
+          disabled={disabled}
+          onChange={(e) => setLiveCaptionsOn(e.target.checked)}
+          className="size-4 rounded border-border-strong"
+        />
+        Show live captions while recording
+        <span className="text-xs text-fg-subtle">
+          — a rough draft only; the real transcript is still built after you stop
+        </span>
+      </label>
 
       <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
         {!recorder.live ? (
@@ -345,6 +407,10 @@ export function RecorderPanel({
         <p role="alert" className="text-sm text-danger-ink">
           {recorder.error}
         </p>
+      )}
+
+      {liveCaptionsOn && recorder.phase === 'recording' && (
+        <LiveCaptionStrip streams={recorder.liveStreams} enabled />
       )}
 
       {recorder.clip && !recorder.live && (

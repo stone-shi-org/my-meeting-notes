@@ -9,12 +9,37 @@ import {
 
 export type Phase = 'idle' | 'starting' | 'recording' | 'paused' | 'done';
 
+/**
+ * Set when mic + tab/system were both captured and kept on separate stereo
+ * channels rather than mixed to mono -- see the ChannelMergerNode wiring in
+ * `start()`. 'mic_room' is the only shape today: channel 0 is whatever the
+ * tab/system capture picked up ("the room"), channel 1 is the microphone.
+ * Sent to the upload route so the backend can skip the model diarizer and use
+ * this ground truth instead (see app/services/diarize.py's
+ * diarize_channels_file).
+ */
+export type ChannelMap = 'mic_room' | null;
+
 export interface Clip {
   file: File;
   /** Wall-clock length of the recording, which the WebM header will not carry. */
   durationSec: number;
   /** Object URL for the review player. Revoked when the clip is replaced. */
   url: string;
+  channelMap: ChannelMap;
+}
+
+/**
+ * Raw per-channel streams for the live-caption tap (useLiveCaption), kept
+ * separate from the AudioContext graph above that feeds MediaRecorder.
+ * Exposing the streams themselves rather than an AudioContext keeps the two
+ * features independent -- a bug in one's audio graph cannot touch the
+ * other's, and MediaRecorder's own tap is unaffected by whatever
+ * useLiveCaption does with these.
+ */
+export interface LiveStreams {
+  room: MediaStream | null;
+  me: MediaStream | null;
 }
 
 export interface StartOptions {
@@ -80,12 +105,16 @@ export function useRecorder() {
   const [elapsedMs, setElapsedMs] = useState(0);
   const [level, setLevel] = useState(0);
   const [clip, setClip] = useState<Clip | null>(null);
+  const [liveStreams, setLiveStreams] = useState<LiveStreams>({ room: null, me: null });
 
   const [resuming, setResuming] = useState(false);
 
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<BlobPart[]>([]);
   const streams = useRef<MediaStream[]>([]);
+  // Set once per recording, at start() -- whether mic + room ended up on
+  // separate stereo channels. Read when the Clip is built, at Stop.
+  const channelMapRef = useRef<ChannelMap>(null);
   const audioCtx = useRef<AudioContext | null>(null);
   const analyser = useRef<AnalyserNode | null>(null);
   const raf = useRef<number | null>(null);
@@ -162,6 +191,10 @@ export function useRecorder() {
     audioCtx.current = null;
     recorder.current = null;
     setLevel(0);
+    // The tracks just stopped above are the same streams useLiveCaption taps;
+    // clearing this is what tells it to close its socket and tear down its
+    // own AudioContexts rather than tapping dead tracks.
+    setLiveStreams({ room: null, me: null });
   }, [releaseWakeLock]);
 
   // A recording in flight when the page unmounts must release the microphone
@@ -210,7 +243,7 @@ export function useRecorder() {
     clipUrl.current = url;
     setClip((previous) => {
       if (previous) URL.revokeObjectURL(previous.url);
-      return { file, durationSec, url };
+      return { file, durationSec, url, channelMap: channelMapRef.current };
     });
     setPhase('done');
     teardown();
@@ -257,6 +290,7 @@ export function useRecorder() {
       audioCtx.current = ctx;
       analyser.current = node;
       recorder.current = media;
+      setLiveStreams({ room: null, me: stream });
       media.start(TIMESLICE_MS);
     },
     [finalizeRecording],
@@ -293,6 +327,10 @@ export function useRecorder() {
         startedWith.current = 'mic';
         mimeTypeRef.current = mimeType;
         startedAt.current = Date.now();
+        // A plain mic capture has nothing to channel-split -- one source, one
+        // speaker known already, same as a channel-separated recording's mic
+        // channel, just without a room channel alongside it.
+        channelMapRef.current = null;
         try {
           await openMicSegment(deviceId);
         } catch (err) {
@@ -356,11 +394,35 @@ export function useRecorder() {
         const node = ctx.createAnalyser();
         node.fftSize = 1024;
 
-        for (const stream of captured) {
-          if (stream.getAudioTracks().length === 0) continue;
-          const input = ctx.createMediaStreamSource(stream);
-          if (mixing) input.connect(destination);
-          input.connect(node);
+        if (mixing) {
+          // Two speakers, kept apart: channel 0 is whatever this capture
+          // picks up ("the room"), channel 1 is the local mic. A merger
+          // instead of connecting both straight to `destination` -- which
+          // would sum them into one signal on every channel, the way this
+          // used to work -- is what lets the backend diarize by channel
+          // identity instead of guessing from voices (see
+          // diarize_channels_file). Tradeoff: reviewing the clip before
+          // upload now plays you in one ear and the room in the other,
+          // instead of both blended into both.
+          const merger = ctx.createChannelMerger(2);
+          const [display, mic] = captured;
+          const roomInput = ctx.createMediaStreamSource(display);
+          roomInput.connect(node);
+          roomInput.connect(merger, 0, 0);
+          const meInput = ctx.createMediaStreamSource(mic);
+          meInput.connect(node);
+          meInput.connect(merger, 0, 1);
+          merger.connect(destination);
+          channelMapRef.current = 'mic_room';
+          setLiveStreams({ room: display, me: mic });
+        } else {
+          for (const stream of captured) {
+            if (stream.getAudioTracks().length === 0) continue;
+            const input = ctx.createMediaStreamSource(stream);
+            input.connect(node);
+          }
+          channelMapRef.current = null;
+          setLiveStreams({ room: captured[0] ?? null, me: null });
         }
 
         // Audio-only, always: a display capture's stream carries the video
@@ -387,7 +449,7 @@ export function useRecorder() {
           clipUrl.current = url;
           setClip((previous) => {
             if (previous) URL.revokeObjectURL(previous.url);
-            return { file, durationSec, url };
+            return { file, durationSec, url, channelMap: channelMapRef.current };
           });
           setPhase('done');
           teardown();
@@ -531,6 +593,7 @@ export function useRecorder() {
     elapsed: fmtElapsedMs(elapsedMs),
     level,
     clip,
+    liveStreams,
     start,
     pause,
     resume,

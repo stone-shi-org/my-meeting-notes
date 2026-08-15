@@ -136,6 +136,52 @@ class TestConvert:
             audio_svc.convert_to_wav16k_mono(tmp_path / "a.m4a", tmp_path / "b.wav")
 
 
+class TestFfmpegCommandStereo:
+    def test_keeps_two_channels_instead_of_downmixing(self, tmp_path):
+        cmd = audio_svc.build_ffmpeg_command_stereo(tmp_path / "in.webm", tmp_path / "out.wav")
+        assert cmd[cmd.index("-ac") + 1] == "2"
+        assert cmd[cmd.index("-ar") + 1] == "16000"
+        assert cmd[cmd.index("-c:a") + 1] == "pcm_s16le"
+        assert cmd[-1] == str(tmp_path / "out.wav")
+
+
+class TestSplitStereoChannels:
+    def test_maps_channel_zero_and_one_to_separate_files(self, tmp_path):
+        cmd_holder = {}
+
+        def fake_run(cmd, **kwargs):
+            cmd_holder["cmd"] = cmd
+            # channelsplit is the guard against a mono source silently
+            # producing a mono "left" file with no error -- assert it is
+            # actually the filter being used, not -map_channel.
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        monkeypatch_targets = (tmp_path / "left.wav", tmp_path / "right.wav")
+        import unittest.mock as mock
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            with pytest.raises(AudioError, match="no output"):
+                # fake_run does not actually write the files, so this still
+                # raises -- the point here is asserting the command shape.
+                audio_svc.split_stereo_channels(tmp_path / "in.wav", *monkeypatch_targets)
+
+        cmd = cmd_holder["cmd"]
+        assert "channelsplit=channel_layout=stereo" in " ".join(cmd)
+        assert "-map_channel" not in cmd
+        assert str(monkeypatch_targets[0]) in cmd
+        assert str(monkeypatch_targets[1]) in cmd
+
+    def test_timeout_raises(self, tmp_path, monkeypatch):
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AudioError, match="timed out"):
+            audio_svc.split_stereo_channels(
+                tmp_path / "in.wav", tmp_path / "l.wav", tmp_path / "r.wav"
+            )
+
+
 class TestExtensions:
     @pytest.mark.parametrize("name", ["a.wav", "a.MP3", "recording.m4a", "x.qta", "y.opus"])
     def test_accepted(self, name):
@@ -154,6 +200,55 @@ class TestExtensions:
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
 class TestRealFfmpeg:
+
+    def _make_stereo_wav(self, path, left_value: int, right_value: int, frames: int = 8000):
+        import struct
+        import wave
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(2)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(
+                b"".join(struct.pack("<hh", left_value, right_value) for _ in range(frames))
+            )
+
+    def test_channel_zero_and_one_are_not_swapped(self, tmp_path):
+        """Round-trips a synthetic stereo file through the channel-separated
+        recording path -- convert_to_wav16k_stereo then split_stereo_channels
+        -- and checks channel 0/1 land in left_dest/right_dest respectively,
+        not swapped or summed."""
+        src = tmp_path / "stereo_in.wav"
+        # Loud on the left (channel 0), silent on the right (channel 1) --
+        # distinguishable enough to survive the pcm_s16le round-trip.
+        self._make_stereo_wav(src, left_value=20000, right_value=0)
+
+        stereo16k = tmp_path / "stereo16k.wav"
+        audio_svc.convert_to_wav16k_stereo(src, stereo16k)
+        info = audio_svc.probe(stereo16k)
+        assert info.channels == 2
+        assert info.sample_rate == 16000
+
+        left = tmp_path / "left.wav"
+        right = tmp_path / "right.wav"
+        audio_svc.split_stereo_channels(stereo16k, left, right)
+
+        import wave
+
+        with wave.open(str(left), "rb") as w:
+            left_samples = w.readframes(w.getnframes())
+        with wave.open(str(right), "rb") as w:
+            right_samples = w.readframes(w.getnframes())
+
+        def _peak(raw_bytes: bytes) -> int:
+            import struct
+
+            values = struct.unpack(f"<{len(raw_bytes) // 2}h", raw_bytes)
+            return max(abs(v) for v in values) if values else 0
+
+        assert _peak(left_samples) > 10000
+        assert _peak(right_samples) < 1000
+
     def test_probe_a_conformant_wav(self):
         info = audio_svc.probe(FIXTURES / "tiny16k.wav")
         assert info.codec_name == "pcm_s16le"

@@ -6,6 +6,8 @@ import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { api, uploadMeeting } from '@/lib/api';
 import { watchJob } from '@/hooks/useJob';
+import type { ChannelMap } from '@/hooks/useRecorder';
+import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { localDatetimeValue } from '@/lib/calendar';
 import type { Paginated, Thread } from '@/types/api';
 
@@ -15,6 +17,8 @@ export function NewMeetingPage() {
   const presetThread = params.get('threadId');
 
   const [file, setFile] = useState<File | null>(null);
+  const [channelMap, setChannelMap] = useState<ChannelMap>(null);
+  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [title, setTitle] = useState('');
   const [when, setWhen] = useState(localDatetimeValue());
   const [threadId, setThreadId] = useState(presetThread ?? '');
@@ -41,6 +45,8 @@ export function NewMeetingPage() {
    * clock instead. */
   const pick = useCallback((next: File | null, meta: FileMeta) => {
     setFile(next);
+    setChannelMap(meta.channelMap);
+    setRoomSpeakers(meta.roomSpeakers);
     setError(null);
     if (!next) return;
 
@@ -85,6 +91,10 @@ export function NewMeetingPage() {
       form.append('thread_id', threadId);
     }
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
+    if (channelMap) {
+      form.append('channel_map', channelMap);
+      form.append('room_speakers', roomSpeakers);
+    }
 
     abort.current = new AbortController();
     setProgress({ loaded: 0, total: file.size });
