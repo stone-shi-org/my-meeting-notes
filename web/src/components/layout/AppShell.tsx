@@ -6,7 +6,6 @@ import {
   Moon,
   Settings as SettingsIcon,
   Sun,
-  Upload,
   Layers,
 } from 'lucide-react';
 import { useState } from 'react';
@@ -20,7 +19,6 @@ import { cn } from '@/lib/cn';
 
 const NAV = [
   { to: '/', label: 'Threads', icon: Layers, end: true },
-  { to: '/meetings/new', label: 'Upload', icon: Upload, end: false },
   { to: '/settings', label: 'Settings', icon: SettingsIcon, end: false },
 ];
 
