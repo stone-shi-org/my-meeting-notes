@@ -1,5 +1,5 @@
 import { FileAudio, Mic, Upload, X } from 'lucide-react';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { RecorderPanel, type RoomSpeakers } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/primitives';
@@ -41,16 +41,47 @@ export function AudioInput({
   onFile,
   disabled,
   progress,
+  onModeChange,
+  recorderLayout,
+  rightExtra,
 }: {
   file: File | null;
   onFile: (file: File | null, meta: FileMeta) => void;
   disabled?: boolean;
   /** Upload progress, when the host page is mid-upload. */
   progress?: { loaded: number; total: number } | null;
+  /** Fired on mount and whenever the Upload/Record tab changes, so a host
+   * page with room to spare (see NewMeetingPage) can widen itself for the
+   * 'record' tab's wide layout instead of cramming it into a form-width
+   * column. */
+  onModeChange?: (mode: 'upload' | 'record') => void;
+  /** Forwarded to RecorderPanel; see its own doc comment. */
+  recorderLayout?: 'compact' | 'wide';
+  /** The rest of the "set up a meeting" form (title, when, thread, submit --
+   * see NewMeetingPage) that the host wants to render alongside audio
+   * capture rather than below it. In 'record' + 'wide' this ends up in
+   * RecorderPanel's right column, next to the controls; otherwise it just
+   * renders beneath this component's own content, which is where the host
+   * used to render it directly. Centralising the placement here is what
+   * lets a single mode switch move it without the host caring which layout
+   * is active. */
+  rightExtra?: React.ReactNode;
 }) {
   const [mode, setMode] = useState<'upload' | 'record'>('upload');
   const [dragging, setDragging] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Mirrors RecorderPanel's recorder.live -- see its onLiveChange doc
+  // comment for why this has to be asked about *before* switching tabs
+  // rather than cleaned up after: unmounting RecorderPanel mid-recording
+  // just loses the audio, there is nothing to undo once that happens.
+  const [recordingLive, setRecordingLive] = useState(false);
+
+  useEffect(() => {
+    onModeChange?.(mode);
+    // onModeChange is expected to be a stable setState-style callback; not a
+    // dep so the host doesn't have to memoize it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mode]);
 
   const uploading = !!progress;
   const pct = progress ? Math.round((progress.loaded / progress.total) * 100) : 0;
@@ -75,6 +106,16 @@ export function AudioInput({
             aria-selected={mode === id}
             disabled={uploading || disabled}
             onClick={() => {
+              // Leaving the Record tab mid-recording unmounts RecorderPanel,
+              // which releases the mic without ever finalizing a file --
+              // silent data loss, not just "stopped". Ask first.
+              if (mode === 'record' && id !== 'record' && recordingLive) {
+                const ok = window.confirm(
+                  'A recording is in progress. Switching to Upload will stop it and discard ' +
+                    'everything captured so far. Continue?',
+                );
+                if (!ok) return;
+              }
               setMode(id);
               // Switching away drops whatever was staged: each mode owns its own
               // source, and a stale file behind the other tab is how you send
@@ -97,6 +138,9 @@ export function AudioInput({
       {mode === 'record' && (
         <RecorderPanel
           disabled={uploading || disabled}
+          layout={recorderLayout}
+          rightExtra={rightExtra}
+          onLiveChange={setRecordingLive}
           onRecorded={(next, durationSec, channelMap, roomSpeakers) =>
             onFile(next, { recorded: true, durationSec, channelMap, roomSpeakers })
           }
@@ -183,6 +227,8 @@ export function AudioInput({
           )}
         </Card>
       ) : null}
+
+      {mode === 'upload' && rightExtra}
     </div>
   );
 }

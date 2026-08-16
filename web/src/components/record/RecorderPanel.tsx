@@ -13,6 +13,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Label, Select } from '@/components/ui/primitives';
 import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
+import { LiveTranscriptPanel } from '@/components/record/LiveTranscriptPanel';
 import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
 import {
@@ -73,6 +74,9 @@ function LevelMeter({ level, active }: { level: number; active: boolean }) {
 export function RecorderPanel({
   onRecorded,
   disabled,
+  layout = 'compact',
+  rightExtra,
+  onLiveChange,
 }: {
   /** Handed the finished clip as a File, ready for the normal upload path,
    * plus whether it kept mic/room on separate channels and -- only
@@ -84,6 +88,22 @@ export function RecorderPanel({
     roomSpeakers: RoomSpeakers,
   ) => void;
   disabled?: boolean;
+  /** 'wide' puts a bigger, always-mounted LiveTranscriptPanel on the left and
+   * shrinks these controls to a right-hand column -- see NewMeetingPage,
+   * which is the only caller with room to spare. Everywhere else (adding a
+   * recording to an existing meeting, which shares a narrower column with
+   * the rest of that page) stays 'compact': the inline LiveCaptionStrip
+   * beneath the controls, same as before this existed. */
+  layout?: 'compact' | 'wide';
+  /** Only rendered in 'wide' layout, stacked below the controls in the same
+   * right-hand column -- see AudioInput's doc comment. */
+  rightExtra?: React.ReactNode;
+  /** Mirrors recorder.live (phase 'recording' or 'paused') outward. Unmounting
+   * this component while it's true silently loses whatever's been captured
+   * -- teardown on unmount releases the mic without finalizing a file (see
+   * useRecorder) -- so AudioInput uses this to warn before switching away to
+   * the Upload tab rather than after the fact. */
+  onLiveChange?: (live: boolean) => void;
 }) {
   const platform = useMemo(() => detectPlatform(), []);
   const support = useMemo(() => sourceSupport(platform), [platform]);
@@ -108,6 +128,14 @@ export function RecorderPanel({
   useEffect(() => {
     if (recorder.phase === 'recording') void refresh();
   }, [recorder.phase, refresh]);
+
+  useEffect(() => {
+    onLiveChange?.(recorder.live);
+    // onLiveChange is expected to be a stable setState-style callback, same
+    // reasoning as onModeChange in AudioInput -- not a dep so the host
+    // doesn't have to memoize it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [recorder.live]);
 
   useEffect(() => {
     onRecorded(
@@ -168,7 +196,7 @@ export function RecorderPanel({
     );
   }
 
-  return (
+  const controls = (
     <div className="space-y-4 rounded-xl border border-border bg-surface p-5">
       <div role="radiogroup" aria-label="Recording source" className="grid gap-2 sm:grid-cols-3">
         {SOURCES.map(({ id, label, icon: Icon }) => {
@@ -409,7 +437,10 @@ export function RecorderPanel({
         </p>
       )}
 
-      {liveCaptionsOn && recorder.phase === 'recording' && (
+      {/* In 'wide' layout this strip is replaced by the always-mounted
+          LiveTranscriptPanel on the left -- rendering both would show the
+          same rolling captions twice. */}
+      {layout === 'compact' && liveCaptionsOn && recorder.phase === 'recording' && (
         <LiveCaptionStrip streams={recorder.liveStreams} enabled />
       )}
 
@@ -434,6 +465,25 @@ export function RecorderPanel({
           <audio controls src={recorder.clip.url} className="w-full" />
         </div>
       )}
+    </div>
+  );
+
+  if (layout === 'compact') return controls;
+
+  return (
+    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_460px]">
+      <LiveTranscriptPanel
+        streams={recorder.liveStreams}
+        enabled={liveCaptionsOn && recorder.phase === 'recording'}
+      />
+      {/* Controls and the rest of the meeting form (title, when, thread,
+          submit -- see NewMeetingPage's rightExtra) share this column, so
+          "set up the meeting" reads as one right-hand task next to the
+          transcript rather than two stacked forms. */}
+      <div className="space-y-4">
+        {controls}
+        {rightExtra}
+      </div>
     </div>
   );
 }

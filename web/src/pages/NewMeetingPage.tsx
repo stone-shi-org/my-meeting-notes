@@ -9,6 +9,7 @@ import { watchJob } from '@/hooks/useJob';
 import type { ChannelMap } from '@/hooks/useRecorder';
 import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { localDatetimeValue } from '@/lib/calendar';
+import { cn } from '@/lib/cn';
 import type { Paginated, Thread } from '@/types/api';
 
 export function NewMeetingPage() {
@@ -17,6 +18,11 @@ export function NewMeetingPage() {
   const presetThread = params.get('threadId');
 
   const [file, setFile] = useState<File | null>(null);
+  // Widens the page for the 'record' tab's side-by-side layout (bigger live
+  // transcript panel + narrower controls, with the rest of this form in that
+  // same right column -- see metaForm/rightExtra below and AudioInput's
+  // onModeChange).
+  const [audioMode, setAudioMode] = useState<'upload' | 'record'>('upload');
   const [channelMap, setChannelMap] = useState<ChannelMap>(null);
   const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [title, setTitle] = useState('');
@@ -116,8 +122,146 @@ export function NewMeetingPage() {
 
   const uploading = progress !== null;
 
+  // Everything below is still one <form>, just handed to AudioInput as
+  // rightExtra instead of laid out here directly -- in the 'record' tab's
+  // wide layout it ends up in the right-hand column next to the recorder
+  // controls (see RecorderPanel), stacked underneath them so "name it, set
+  // when, pick a thread, submit" reads as one task beside the transcript
+  // rather than a second form below it. In the 'upload' tab, AudioInput
+  // renders it in the same place it always occupied: right below the file
+  // picker.
+  const metaForm = (
+    <>
+      <Card className="space-y-4 p-5">
+        <div>
+          <Label htmlFor="m-title">Title</Label>
+          <Input
+            id="m-title"
+            className="mt-1.5"
+            required
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            placeholder="Cutover go/no-go"
+            disabled={uploading}
+          />
+        </div>
+
+        <div>
+          <Label htmlFor="m-when">When</Label>
+          <Input
+            id="m-when"
+            className="mt-1.5"
+            type="datetime-local"
+            value={when}
+            onChange={(e) => setWhen(e.target.value)}
+            disabled={uploading}
+          />
+        </div>
+
+        <div>
+          <Label htmlFor="m-thread">Thread</Label>
+          <Select
+            id="m-thread"
+            className="mt-1.5"
+            value={threadId}
+            onChange={(e) => setThreadId(e.target.value)}
+            disabled={uploading}
+          >
+            <option value="">＋ Create a new thread</option>
+            {threads.data?.items.map((t) => (
+              <option key={t.id} value={t.id}>
+                {t.title}
+              </option>
+            ))}
+          </Select>
+        </div>
+
+        {creatingNewThread && (
+          <div className="space-y-3 rounded-md border border-border bg-surface-2/50 p-3">
+            <div>
+              <Label htmlFor="nt-title">New thread title</Label>
+              <Input
+                id="nt-title"
+                className="mt-1.5"
+                value={newThreadTitle}
+                onChange={(e) => setNewThreadTitle(e.target.value)}
+                placeholder="Atlas Migration"
+                disabled={uploading}
+              />
+            </div>
+            <div>
+              <Label htmlFor="nt-desc">Description</Label>
+              <Textarea
+                id="nt-desc"
+                className="mt-1.5"
+                rows={2}
+                value={newThreadDescription}
+                onChange={(e) => setNewThreadDescription(e.target.value)}
+                disabled={uploading}
+              />
+            </div>
+          </div>
+        )}
+
+        <div>
+          <Label htmlFor="m-speakers">Speakers (optional)</Label>
+          <Input
+            id="m-speakers"
+            className="mt-1.5"
+            value={speakerNames}
+            onChange={(e) => setSpeakerNames(e.target.value)}
+            placeholder="Alice, Bob, Priya"
+            disabled={uploading}
+          />
+          <p className="mt-1 text-xs text-fg-subtle">
+            Comma separated. Offered as suggestions once we know who spoke most.
+          </p>
+        </div>
+
+        <label className="flex items-center gap-2 text-sm text-fg-muted">
+          <input
+            type="checkbox"
+            checked={autoSummarize}
+            onChange={(e) => setAutoSummarize(e.target.checked)}
+            disabled={uploading}
+            className="size-4 rounded border-border-strong"
+          />
+          Summarize automatically when the transcript is ready
+        </label>
+      </Card>
+
+      {error && (
+        <p role="alert" className="text-sm text-danger-ink">
+          {error}
+        </p>
+      )}
+
+      <div className="flex justify-end gap-2">
+        {uploading ? (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              abort.current?.abort();
+              setProgress(null);
+            }}
+          >
+            Cancel upload
+          </Button>
+        ) : (
+          <Button type="button" variant="ghost" onClick={() => navigate(-1)}>
+            Cancel
+          </Button>
+        )}
+        <Button type="submit" variant="primary" size="lg" loading={uploading} disabled={!file}>
+          Start processing
+        </Button>
+      </div>
+    </>
+  );
+
   return (
-    <div className="mx-auto max-w-2xl space-y-6">
+    <div className={cn('mx-auto space-y-6', audioMode === 'record' ? 'max-w-6xl' : 'max-w-2xl')}>
       <div>
         <h1 className="font-display text-2xl font-semibold">New meeting</h1>
         <p className="mt-1 text-sm text-fg-subtle">
@@ -127,133 +271,14 @@ export function NewMeetingPage() {
       </div>
 
       <form onSubmit={submit} className="space-y-5">
-        <AudioInput file={file} onFile={pick} progress={progress} />
-
-        <Card className="space-y-4 p-5">
-          <div>
-            <Label htmlFor="m-title">Title</Label>
-            <Input
-              id="m-title"
-              className="mt-1.5"
-              required
-              value={title}
-              onChange={(e) => setTitle(e.target.value)}
-              placeholder="Cutover go/no-go"
-              disabled={uploading}
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="m-when">When</Label>
-            <Input
-              id="m-when"
-              className="mt-1.5"
-              type="datetime-local"
-              value={when}
-              onChange={(e) => setWhen(e.target.value)}
-              disabled={uploading}
-            />
-          </div>
-
-          <div>
-            <Label htmlFor="m-thread">Thread</Label>
-            <Select
-              id="m-thread"
-              className="mt-1.5"
-              value={threadId}
-              onChange={(e) => setThreadId(e.target.value)}
-              disabled={uploading}
-            >
-              <option value="">＋ Create a new thread</option>
-              {threads.data?.items.map((t) => (
-                <option key={t.id} value={t.id}>
-                  {t.title}
-                </option>
-              ))}
-            </Select>
-          </div>
-
-          {creatingNewThread && (
-            <div className="space-y-3 rounded-md border border-border bg-surface-2/50 p-3">
-              <div>
-                <Label htmlFor="nt-title">New thread title</Label>
-                <Input
-                  id="nt-title"
-                  className="mt-1.5"
-                  value={newThreadTitle}
-                  onChange={(e) => setNewThreadTitle(e.target.value)}
-                  placeholder="Atlas Migration"
-                  disabled={uploading}
-                />
-              </div>
-              <div>
-                <Label htmlFor="nt-desc">Description</Label>
-                <Textarea
-                  id="nt-desc"
-                  className="mt-1.5"
-                  rows={2}
-                  value={newThreadDescription}
-                  onChange={(e) => setNewThreadDescription(e.target.value)}
-                  disabled={uploading}
-                />
-              </div>
-            </div>
-          )}
-
-          <div>
-            <Label htmlFor="m-speakers">Speakers (optional)</Label>
-            <Input
-              id="m-speakers"
-              className="mt-1.5"
-              value={speakerNames}
-              onChange={(e) => setSpeakerNames(e.target.value)}
-              placeholder="Alice, Bob, Priya"
-              disabled={uploading}
-            />
-            <p className="mt-1 text-xs text-fg-subtle">
-              Comma separated. Offered as suggestions once we know who spoke most.
-            </p>
-          </div>
-
-          <label className="flex items-center gap-2 text-sm text-fg-muted">
-            <input
-              type="checkbox"
-              checked={autoSummarize}
-              onChange={(e) => setAutoSummarize(e.target.checked)}
-              disabled={uploading}
-              className="size-4 rounded border-border-strong"
-            />
-            Summarize automatically when the transcript is ready
-          </label>
-        </Card>
-
-        {error && (
-          <p role="alert" className="text-sm text-danger-ink">
-            {error}
-          </p>
-        )}
-
-        <div className="flex justify-end gap-2">
-          {uploading ? (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                abort.current?.abort();
-                setProgress(null);
-              }}
-            >
-              Cancel upload
-            </Button>
-          ) : (
-            <Button type="button" variant="ghost" onClick={() => navigate(-1)}>
-              Cancel
-            </Button>
-          )}
-          <Button type="submit" variant="primary" size="lg" loading={uploading} disabled={!file}>
-            Start processing
-          </Button>
-        </div>
+        <AudioInput
+          file={file}
+          onFile={pick}
+          progress={progress}
+          onModeChange={setAudioMode}
+          recorderLayout="wide"
+          rightExtra={metaForm}
+        />
       </form>
     </div>
   );
