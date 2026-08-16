@@ -24,6 +24,7 @@ from app.routers import (
     dev,
     groups,
     home_chat,
+    insights,
     integrations,
     jobs,
     live_caption,
@@ -175,6 +176,7 @@ def create_app() -> FastAPI:
     app.include_router(notes.meeting_router)
     app.include_router(dev.router)
     app.include_router(live_caption.router)
+    app.include_router(insights.router)
 
     _mount_spa(app, settings.web_dist)
 

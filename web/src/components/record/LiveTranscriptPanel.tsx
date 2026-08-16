@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { Badge, Card, Input } from '@/components/ui/primitives';
-import { useLiveCaption } from '@/hooks/useLiveCaption';
-import type { LiveStreams } from '@/hooks/useRecorder';
+import type { Caption } from '@/hooks/useLiveCaption';
 import { cn } from '@/lib/cn';
 import { initials, speakerVars } from '@/lib/speakerColors';
 
@@ -10,24 +9,31 @@ const AUTO_SCROLL_KEY = 'mmn.liveTranscriptAutoScroll';
 
 /**
  * The bigger, left-hand panel of the wide recorder layout: a disposable,
- * auto-scrolling draft of what's being said, built the same way
- * LiveCaptionStrip is (see useLiveCaption) but with room to also rename the
+ * auto-scrolling draft of what's being said, with room to also rename the
  * two channels while you're on the call.
+ *
+ * Takes captions rather than opening its own useLiveCaption connection --
+ * RecorderPanel owns the one websocket and hands the same array to
+ * InsightsPanel below this, so the two don't each pay for a live-caption
+ * connection (and the periodic real transcription call behind it) of their
+ * own for what is, on the wire, identical audio.
  *
  * The rename is local-only, like everything else here -- there is no
  * meeting or transcript row yet to attach a name to, and even once one
  * exists these channel tags ("room"/"me") aren't the diarized speaker ids
  * the real transcript ends up with. It only relabels what's on screen for
- * the rest of this recording.
+ * the rest of this recording -- Insights below always sees the raw
+ * "room"/"me" tags, matching what its prompt is told to expect.
  */
 export function LiveTranscriptPanel({
-  streams,
+  captions,
+  connected,
   enabled,
 }: {
-  streams: LiveStreams;
+  captions: Caption[];
+  connected: boolean;
   enabled: boolean;
 }) {
-  const { captions, connected } = useLiveCaption(streams, enabled);
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
   const scrollRef = useRef<HTMLDivElement>(null);

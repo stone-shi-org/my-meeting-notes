@@ -12,7 +12,14 @@ const SAMPLE_RATE = 16000;
 // to send one websocket message per callback. Batch to a quarter second: a
 // live feel, without flooding the socket.
 const FLUSH_SAMPLES = SAMPLE_RATE * 0.25;
-const MAX_CAPTIONS = 20;
+// Generous rather than tuned tight: the wide recorder layout's transcript
+// panel and Insights (useInsights) both read this same array as the whole
+// session's transcript so far, not just a rolling display window like the
+// original small caption strip needed. 2000 lines covers many hours at this
+// hook's ~3-8s-per-caption cadence, comfortably more than any realistic
+// single recording, while still bounding memory for a recording nobody
+// remembered to stop.
+const MAX_CAPTIONS = 2000;
 
 /**
  * Live, disposable captions during an active recording.

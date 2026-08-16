@@ -12,8 +12,10 @@ import {
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Label, Select } from '@/components/ui/primitives';
+import { InsightsPanel } from '@/components/record/InsightsPanel';
 import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
 import { LiveTranscriptPanel } from '@/components/record/LiveTranscriptPanel';
+import { useLiveCaption } from '@/hooks/useLiveCaption';
 import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
 import {
@@ -122,6 +124,17 @@ export function RecorderPanel({
 
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
+
+  // Owned here rather than inside LiveTranscriptPanel/InsightsPanel so both
+  // can read the same captions instead of each opening their own websocket
+  // (and paying for the periodic real transcription call behind it) for
+  // what would be identical audio. Only meaningful in 'wide' layout --
+  // 'compact' still renders LiveCaptionStrip below, which owns its own.
+  const captionsLive = layout === 'wide' && liveCaptionsOn && recorder.phase === 'recording';
+  const { captions, connected: captionsConnected } = useLiveCaption(
+    recorder.liveStreams,
+    captionsLive,
+  );
 
   // Labels are blank until permission has been granted once, so re-read the
   // list the moment a recording succeeds -- that is when they appear.
@@ -472,10 +485,17 @@ export function RecorderPanel({
 
   return (
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_460px]">
-      <LiveTranscriptPanel
-        streams={recorder.liveStreams}
-        enabled={liveCaptionsOn && recorder.phase === 'recording'}
-      />
+      {/* Transcript and Insights share the left column and the one caption
+          feed above -- Insights is the analysis of what's shown here, so it
+          reads as "under the transcript", not a separate unrelated panel. */}
+      <div className="space-y-4">
+        <LiveTranscriptPanel
+          captions={captions}
+          connected={captionsConnected}
+          enabled={captionsLive}
+        />
+        <InsightsPanel captions={captions} enabled={captionsLive} />
+      </div>
       {/* Controls and the rest of the meeting form (title, when, thread,
           submit -- see NewMeetingPage's rightExtra) share this column, so
           "set up the meeting" reads as one right-hand task next to the

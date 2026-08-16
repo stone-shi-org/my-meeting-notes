@@ -88,6 +88,16 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "live_caption_enabled": ("bool", False),
     "live_caption_window_sec": ("int", False),
     "live_caption_interval_sec": ("int", False),
+    # Periodic LLM analysis of the rolling live-caption transcript during a
+    # recording (see routers/insights.py) -- a distinct model from llm_model,
+    # reusing llm_base_url/llm_api_key/llm_ssl_verify/llm_timeout_sec, since
+    # this wants a cheaper/faster model than the one tuned for a full-length
+    # summary. Empty model means "not configured": no separate *_enabled
+    # flag, because setting a model here already is the opt-in -- unlike
+    # live captions this is a plain periodic POST driven by a visibly open
+    # panel, not a background connection that outlives the user noticing it.
+    "insights_model": ("str", False),
+    "insights_interval_sec": ("int", False),
 }
 
 
@@ -228,6 +238,14 @@ class Settings(BaseSettings):
     live_caption_enabled: bool = False
     live_caption_window_sec: int = 8
     live_caption_interval_sec: int = 3
+
+    # --- insights ---------------------------------------------------------
+    # See RUNTIME_KEYS above. 30s balances "feels live" against the cost of a
+    # real reasoning call (not just ASR, like live captions) on every tick,
+    # and gives a topic or a question a few exchanges to become unambiguous
+    # before the model is asked to judge it.
+    insights_model: str = ""
+    insights_interval_sec: int = 30
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20

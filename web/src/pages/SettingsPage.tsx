@@ -509,6 +509,26 @@ export function LlmSettingsPage() {
           { key: 'llm_temperature', label: 'Temperature', type: 'number' },
         ]}
       />
+      <SettingsForm
+        title="Insights model"
+        description="Live meeting insights during a recording (see the Insights panel while recording) -- a separate, optionally cheaper/faster model, called every few seconds while that panel is open. Reuses the base URL and API key above."
+        modelsPath="/llm/models"
+        modelKey="insights_model"
+        testPath="/llm/test"
+        testKeyMap={{
+          llm_base_url: 'base_url',
+          llm_api_key: 'api_key',
+          insights_model: 'model',
+        }}
+        keys={[
+          {
+            key: 'insights_model',
+            label: 'Model',
+            hint: 'Leave blank to turn the Insights panel off.',
+          },
+          { key: 'insights_interval_sec', label: 'Analysis interval (seconds)', type: 'number' },
+        ]}
+      />
       <ChatModelsField />
     </div>
   );
