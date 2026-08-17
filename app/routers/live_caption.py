@@ -15,11 +15,18 @@ ingest job that must survive a process restart, so this gets its own
 in-memory relay instead of a job type, a jobs row, or any sqlite write.
 
 Each channel gets its own rolling buffer and its own periodic call to
-/v1/audio/transcriptions?stream=true -- the same LocalAI instance, model and
+/v1/audio/transcriptions?stream=true -- the same LocalAI instance and
 credentials as batch diarization, just the plain-text streaming route
 instead of the diarizing one. That route never carries speaker labels (see
 diarize.py's diarize_channels_file docstring); channel identity substitutes
 for it here, at zero extra model cost.
+
+The model defaults to whatever batch diarization uses (diarization_model)
+but can be overridden separately via live_caption_model -- the streaming
+route and the batch route on the same LocalAI instance have been observed
+to behave very differently under load for the same model, so an operator
+needs to be able to point this feature at a more reliable one without
+touching what batch diarization uses.
 """
 
 from __future__ import annotations
@@ -147,7 +154,11 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         window_sec = effective(conn, "live_caption_window_sec")
         interval_sec = effective(conn, "live_caption_interval_sec")
         timeout_sec = effective(conn, "live_caption_timeout_sec")
-        model = effective(conn, "diarization_model")
+        # Empty live_caption_model means "use whatever batch diarization
+        # uses" -- see RUNTIME_KEYS in config.py for why this is overridable
+        # separately: the two routes on the same LocalAI instance have been
+        # observed to behave very differently under load for the same model.
+        model = effective(conn, "live_caption_model") or effective(conn, "diarization_model")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
 

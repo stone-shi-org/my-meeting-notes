@@ -79,12 +79,12 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "telegram_enabled": ("bool", False),
     "telegram_bot_token": ("str", True),
     # Rolling-window text captions during an active recording, over the same
-    # LocalAI instance and model as batch diarization (see
-    # routers/live_caption.py). Off by default: every open connection adds
-    # periodic extra calls to a box that also serves the LLM and the real
-    # diarizer, and an operator should opt into that load deliberately --
-    # same reasoning as auto_match_enabled, not the env-only dev_provider_enabled
-    # bar, since nothing here is written anywhere for good.
+    # LocalAI instance as batch diarization (see routers/live_caption.py).
+    # Off by default: every open connection adds periodic extra calls to a
+    # box that also serves the LLM and the real diarizer, and an operator
+    # should opt into that load deliberately -- same reasoning as
+    # auto_match_enabled, not the env-only dev_provider_enabled bar, since
+    # nothing here is written anywhere for good.
     "live_caption_enabled": ("bool", False),
     "live_caption_window_sec": ("int", False),
     "live_caption_interval_sec": ("int", False),
@@ -97,6 +97,18 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # to decode than a short/silent one. A late caption beats a caption that
     # silently never arrives.
     "live_caption_timeout_sec": ("int", False),
+    # Empty means "use diarization_model" -- the historical behaviour, and
+    # still the right default since it's the model tuned for this app's
+    # audio. Deliberately its own setting rather than always reusing
+    # diarization_model: the two routes on the same LocalAI instance can
+    # behave very differently under load (observed: the streaming
+    # /v1/audio/transcriptions route intermittently hangs for a specific
+    # model with zero response, while the batch /v1/audio/diarization route
+    # for that same model, and the streaming route for a different model,
+    # both respond fine) -- an operator who hits that needs to be able to
+    # point live captions at a different, more reliable model without
+    # touching what batch diarization uses.
+    "live_caption_model": ("str", False),
     # Periodic LLM analysis of the rolling live-caption transcript during a
     # recording (see routers/insights.py) -- a distinct model from llm_model,
     # reusing llm_base_url/llm_api_key/llm_ssl_verify/llm_timeout_sec, since
@@ -242,14 +254,17 @@ class Settings(BaseSettings):
     # --- live captions ----------------------------------------------------
     # See RUNTIME_KEYS above for why this is a Settings toggle rather than an
     # env-only flag. window_sec is how much trailing audio each rolling call
-    # covers; interval_sec is how often a channel gets a new call. Both reuse
-    # diarization_url's host/model/key -- see diarize.transcriptions_url.
+    # covers; interval_sec is how often a channel gets a new call. All reuse
+    # diarization_url's host/key -- see diarize.transcriptions_url -- but the
+    # model can be overridden separately; see live_caption_model.
     live_caption_enabled: bool = False
     live_caption_window_sec: int = 8
     live_caption_interval_sec: int = 3
     # See RUNTIME_KEYS above. Generous relative to interval_sec on purpose --
     # this bounds one ASR call, not the gap between captions.
     live_caption_timeout_sec: int = 45
+    # Empty means "fall back to diarization_model" -- see RUNTIME_KEYS above.
+    live_caption_model: str = ""
 
     # --- insights ---------------------------------------------------------
     # See RUNTIME_KEYS above. 30s balances "feels live" against the cost of a
