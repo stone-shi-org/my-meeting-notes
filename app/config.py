@@ -109,6 +109,16 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # point live captions at a different, more reliable model without
     # touching what batch diarization uses.
     "live_caption_model": ("str", False),
+    # ISO-639-1 code ("en"), not a language name ("english") -- see
+    # _transcribe_window's doc comment for why the latter silently breaks
+    # streaming entirely on at least one real backend, with an error that
+    # doesn't mention language at all. Empty means "let the model
+    # auto-detect per window", which is right for a genuinely multilingual
+    # meeting; a rolling window is only a few seconds of audio, though, which
+    # is little enough for auto-detection to misfire on an accented phrase,
+    # a name, or silence -- pinning a language is worth trying for anyone
+    # who mostly speaks one.
+    "live_caption_language": ("str", False),
     # Periodic LLM analysis of the rolling live-caption transcript during a
     # recording (see routers/insights.py) -- a distinct model from llm_model,
     # reusing llm_base_url/llm_api_key/llm_ssl_verify/llm_timeout_sec, since
@@ -265,6 +275,9 @@ class Settings(BaseSettings):
     live_caption_timeout_sec: int = 45
     # Empty means "fall back to diarization_model" -- see RUNTIME_KEYS above.
     live_caption_model: str = ""
+    # ISO-639-1 code, or empty for per-window auto-detect -- see RUNTIME_KEYS
+    # above.
+    live_caption_language: str = ""
 
     # --- insights ---------------------------------------------------------
     # See RUNTIME_KEYS above. 30s balances "feels live" against the cost of a

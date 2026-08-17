@@ -591,6 +591,11 @@ export function LiveCaptionsSettingsPage() {
           hint: 'Leave blank to use the Diarization model above. Note the Test button below checks this model against the batch diarization endpoint, not the streaming route live captions actually call -- the two have been observed to behave differently under load for the same model.',
         },
         {
+          key: 'live_caption_language',
+          label: 'Language',
+          hint: 'ISO-639-1 code, e.g. en -- not the language name (that has been seen to silently break streaming entirely on at least one backend, with an unrelated-looking error). Leave blank for per-window auto-detection, which a short rolling window can misfire on for an accented phrase, a name, or silence.',
+        },
+        {
           key: 'live_caption_window_sec',
           label: 'Rolling window (seconds)',
           type: 'number',

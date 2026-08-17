@@ -105,14 +105,34 @@ def _wav_bytes(pcm: bytes) -> bytes:
 
 
 async def _transcribe_window(
-    client: httpx.AsyncClient, url: str, model: str, api_key: str | None, pcm: bytes
+    client: httpx.AsyncClient,
+    url: str,
+    model: str,
+    api_key: str | None,
+    pcm: bytes,
+    language: str | None = None,
 ) -> str:
     """One rolling-window call. Returns the committed text, or '' on any
     failure -- a dropped caption is invisible to the user; raising would
     kill the whole live session over one bad window.
+
+    ``language`` is omitted entirely when unset, which leaves per-window
+    auto-detection on -- the default, and the right one for a genuinely
+    multilingual meeting. A rolling window is only a few seconds of audio
+    (live_caption_window_sec), which is little enough for language ID to
+    misfire on an accented phrase, a name or a stretch of silence -- pinning
+    a language removes that per-window guesswork for anyone who mostly
+    speaks one language. Must be an ISO-639-1 code ("en"), not the English
+    name ("english"): confirmed against parakeet-cpp-nemotron-3.5-asr-
+    streaming-0.6b that the latter doesn't get rejected, it silently breaks
+    streaming entirely -- every window then fails with "loaded model is not
+    a cache-aware streaming model", an error that has nothing to do with
+    language and would be a nightmare to trace back to this field.
     """
     files = {"file": ("window.wav", _wav_bytes(pcm), "audio/wav")}
     data = {"model": model, "stream": "true"}
+    if language:
+        data["language"] = language
     try:
         async with aconnect_sse(
             client, "POST", url, data=data, files=files, headers=_headers(api_key)
@@ -159,6 +179,7 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         # separately: the two routes on the same LocalAI instance have been
         # observed to behave very differently under load for the same model.
         model = effective(conn, "live_caption_model") or effective(conn, "diarization_model")
+        language = effective(conn, "live_caption_language")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
 
@@ -194,7 +215,9 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
                         continue
 
-                    text = await _transcribe_window(client, url, model, api_key or None, pcm)
+                    text = await _transcribe_window(
+                        client, url, model, api_key or None, pcm, language or None
+                    )
                     if not text.strip():
                         continue
                 except Exception:
