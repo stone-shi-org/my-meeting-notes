@@ -58,6 +58,19 @@ CHANNEL_NAMES = {0: "room", 1: "me"}
 # barely spoken yet -- not worth a call to a shared, minutes-latency box.
 MIN_BUFFER_SEC = 1.0
 
+# room and me are two independent asyncio tasks (see channel_worker below)
+# with the same interval_sec cadence, so without this they fire their ASR
+# calls at essentially the same moment -- two concurrent requests to a
+# backend that has been observed to hang entirely (not just slow down) under
+# concurrent load, per live_caption_timeout_sec's doc comment in config.py.
+# Process-wide, not per-connection: the backend is shared across every
+# simultaneous live-caption session this app has open, not just the two
+# channels of one, and per-connection serialization alone would still let
+# two different users' sessions collide. 1 matches what was actually
+# observed to work reliably; raise it only after confirming the backend
+# genuinely tolerates more concurrent requests than that.
+_ASR_CONCURRENCY = asyncio.Semaphore(1)
+
 
 async def _authenticate(websocket: WebSocket) -> dict | None:
     """Cookie-only: browsers never send an Authorization header on a
@@ -225,9 +238,16 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
                         continue
 
-                    text = await _transcribe_window(
-                        client, url, model, api_key or None, pcm, language or None
-                    )
+                    # Serialized across every channel and every session --
+                    # see _ASR_CONCURRENCY's doc comment -- not just this
+                    # worker's own pacing. A window still gets buffered and
+                    # timed independently per channel; only the network call
+                    # itself queues behind whichever other channel/session
+                    # got there first.
+                    async with _ASR_CONCURRENCY:
+                        text = await _transcribe_window(
+                            client, url, model, api_key or None, pcm, language or None
+                        )
                     if not text.strip():
                         continue
                 except Exception:

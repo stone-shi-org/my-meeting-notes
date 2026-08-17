@@ -11,6 +11,8 @@ window/interval cycle.
 
 from __future__ import annotations
 
+import asyncio
+
 import httpx
 import pytest
 import respx
@@ -84,3 +86,44 @@ class TestTranscribeWindow:
                 client, url, "some-model", None, b"\x00\x00" * 100
             )
         assert text == "Hello there."
+
+
+class TestAsrConcurrencyLimit:
+    """room and me are independent asyncio tasks on the same cadence (see
+    channel_worker) -- without _ASR_CONCURRENCY they'd fire simultaneous
+    requests at a backend observed to hang under concurrent load. This
+    checks the mutual exclusion directly, deterministically (no wall-clock
+    sleeps to race against), rather than through a real websocket session."""
+
+    @pytest.mark.asyncio
+    async def test_a_second_caller_waits_for_the_first_to_release(self):
+        order = []
+        hold_a = asyncio.Event()
+        release_a = asyncio.Event()
+        hold_b = asyncio.Event()
+        release_b = asyncio.Event()
+
+        async def hold(tag, hold_event, release_event):
+            async with live_caption._ASR_CONCURRENCY:
+                order.append(f"{tag}-start")
+                hold_event.set()
+                await release_event.wait()
+                order.append(f"{tag}-end")
+
+        task_a = asyncio.create_task(hold("a", hold_a, release_a))
+        await hold_a.wait()  # a now holds the semaphore
+
+        task_b = asyncio.create_task(hold("b", hold_b, release_b))
+        # b must not be able to acquire while a still holds it -- give the
+        # event loop a beat to prove it *doesn't* start, not just that it
+        # hasn't started yet.
+        await asyncio.sleep(0)
+        assert not hold_b.is_set(), "b acquired the semaphore while a still held it"
+
+        release_a.set()
+        await task_a
+        await hold_b.wait()
+        release_b.set()
+        await task_b
+
+        assert order == ["a-start", "a-end", "b-start", "b-end"]
