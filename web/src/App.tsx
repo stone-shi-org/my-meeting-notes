@@ -16,6 +16,7 @@ import { NewMeetingPage } from '@/pages/NewMeetingPage';
 import {
   DiarizationSettingsPage,
   IntegrationsSettingsPage,
+  LiveCaptionsSettingsPage,
   LlmSettingsPage,
   MatchingSettingsPage,
   PromptSettingsPage,
@@ -76,6 +77,7 @@ export function App() {
                       <Route index element={<Navigate to="/settings/llm" replace />} />
                       <Route path="llm" element={<LlmSettingsPage />} />
                       <Route path="diarization" element={<DiarizationSettingsPage />} />
+                      <Route path="live-captions" element={<LiveCaptionsSettingsPage />} />
                       <Route path="web-search" element={<WebSearchSettingsPage />} />
                       <Route path="integrations" element={<IntegrationsSettingsPage />} />
                       <Route path="matching" element={<MatchingSettingsPage />} />

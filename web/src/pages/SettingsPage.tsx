@@ -31,6 +31,7 @@ import type {
 const TABS = [
   { to: '/settings/llm', label: 'LLM' },
   { to: '/settings/diarization', label: 'Diarization' },
+  { to: '/settings/live-captions', label: 'Live captions' },
   { to: '/settings/web-search', label: 'Web Search' },
   { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/matching', label: 'Matching' },
@@ -560,6 +561,52 @@ export function DiarizationSettingsPage() {
           label: 'Timeout (seconds)',
           type: 'number',
           hint: 'A 20-minute recording can take several minutes.',
+        },
+      ]}
+    />
+  );
+}
+
+export function LiveCaptionsSettingsPage() {
+  return (
+    <SettingsForm
+      title="Live captions"
+      description="Rolling-window text captions shown while a recording is in progress. Off by default: every open connection adds periodic extra calls to the diarization endpoint above, on top of the real diarizer and the language model."
+      modelsPath="/diarization/models"
+      modelKey="live_caption_model"
+      testPath="/diarization/test"
+      testKeyMap={{
+        diarization_url: 'url',
+        diarization_api_key: 'api_key',
+        live_caption_model: 'model',
+      }}
+      keys={[
+        {
+          key: 'live_caption_enabled',
+          label: 'Show live captions while recording',
+        },
+        {
+          key: 'live_caption_model',
+          label: 'Model',
+          hint: 'Leave blank to use the Diarization model above. Note the Test button below checks this model against the batch diarization endpoint, not the streaming route live captions actually call -- the two have been observed to behave differently under load for the same model.',
+        },
+        {
+          key: 'live_caption_window_sec',
+          label: 'Rolling window (seconds)',
+          type: 'number',
+          hint: 'How much trailing audio each call covers.',
+        },
+        {
+          key: 'live_caption_interval_sec',
+          label: 'Call interval (seconds)',
+          type: 'number',
+          hint: 'How often a channel gets a new call.',
+        },
+        {
+          key: 'live_caption_timeout_sec',
+          label: 'Call timeout (seconds)',
+          type: 'number',
+          hint: 'How long one call may run before it is treated as failed and skipped. A short window of real speech can legitimately take longer to decode than a short/silent one.',
         },
       ]}
     />
