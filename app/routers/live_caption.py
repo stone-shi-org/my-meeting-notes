@@ -31,6 +31,7 @@ touching what batch diarization uses.
 
 from __future__ import annotations
 
+import array
 import asyncio
 import io
 import json
@@ -57,6 +58,17 @@ CHANNEL_NAMES = {0: "room", 1: "me"}
 # Below this a window is mostly silence padding from a channel that has
 # barely spoken yet -- not worth a call to a shared, minutes-latency box.
 MIN_BUFFER_SEC = 1.0
+
+# Below this fraction of int16 full scale (32768), a window is treated as
+# silence and never sent to the ASR backend at all. This is a genuine
+# amplitude check, unlike MIN_BUFFER_SEC above (which only gates on how much
+# audio has accumulated, not whether any of it is speech) -- a channel
+# nobody is talking on would otherwise fire a request every interval_sec for
+# the entire session, relying on the model to notice it's silence and
+# return empty text after paying for the round trip and an _ASR_CONCURRENCY
+# slot. ~2% of full scale: comfortably above a quiet mic's own noise floor,
+# comfortably below even a soft speaking voice's peak.
+SILENCE_PEAK_THRESHOLD = 0.02
 
 # room and me are two independent asyncio tasks (see channel_worker below)
 # with the same interval_sec cadence, so without this they fire their ASR
@@ -105,6 +117,27 @@ class _ChannelBuffer:
         if len(self.samples) > max_bytes:
             del self.samples[: len(self.samples) - max_bytes]
         return bytes(self.samples)
+
+
+def _peak_amplitude(pcm: bytes) -> float:
+    """Peak absolute sample value over a window, 0..1 (int16 full scale is
+    32768). Peak, not RMS -- same choice as the recorder's own level meter
+    (see useRecorder.ts's nextLevel): RMS reads near-silent between
+    syllables at this granularity, peak does not.
+
+    Assumes little-endian samples, true for every real deployment target
+    (the browser's Int16Array and every platform this actually runs on) and
+    not worth defending against for a threshold heuristic, not a decode.
+    """
+    # A torn trailing byte (an odd-length buffer) is dropped rather than
+    # raising -- this is a cheap gate, not a decoder; one missing sample
+    # changes nothing.
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[:usable])
+    return max(abs(min(samples)), abs(max(samples))) / 32768
 
 
 def _wav_bytes(pcm: bytes) -> bytes:
@@ -236,6 +269,8 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     async with buf.lock:
                         pcm = buf.window_bytes(window_sec)
                     if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
+                        continue
+                    if _peak_amplitude(pcm) < SILENCE_PEAK_THRESHOLD:
                         continue
 
                     # Serialized across every channel and every session --

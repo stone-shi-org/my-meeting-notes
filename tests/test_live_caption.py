@@ -11,6 +11,7 @@ window/interval cycle.
 
 from __future__ import annotations
 
+import array
 import asyncio
 
 import httpx
@@ -20,6 +21,12 @@ from starlette.websockets import WebSocketDisconnect
 
 from app.db import utcnow
 from app.routers import live_caption
+
+
+def _pcm(*values: int) -> bytes:
+    """int16 samples -> raw little-endian PCM bytes, matching what the
+    browser actually sends (see useLiveCaption.ts)."""
+    return array.array("h", values).tobytes()
 
 
 class TestAuth:
@@ -127,3 +134,40 @@ class TestAsrConcurrencyLimit:
         await task_b
 
         assert order == ["a-start", "a-end", "b-start", "b-end"]
+
+
+class TestPeakAmplitude:
+    """The local silence gate -- see SILENCE_PEAK_THRESHOLD's doc comment
+    for why MIN_BUFFER_SEC alone (buffer length, not content) never caught
+    a channel that has plenty of buffered audio but none of it is speech."""
+
+    def test_digital_silence_is_zero(self):
+        assert live_caption._peak_amplitude(_pcm(0, 0, 0, 0)) == 0.0
+
+    def test_empty_buffer_is_zero(self):
+        assert live_caption._peak_amplitude(b"") == 0.0
+
+    def test_a_torn_trailing_byte_is_dropped_not_raised(self):
+        # One full sample (0) plus one stray odd byte.
+        assert live_caption._peak_amplitude(_pcm(0) + b"\x01") == 0.0
+
+    def test_low_level_noise_floor_stays_below_threshold(self):
+        # A quiet mic's own noise floor -- comfortably under 2% of full scale.
+        peak = live_caption._peak_amplitude(_pcm(50, -60, 40, -30))
+        assert peak < live_caption.SILENCE_PEAK_THRESHOLD
+
+    def test_a_speaking_voice_clears_the_threshold(self):
+        peak = live_caption._peak_amplitude(_pcm(100, -20000, 500, 19000))
+        assert peak > live_caption.SILENCE_PEAK_THRESHOLD
+
+    def test_peak_is_the_largest_magnitude_regardless_of_sign(self):
+        # The most negative sample is the true peak here, not the max().
+        peak = live_caption._peak_amplitude(_pcm(100, -30000, 200))
+        assert peak == pytest.approx(30000 / 32768)
+
+    def test_all_positive_samples_still_find_their_peak(self):
+        # Regression guard: an earlier draft used -min(samples) for the
+        # negative side, which is wrong (and negative) when every sample is
+        # non-negative -- abs() on both ends is what's actually needed.
+        peak = live_caption._peak_amplitude(_pcm(10, 25000, 5))
+        assert peak == pytest.approx(25000 / 32768)
