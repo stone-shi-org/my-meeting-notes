@@ -375,6 +375,31 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             cursor: pointer;
         }
 
+        .level-meter-row {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            font-size: 0.75rem;
+            color: var(--text-muted);
+        }
+
+        .level-meter-track {
+            flex: 1;
+            height: 10px;
+            background: rgba(15, 23, 42, 0.7);
+            border: 1px solid var(--panel-border);
+            border-radius: 999px;
+            overflow: hidden;
+        }
+
+        .level-meter-fill {
+            height: 100%;
+            width: 0%;
+            background: var(--accent-green);
+            border-radius: 999px;
+            transition: width 80ms linear, background-color 80ms linear;
+        }
+
         .content-card {
             background-color: var(--panel-bg);
             border: 1px solid var(--panel-border);
@@ -663,7 +688,106 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             });
         }
 
+        // Per-channel level meters: a silent WebAudio tap on a *copy* of
+        // each <audio> element's decoded output (captureStream()), never
+        // wired onward to ctx.destination. A MediaElementAudioSourceNode
+        // straight off the element instead would hijack its entire audio
+        // path through the AudioContext's own destination device, silently
+        // undoing setSinkId() -- the whole point of this page is routing
+        // each channel to a specific macOS device, so this taps a copy
+        // rather than the real signal path. Same "tap, don't hijack"
+        // principle as this app's own web/src/hooks/useRecorder.ts.
+        //
+        // Seeing both channels' meters move together (or one channel's
+        // level tracking audio it was never assigned) is itself a useful
+        // diagnostic -- it means whatever's driving that flash is arriving
+        // before this page's own audio graph, i.e. real device-level bleed
+        // (e.g. a macOS Aggregate/Multi-Output Device combining BlackHole
+        // with a real output), not a bug in this file.
+        const channelMeters = {};
+
+        function stopLevelMeter(chId) {
+            const meter = channelMeters[chId];
+            if (!meter) return;
+            if (meter.raf) cancelAnimationFrame(meter.raf);
+            try { meter.source.disconnect(); } catch (err) { /* already gone */ }
+            try { meter.analyser.disconnect(); } catch (err) { /* already gone */ }
+            meter.ctx.close().catch(() => {});
+            delete channelMeters[chId];
+        }
+
+        function startLevelMeter(ch, audioEl) {
+            // One tap per element for its whole lifetime -- the 'play' event
+            // fires again on every resume, restart and loop iteration, and
+            // stacking up duplicate taps would both leak AudioContexts and
+            // make the meter read hotter each time.
+            if (audioEl.dataset.meterAttached === 'true') return;
+            if (typeof audioEl.captureStream !== 'function') {
+                console.warn(`Channel ${ch.id}: captureStream() unsupported in this browser, no level meter.`);
+                return;
+            }
+
+            let stream;
+            try {
+                stream = audioEl.captureStream();
+            } catch (err) {
+                console.warn(`Channel ${ch.id}: captureStream() failed:`, err);
+                return;
+            }
+            if (stream.getAudioTracks().length === 0) return;
+
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            void ctx.resume();
+            const source = ctx.createMediaStreamSource(stream);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 1024;
+            source.connect(analyser); // deliberately no .connect(ctx.destination) -- see above
+
+            audioEl.dataset.meterAttached = 'true';
+            channelMeters[ch.id] = { ctx, source, analyser, raf: null };
+
+            const fillEl = document.getElementById(`ch-level-fill-${ch.id}`);
+            const trackEl = document.getElementById(`ch-level-track-${ch.id}`);
+            const samples = new Uint8Array(analyser.fftSize);
+            let level = 0;
+
+            function tick() {
+                if (!channelMeters[ch.id]) return; // stopped from under us
+                analyser.getByteTimeDomainData(samples);
+                // Peak deviation from silence (128), the same measure and
+                // decay curve as the main app's recorder level meter, so a
+                // side-by-side comparison means the same thing in both UIs.
+                let peak = 0;
+                for (let i = 0; i < samples.length; i++) {
+                    const dev = Math.abs(samples[i] - 128);
+                    if (dev > peak) peak = dev;
+                }
+                const now = Math.min(1, peak / 128);
+                level = now > level ? now : level * 0.85;
+
+                if (fillEl) {
+                    const pct = Math.round(level * 100);
+                    fillEl.style.width = `${pct}%`;
+                    fillEl.style.backgroundColor =
+                        pct > 85 ? '#ef4444' : pct > 60 ? '#f59e0b' : 'var(--accent-green)';
+                    if (trackEl) trackEl.setAttribute('aria-valuenow', String(pct));
+                }
+                channelMeters[ch.id].raf = requestAnimationFrame(tick);
+            }
+            tick();
+
+            // The tap dies with its track -- covers the element being
+            // removed by renderChannels() (see its cleanup call below)
+            // without a second cleanup path to keep in sync.
+            stream.getAudioTracks()[0].addEventListener('ended', () => stopLevelMeter(ch.id));
+        }
+
         function renderChannels() {
+            // Every rendered <audio> element is about to be discarded and
+            // recreated from scratch (innerHTML wipe below) -- any meter
+            // still tapping one of them would otherwise leak its
+            // AudioContext and keep animating a detached DOM node.
+            Object.keys(channelMeters).forEach(id => stopLevelMeter(Number(id)));
             channelsContainer.innerHTML = "";
             channels.forEach(ch => {
                 const card = document.createElement('div');
@@ -690,6 +814,13 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
                     <div class="audio-wrapper">
                         <audio id="ch-audio-${ch.id}" controls preload="auto"></audio>
+                        <div class="level-meter-row">
+                            <span>🔈 Level</span>
+                            <div class="level-meter-track" id="ch-level-track-${ch.id}" role="meter"
+                                 aria-label="${ch.name} output level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                <div class="level-meter-fill" id="ch-level-fill-${ch.id}"></div>
+                            </div>
+                        </div>
                         <div class="channel-controls-row">
                             <label class="checkbox-label">
                                 <input type="checkbox" id="ch-loop-${ch.id}" onchange="toggleChannelLoop(${ch.id}, this.checked)">
@@ -726,6 +857,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         statusEl.textContent = 'Ready';
                         statusEl.style.color = '';
                     });
+                    // Listens for 'play' rather than being called from
+                    // startChannelPlayback() so the meter attaches no matter
+                    // how playback actually started -- Master Play, Restart,
+                    // or the native <audio controls> widget's own button,
+                    // which bypasses this page's JS entirely.
+                    audioEl.addEventListener('play', () => startLevelMeter(ch, audioEl));
                 }
             });
 
