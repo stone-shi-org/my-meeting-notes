@@ -117,7 +117,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # meeting; a rolling window is only a few seconds of audio, though, which
     # is little enough for auto-detection to misfire on an accented phrase,
     # a name, or silence -- pinning a language is worth trying for anyone
-    # who mostly speaks one.
+    # who mostly speaks one. This is only the *default*: the recorder UI
+    # lets someone pick a language per recording before Start (a `language`
+    # websocket query param, checked in live_caption_ws before falling back
+    # to this), for a one-off meeting in a different language than usual
+    # without a trip to Settings.
     "live_caption_language": ("str", False),
     # Periodic LLM analysis of the rolling live-caption transcript during a
     # recording (see routers/insights.py) -- a distinct model from llm_model,

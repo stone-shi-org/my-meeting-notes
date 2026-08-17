@@ -1,3 +1,4 @@
+import { useQuery } from '@tanstack/react-query';
 import {
   AppWindow,
   Circle,
@@ -17,14 +18,17 @@ import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
 import { LiveTranscriptPanel } from '@/components/record/LiveTranscriptPanel';
 import { useLiveCaption } from '@/hooks/useLiveCaption';
 import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
+import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import {
   blockedReason,
   detectPlatform,
   fmtElapsedMs,
+  LIVE_CAPTION_LANGUAGES,
   sourceSupport,
   type Source,
 } from '@/lib/recording';
+import type { SettingEntry } from '@/types/api';
 
 export type RoomSpeakers = 'single' | 'multiple';
 
@@ -168,6 +172,21 @@ export function RecorderPanel({
   const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [liveCaptionsOn, setLiveCaptionsOn] = useState(false);
 
+  // Settings -> Live captions' value is only the *default* -- see
+  // live_caption_language's doc comment in config.py. `null` here means
+  // "hasn't been touched yet", so this panel keeps tracking that default
+  // (which may still be loading) until the user actually picks something,
+  // rather than locking in a blank value before the request resolves.
+  const settingsQuery = useQuery({
+    queryKey: ['settings'],
+    queryFn: () => api.get<{ settings: Record<string, SettingEntry> }>('/settings'),
+  });
+  const defaultCaptionLanguage = String(
+    settingsQuery.data?.settings.live_caption_language?.value ?? '',
+  );
+  const [captionLanguageChoice, setCaptionLanguageChoice] = useState<string | null>(null);
+  const captionLanguage = captionLanguageChoice ?? defaultCaptionLanguage;
+
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
 
@@ -180,6 +199,7 @@ export function RecorderPanel({
   const { captions, connected: captionsConnected } = useLiveCaption(
     recorder.liveStreams,
     captionsLive,
+    captionLanguage,
   );
 
   // Labels are blank until permission has been granted once, so re-read the
@@ -409,6 +429,33 @@ export function RecorderPanel({
         </span>
       </label>
 
+      {/* Locked once live: the language is sent when the caption websocket
+          first connects (see useLiveCaption), and a rolling window is short
+          enough that auto-detect can misfire mid-recording -- picking this
+          before Start is the point, not something to reconsider mid-call. */}
+      {liveCaptionsOn && (
+        <div>
+          <Label htmlFor="live-caption-language">Live caption language</Label>
+          <Select
+            id="live-caption-language"
+            className="mt-1.5"
+            value={captionLanguage}
+            disabled={recorder.live || disabled}
+            onChange={(e) => setCaptionLanguageChoice(e.target.value)}
+          >
+            {LIVE_CAPTION_LANGUAGES.map(({ code, label }) => (
+              <option key={code} value={code}>
+                {label}
+              </option>
+            ))}
+          </Select>
+          <p className="mt-1 text-xs text-fg-subtle">
+            Defaults to whatever Settings → Live captions has set. Pick a specific language if
+            captions sometimes come back in the wrong one.
+          </p>
+        </div>
+      )}
+
       <div className="flex flex-wrap items-center gap-3 border-t border-border pt-4">
         {!recorder.live ? (
           <Button
@@ -505,7 +552,7 @@ export function RecorderPanel({
           LiveTranscriptPanel on the left -- rendering both would show the
           same rolling captions twice. */}
       {layout === 'compact' && liveCaptionsOn && recorder.phase === 'recording' && (
-        <LiveCaptionStrip streams={recorder.liveStreams} enabled />
+        <LiveCaptionStrip streams={recorder.liveStreams} enabled language={captionLanguage} />
       )}
 
       {recorder.clip && !recorder.live && (

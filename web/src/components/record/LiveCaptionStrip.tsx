@@ -16,11 +16,14 @@ const CHANNEL_LABEL: Record<'me' | 'room', string> = {
 export function LiveCaptionStrip({
   streams,
   enabled,
+  language,
 }: {
   streams: LiveStreams;
   enabled: boolean;
+  /** ISO-639-1 code, or '' for auto-detect -- see useLiveCaption. */
+  language: string;
 }) {
-  const { captions, connected } = useLiveCaption(streams, enabled);
+  const { captions, connected } = useLiveCaption(streams, enabled, language);
 
   return (
     <div className="space-y-2 rounded-lg border border-border bg-surface-2/50 p-3">

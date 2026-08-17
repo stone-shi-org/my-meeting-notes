@@ -31,8 +31,14 @@ const MAX_CAPTIONS = 2000;
  * produced here is ever uploaded or saved; it exists only to render on
  * screen while the meeting is still happening. See app/routers/live_caption.py
  * for the other end of the socket.
+ *
+ * `language` (ISO-639-1, or '' for auto-detect) is always sent explicitly,
+ * even when empty -- that is what lets an explicit "Auto-detect" pick in
+ * the recorder UI override a non-empty Settings-page default for just this
+ * recording, rather than the empty string being indistinguishable from
+ * "the caller didn't pass one." See live_caption_ws's query-param handling.
  */
-export function useLiveCaption(streams: LiveStreams, enabled: boolean) {
+export function useLiveCaption(streams: LiveStreams, enabled: boolean, language: string) {
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [connected, setConnected] = useState(false);
 
@@ -44,7 +50,8 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean) {
 
     let cancelled = false;
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const ws = new WebSocket(`${proto}://${window.location.host}/api/live-caption/ws`);
+    const qs = new URLSearchParams({ language });
+    const ws = new WebSocket(`${proto}://${window.location.host}/api/live-caption/ws?${qs}`);
     ws.binaryType = 'arraybuffer';
 
     ws.onopen = () => {
@@ -154,8 +161,10 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean) {
     };
     // streams.room/streams.me change identity exactly once per recording
     // (see useRecorder's setLiveStreams calls), so this effect re-runs at
-    // start and stop, not on every render.
-  }, [streams.room, streams.me, enabled]);
+    // start and stop, not on every render. language is included on
+    // principle -- the recorder UI disables that control while live, so in
+    // practice it never changes mid-connection.
+  }, [streams.room, streams.me, enabled, language]);
 
   return { captions, connected };
 }

@@ -208,6 +208,32 @@ export function audioConstraints(source: Source, deviceId?: string): MediaTrackC
   return { echoCancellation: false, noiseSuppression: false, autoGainControl: false };
 }
 
+/**
+ * Live-caption language choices, offered as a picklist rather than free
+ * text. The backend (app/routers/live_caption.py) wants an ISO-639-1 code
+ * ("en"), not a language name ("english") -- confirmed against a real
+ * streaming ASR backend that the latter doesn't get rejected, it silently
+ * breaks streaming entirely, with an error that never mentions language. A
+ * picklist makes that typo structurally impossible instead of documenting
+ * it in a hint underneath a text box. `''` means "auto-detect per window".
+ */
+export const LIVE_CAPTION_LANGUAGES: { code: string; label: string }[] = [
+  { code: '', label: 'Auto-detect' },
+  { code: 'en', label: 'English' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'fr', label: 'French' },
+  { code: 'de', label: 'German' },
+  { code: 'pt', label: 'Portuguese' },
+  { code: 'it', label: 'Italian' },
+  { code: 'nl', label: 'Dutch' },
+  { code: 'ru', label: 'Russian' },
+  { code: 'zh', label: 'Chinese' },
+  { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' },
+  { code: 'hi', label: 'Hindi' },
+  { code: 'ar', label: 'Arabic' },
+];
+
 /** `12:04`, counting up. Recording length, not a media position. */
 export function fmtElapsedMs(ms: number): string {
   const total = Math.max(0, Math.floor(ms / 1000));

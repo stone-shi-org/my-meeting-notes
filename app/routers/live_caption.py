@@ -179,13 +179,23 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         # separately: the two routes on the same LocalAI instance have been
         # observed to behave very differently under load for the same model.
         model = effective(conn, "live_caption_model") or effective(conn, "diarization_model")
-        language = effective(conn, "live_caption_language")
+        default_language = effective(conn, "live_caption_language")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
 
     if not enabled:
         await websocket.close(code=4404)
         return
+
+    # The recorder UI picks a language before Start (see useLiveCaption.ts)
+    # and always sends it, even '' for an explicit "Auto-detect" -- which is
+    # why this checks "was the param given at all" rather than truthiness:
+    # an explicit '' must be able to override a non-empty Settings default
+    # for just this recording, not be treated as "no opinion, use the
+    # default". Only a request with no param at all (not made through the
+    # recorder UI) falls back to the Settings-page default.
+    raw_language = websocket.query_params.get("language")
+    language = raw_language if raw_language is not None else default_language
 
     url = transcriptions_url(diarization_url)
     await websocket.accept()
