@@ -14,3 +14,4 @@ web/node_modules/
 web/dist/
 .pytest_cache/
 version.txt
+.playwright-mcp/
