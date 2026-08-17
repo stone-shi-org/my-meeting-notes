@@ -123,8 +123,15 @@ async def _transcribe_window(
                 if chunk.get("type") == "transcript.text.done":
                     text = chunk.get("text") or ""
             return text
-    except (httpx.HTTPError, SSEError) as exc:
-        log.warning("live caption window failed: %s", exc)
+    except (httpx.HTTPError, SSEError, ValueError) as exc:
+        # ValueError alongside the transport errors: a non-JSON SSE data line
+        # (json.loads above) is the same "drop this window, keep going" case
+        # as a timeout, not a reason to let the exception escape and kill the
+        # channel_worker task -- see that function's docstring. The type name
+        # is logged explicitly because httpx's own timeout exceptions
+        # stringify to '' (confirmed: str(httpx.ReadTimeout('')) == ''), which
+        # otherwise reads as a message that silently went missing.
+        log.warning("live caption window failed: %s: %s", type(exc).__name__, exc)
         return ""
 
 
@@ -139,6 +146,7 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         enabled = effective(conn, "live_caption_enabled")
         window_sec = effective(conn, "live_caption_window_sec")
         interval_sec = effective(conn, "live_caption_interval_sec")
+        timeout_sec = effective(conn, "live_caption_timeout_sec")
         model = effective(conn, "diarization_model")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
@@ -156,7 +164,12 @@ async def live_caption_ws(websocket: WebSocket) -> None:
     async def channel_worker(channel: int) -> None:
         buf = buffers[channel]
         name = CHANNEL_NAMES[channel]
-        async with httpx.AsyncClient(timeout=interval_sec + 20) as client:
+        # timeout_sec, not interval_sec + 20: this bounds one ASR call against
+        # a backend the batch diarizer itself waits up to 30 minutes for (see
+        # live_caption_timeout_sec's doc comment in config.py). interval_sec
+        # is just the polling cadence below, unrelated to how long a call is
+        # allowed to take once it starts.
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
             while not stop.is_set():
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=interval_sec)
@@ -164,17 +177,30 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                 except asyncio.TimeoutError:
                     pass
 
-                async with buf.lock:
-                    pcm = buf.window_bytes(window_sec)
-                if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
+                try:
+                    async with buf.lock:
+                        pcm = buf.window_bytes(window_sec)
+                    if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
+                        continue
+
+                    text = await _transcribe_window(client, url, model, api_key or None, pcm)
+                    if not text.strip():
+                        continue
+                except Exception:
+                    # Anything that reaches here is a bug in this loop, not an
+                    # ASR failure -- those are already turned into "" inside
+                    # _transcribe_window. Log and keep going regardless: for a
+                    # plain mic recording this is the *only* worker, and
+                    # letting an exception escape ends live captions for the
+                    # rest of the recording with nothing visible to the user.
+                    log.exception("live caption window for %s crashed", name)
                     continue
 
-                text = await _transcribe_window(client, url, model, api_key or None, pcm)
-                if not text.strip():
-                    continue
                 try:
                     await websocket.send_json({"type": "caption", "channel": name, "text": text})
                 except Exception:
+                    # The socket itself is gone -- further sends will fail the
+                    # same way, so this one *should* end the worker.
                     return
 
     workers = [asyncio.create_task(channel_worker(ch)) for ch in buffers]

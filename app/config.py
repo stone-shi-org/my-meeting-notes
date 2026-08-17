@@ -88,6 +88,15 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "live_caption_enabled": ("bool", False),
     "live_caption_window_sec": ("int", False),
     "live_caption_interval_sec": ("int", False),
+    # How long one rolling-window ASR call is allowed to run before it's
+    # treated as failed. Deliberately its own setting rather than derived
+    # from interval_sec (interval_sec + 20 used to be the whole budget,
+    # 23s by default) -- the ASR backend is the same "shared, minutes-latency
+    # box" the batch diarizer waits up to diarization_timeout_sec (30
+    # minutes) for, and a live window of real speech routinely takes longer
+    # to decode than a short/silent one. A late caption beats a caption that
+    # silently never arrives.
+    "live_caption_timeout_sec": ("int", False),
     # Periodic LLM analysis of the rolling live-caption transcript during a
     # recording (see routers/insights.py) -- a distinct model from llm_model,
     # reusing llm_base_url/llm_api_key/llm_ssl_verify/llm_timeout_sec, since
@@ -238,6 +247,9 @@ class Settings(BaseSettings):
     live_caption_enabled: bool = False
     live_caption_window_sec: int = 8
     live_caption_interval_sec: int = 3
+    # See RUNTIME_KEYS above. Generous relative to interval_sec on purpose --
+    # this bounds one ASR call, not the gap between captions.
+    live_caption_timeout_sec: int = 45
 
     # --- insights ---------------------------------------------------------
     # See RUNTIME_KEYS above. 30s balances "feels live" against the cost of a
