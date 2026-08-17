@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import json
+import struct
 import time
+import wave
 
 import pytest
 
 from app.db import get_conn
 from tests.conftest import FIXTURES
+
+
+def _write_wav(path, channels: int, frames: int, value: int = 1000) -> None:
+    """A short, real N-channel wav for the multi-source upload tests -- real
+    ffmpeg runs against these (convert/split/pad/merge are not mocked), same
+    as test_audio.py's TestRealFfmpeg."""
+    with wave.open(str(path), "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(16000)
+        w.writeframes(struct.pack(f"<{channels}h", *([value] * channels)) * frames)
 
 
 @pytest.fixture(autouse=True)
@@ -273,6 +287,194 @@ def test_probe_records_duration_on_the_meeting(user_client):
 
     meeting = user_client.get(f"/api/meetings/{body['meeting_id']}").json()
     assert meeting["audio_duration_sec"] == pytest.approx(0.5, abs=0.2)
+
+
+class TestMultiSourceUpload:
+    """channel_map == 'multi_channel' | 'multi_file' -- the generalized,
+    upload-only N-channel path (see meeting_audio_channels, diarize_multi_
+    channel_file). Diarization itself is still faked by the autouse fixture
+    above; these exercise the parts that fixture bypasses -- the upload
+    route's validation/storage and the real-ffmpeg convert stage.
+    """
+
+    def test_multi_channel_splits_into_n_channels(self, user_client, isolated_settings, tmp_path):
+        src = tmp_path / "twochannel.wav"
+        _write_wav(src, channels=2, frames=8000)  # 0.5s @ 16kHz
+
+        channels = json.dumps(
+            [
+                {"label": "Alice", "run_diarization": False, "start_offset_sec": 0},
+                {"label": "Bob", "run_diarization": False, "start_offset_sec": 0},
+            ]
+        )
+        with src.open("rb") as fh:
+            resp = user_client.post(
+                "/api/meetings/upload",
+                data={
+                    "title": "Two speakers",
+                    "new_thread_title": "Atlas",
+                    "mode": "multi_channel",
+                    "channels": channels,
+                },
+                files={"file": (src.name, fh, "audio/wav")},
+            )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        job = wait_for_job(user_client, body["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        meeting_id = body["meeting_id"]
+        meeting = user_client.get(f"/api/meetings/{meeting_id}").json()
+        assert meeting["status"] == "ready"
+        assert meeting["audio_channels"] == 2
+
+        meeting_dir = isolated_settings.audio_dir / str(meeting_id)
+        assert (meeting_dir / "channel0.wav").exists()
+        assert (meeting_dir / "channel1.wav").exists()
+        assert (meeting_dir / "audio16k.wav").exists()
+
+        with get_conn(isolated_settings.db_path) as conn:
+            rows = conn.execute(
+                "SELECT channel_index, label, run_diarization FROM meeting_audio_channels "
+                "WHERE meeting_id = ? ORDER BY channel_index",
+                (meeting_id,),
+            ).fetchall()
+        assert [dict(r) for r in rows] == [
+            {"channel_index": 0, "label": "Alice", "run_diarization": 0},
+            {"channel_index": 1, "label": "Bob", "run_diarization": 0},
+        ]
+
+    def test_multi_file_pads_and_merges_by_offset(self, user_client, isolated_settings, tmp_path):
+        short = tmp_path / "short.wav"
+        long_ = tmp_path / "long.wav"
+        _write_wav(short, channels=1, frames=8000)  # 0.5s
+        _write_wav(long_, channels=1, frames=24000)  # 1.5s
+
+        channels = json.dumps(
+            [
+                {"label": "Alice", "run_diarization": False, "start_offset_sec": 2.0},
+                {"label": "Bob", "run_diarization": False, "start_offset_sec": 0},
+            ]
+        )
+        with short.open("rb") as f1, long_.open("rb") as f2:
+            resp = user_client.post(
+                "/api/meetings/upload",
+                data={
+                    "title": "Two files",
+                    "new_thread_title": "Atlas",
+                    "mode": "multi_file",
+                    "channels": channels,
+                },
+                files=[
+                    ("file", (short.name, f1, "audio/wav")),
+                    ("extra_files", (long_.name, f2, "audio/wav")),
+                ],
+            )
+        assert resp.status_code == 202, resp.text
+        body = resp.json()
+        job = wait_for_job(user_client, body["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        meeting_id = body["meeting_id"]
+        meeting = user_client.get(f"/api/meetings/{meeting_id}").json()
+        assert meeting["audio_channels"] == 2
+        # short starts at 2.0s and runs 0.5s (total 2.5s); long runs 1.5s
+        # from 0 -- the longer overall run (2.5s) is what every channel and
+        # the merged file must be padded/probed to.
+        assert meeting["audio_duration_sec"] == pytest.approx(2.5, abs=0.1)
+
+        meeting_dir = isolated_settings.audio_dir / str(meeting_id)
+        assert (meeting_dir / "source_0.wav").exists()
+        assert (meeting_dir / "source_1.wav").exists()
+        assert (meeting_dir / "channel0.wav").exists()
+        assert (meeting_dir / "channel1.wav").exists()
+        assert (meeting_dir / "audio16k.wav").exists()
+
+    def test_channels_length_mismatch_is_rejected(self, user_client, tmp_path):
+        src = tmp_path / "a.wav"
+        _write_wav(src, channels=1, frames=8000)
+        with src.open("rb") as fh:
+            resp = user_client.post(
+                "/api/meetings/upload",
+                data={
+                    "title": "x",
+                    "new_thread_title": "Atlas",
+                    "mode": "multi_file",
+                    # Only one entry, but this is a single-file request --
+                    # multi_file needs exactly one entry per uploaded file.
+                    "channels": json.dumps([{"label": "a"}, {"label": "b"}]),
+                },
+                files={"file": (src.name, fh, "audio/wav")},
+            )
+        assert resp.status_code == 400
+
+    def test_mode_cannot_combine_with_mic_room(self, user_client, tmp_path):
+        src = tmp_path / "a.wav"
+        _write_wav(src, channels=1, frames=8000)
+        with src.open("rb") as fh:
+            resp = user_client.post(
+                "/api/meetings/upload",
+                data={
+                    "title": "x",
+                    "new_thread_title": "Atlas",
+                    "mode": "multi_channel",
+                    "channel_map": "mic_room",
+                    "channels": json.dumps([{"label": "a"}]),
+                },
+                files={"file": (src.name, fh, "audio/wav")},
+            )
+        assert resp.status_code == 400
+
+    def test_unknown_mode_is_rejected(self, user_client, tmp_path):
+        src = tmp_path / "a.wav"
+        _write_wav(src, channels=1, frames=8000)
+        with src.open("rb") as fh:
+            resp = user_client.post(
+                "/api/meetings/upload",
+                data={"title": "x", "new_thread_title": "Atlas", "mode": "bogus"},
+                files={"file": (src.name, fh, "audio/wav")},
+            )
+        assert resp.status_code == 400
+
+    def test_add_audio_onto_an_existing_meeting_accepts_multi_channel(
+        self, user_client, isolated_settings, tmp_path
+    ):
+        """The same route the recorder uses to attach audio to a
+        calendar-created meeting, exercising its backup/restore dance and
+        the DELETE FROM meeting_audio_channels reset -- not just upload_meeting's."""
+        meeting = user_client.post(
+            "/api/meetings",
+            json={"new_thread_title": "Atlas", "title": "Kickoff", "meeting_at": None},
+        ).json()
+
+        src = tmp_path / "twochannel.wav"
+        _write_wav(src, channels=2, frames=8000)
+        channels = json.dumps(
+            [
+                {"label": "Alice", "run_diarization": False, "start_offset_sec": 0},
+                {"label": "Bob", "run_diarization": False, "start_offset_sec": 0},
+            ]
+        )
+        with src.open("rb") as fh:
+            resp = user_client.post(
+                f"/api/meetings/{meeting['id']}/audio",
+                data={"mode": "multi_channel", "channels": channels},
+                files={"file": (src.name, fh, "audio/wav")},
+            )
+        assert resp.status_code == 202, resp.text
+        job = wait_for_job(user_client, resp.json()["job_id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        after = user_client.get(f"/api/meetings/{meeting['id']}").json()
+        assert after["audio_channels"] == 2
+
+        with get_conn(isolated_settings.db_path) as conn:
+            rows = conn.execute(
+                "SELECT label FROM meeting_audio_channels WHERE meeting_id = ? "
+                "ORDER BY channel_index",
+                (meeting["id"],),
+            ).fetchall()
+        assert [r["label"] for r in rows] == ["Alice", "Bob"]
 
 
 class TestAudioOntoAnExistingMeeting:

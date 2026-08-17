@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
+import { AudioInput, type FileMeta, type MultiSourceUpload } from '@/components/record/AudioInput';
 import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label } from '@/components/ui/primitives';
@@ -23,8 +23,10 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
   const [file, setFile] = useState<File | null>(null);
   const [channelMap, setChannelMap] = useState<ChannelMap>(null);
   const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
+  const [multi, setMulti] = useState<MultiSourceUpload | null>(null);
   const [speakerNames, setSpeakerNames] = useState('');
   const [autoSummarize, setAutoSummarize] = useState(true);
+  const [skipDiarization, setSkipDiarization] = useState(false);
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -49,6 +51,21 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
     if (channelMap) {
       form.append('channel_map', channelMap);
       form.append('room_speakers', roomSpeakers);
+    }
+    form.append('skip_diarization', String(skipDiarization));
+    if (multi) {
+      form.append('mode', multi.mode);
+      for (const extra of multi.files) form.append('extra_files', extra);
+      form.append(
+        'channels',
+        JSON.stringify(
+          multi.channels.map((c) => ({
+            label: c.label.trim() || null,
+            run_diarization: c.runDiarization,
+            start_offset_sec: c.startOffsetSec,
+          })),
+        ),
+      );
     }
 
     abort.current = new AbortController();
@@ -83,8 +100,11 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
             setFile(next);
             setChannelMap(meta.channelMap);
             setRoomSpeakers(meta.roomSpeakers);
+            setMulti(meta.multi ?? null);
           }}
           progress={progress}
+          skipDiarization={skipDiarization}
+          onSkipDiarizationChange={setSkipDiarization}
         />
 
         {askForSpeakers && (

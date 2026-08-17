@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 import httpx
@@ -256,6 +257,84 @@ async def diarize_file(
     return payload, elapsed_ms
 
 
+async def transcribe_flat_file(
+    ctx,
+    path: Path,
+    *,
+    model: str,
+    duration_sec: float | None = None,
+) -> tuple[dict, int]:
+    """Plain ASR on the whole file, wrapped as one implicit speaker.
+
+    For "skip diarization" on an ordinary (non-channel-separated) upload:
+    the model still has to transcribe the audio, it just never has to tell
+    voices apart, so this is transcribe_sync (like diarize_channels_file's
+    mic channel) rather than a full diarize_sync call. Reuses that same
+    single-speaker payload shape -- one 'SPEAKER' speaker_map row -- instead
+    of inventing a new "no speakers at all" shape that the transcript
+    renderer and summarizer have never had to handle.
+    """
+    settings = get_settings()
+    with get_conn(ctx.db_path) as conn:
+        url = effective(conn, "diarization_url")
+        api_key = effective(conn, "diarization_api_key")
+        timeout = effective(conn, "diarization_timeout_sec")
+    transcribe_url = transcriptions_url(url)
+
+    # No upfront ctx.event() here, deliberately -- same as
+    # diarize_channels_file: an event row needs a real job row for its
+    # foreign key, which callers that only exercise this function directly
+    # (see TestTranscribeFlatFile) do not always have. ctx.heartbeat() and
+    # ctx.stage_progress() below tolerate an unknown job id fine (an UPDATE
+    # affecting zero rows, not an error).
+    stop = asyncio.Event()
+    started_at = time.monotonic()
+
+    async def heartbeat() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SEC)
+                return
+            except asyncio.TimeoutError:
+                pass
+            ctx.heartbeat()
+            if duration_sec:
+                elapsed = time.monotonic() - started_at
+                expected = duration_sec * settings.diarize_seconds_per_audio_second
+                ctx.stage_progress(min(elapsed / expected, PROGRESS_CEILING))
+
+    ticker = asyncio.create_task(heartbeat())
+    try:
+        payload, elapsed_ms = await asyncio.to_thread(
+            transcribe_sync,
+            path,
+            url=transcribe_url,
+            model=model,
+            api_key=api_key or None,
+            timeout=timeout,
+        )
+    finally:
+        stop.set()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+    segments = _label_segments(payload.get("segments") or [], "SPEAKER")
+    speaker_rows = [_single_speaker_row("SPEAKER", segments)]
+    result = {
+        "task": "diarize",
+        "duration": duration_sec or max((s["end"] or 0 for s in segments), default=0.0),
+        "num_speakers": 1,
+        "segments": segments,
+        "speakers": speaker_rows,
+    }
+    log.info(
+        "flat-transcribed %s in %.1fs: %d segments (diarization skipped)",
+        path.name,
+        elapsed_ms / 1000,
+        len(segments),
+    )
+    return result, elapsed_ms
+
+
 def _label_segments(segments: list[dict], speaker_id: str) -> list[dict]:
     """Stamp every segment from a single-speaker channel with its known identity."""
     return [
@@ -281,15 +360,17 @@ def _single_speaker_row(speaker_id: str, segments: list[dict]) -> dict:
     }
 
 
-def _prefix_room_speakers(payload: dict) -> tuple[list[dict], list[dict]]:
+def _prefix_speaker_ids(payload: dict, prefix: str) -> tuple[list[dict], list[dict]]:
     """Rename a batch diarization's raw speaker ids (e.g. SPEAKER_00) to
-    ROOM_SPEAKER_00.
+    {prefix}SPEAKER_00.
 
-    Keeps them visually distinct from 'ME' -- the room channel is diarized
-    independently of the mic channel here, so nothing stops the model
-    reusing "SPEAKER_00" for a remote voice that has nothing to do with the
-    local mic. The model's own speaker count and ordering are preserved,
-    just namespaced.
+    Keeps ids visually distinct and collision-free across channels: each
+    channel is diarized independently, so nothing stops two different
+    channels' models both reusing "SPEAKER_00" for voices that have nothing
+    to do with each other. The model's own speaker count and ordering are
+    preserved, just namespaced. Generalizes what used to be
+    _prefix_room_speakers (prefix="ROOM_" specifically) to an arbitrary
+    channel -- see diarize_multi_channel_file.
     """
     segments = []
     for seg in payload.get("segments") or []:
@@ -297,7 +378,7 @@ def _prefix_room_speakers(payload: dict) -> tuple[list[dict], list[dict]]:
         segments.append(
             {
                 "id": seg.get("id"),
-                "speaker": f"ROOM_{raw_id}",
+                "speaker": f"{prefix}{raw_id}",
                 "label": seg.get("label"),
                 "start": seg.get("start"),
                 "end": seg.get("end"),
@@ -307,18 +388,38 @@ def _prefix_room_speakers(payload: dict) -> tuple[list[dict], list[dict]]:
     speakers = []
     for sp in payload.get("speakers") or []:
         raw_id = sp.get("id") or "UNKNOWN"
-        speakers.append({**sp, "id": f"ROOM_{raw_id}"})
+        speakers.append({**sp, "id": f"{prefix}{raw_id}"})
     return segments, speakers
 
 
-def _merge_channel_segments(me_segments: list[dict], room_segments: list[dict]) -> list[dict]:
-    """Interleave two channels' segments into one timeline, renumbering ids
-    so they are unique across the merge rather than colliding (both channels
-    started counting from 0)."""
-    merged = sorted(me_segments + room_segments, key=lambda s: s.get("start") or 0)
+def _prefix_room_speakers(payload: dict) -> tuple[list[dict], list[dict]]:
+    """The two-channel (mic_room) call site's historical name for
+    _prefix_speaker_ids(payload, "ROOM_") -- kept as its own function so that
+    call site reads the same as it always has."""
+    return _prefix_speaker_ids(payload, "ROOM_")
+
+
+def _merge_many_segments(*segment_lists: list[dict]) -> list[dict]:
+    """Interleave N channels' segments into one timeline, renumbering ids so
+    they are unique across the merge rather than colliding (every channel
+    started counting from 0 independently). Generalizes what used to be
+    _merge_channel_segments (exactly two lists) to N -- see
+    diarize_multi_channel_file.
+    """
+    merged = sorted(
+        (seg for segments in segment_lists for seg in segments),
+        key=lambda s: s.get("start") or 0,
+    )
     for i, seg in enumerate(merged):
         seg["id"] = i
     return merged
+
+
+def _merge_channel_segments(me_segments: list[dict], room_segments: list[dict]) -> list[dict]:
+    """The two-channel (mic_room) call site's historical name for
+    _merge_many_segments(me_segments, room_segments) -- kept as its own
+    function so that call site reads the same as it always has."""
+    return _merge_many_segments(me_segments, room_segments)
 
 
 async def diarize_channels_file(
@@ -422,6 +523,123 @@ async def diarize_channels_file(
         room_speakers,
     )
     return payload, me_ms + room_ms
+
+
+@dataclass
+class ChannelMeta:
+    """Per-channel config for diarize_multi_channel_file, one per row in
+    meeting_audio_channels ordered by channel_index.
+
+    label is the human-given speaker name, and doubles as that channel's
+    speaker id / namespacing prefix -- there is no separate machine id to
+    reconcile it with later, unlike SPEAKER_00 style ids. None falls back to
+    a generated "S{index}".
+    """
+
+    label: str | None
+    run_diarization: bool
+
+
+async def diarize_multi_channel_file(
+    ctx,
+    *,
+    channel_wavs: list[Path],
+    channel_meta: list[ChannelMeta],
+    model: str,
+    duration_sec: float | None = None,
+) -> tuple[dict, int]:
+    """N-channel generalization of diarize_channels_file.
+
+    Each channel independently gets either a full model diarize_sync call
+    (meta.run_diarization) or a flat transcribe_sync call wrapped as one
+    speaker -- "known speaker" and "mixed, diarization off" are the exact
+    same operation here (see meeting_audio_channels' doc comment in db.py),
+    differing only in whether meta.label is already set. Channels run
+    concurrently: each is an independent HTTP call to the same shared
+    backend with no ordering dependency between them, unlike
+    diarize_channels_file's sequential mic-then-room (kept sequential there
+    to leave that tested, two-channel path untouched).
+    """
+    if len(channel_wavs) != len(channel_meta):
+        raise ValueError("channel_wavs and channel_meta must be the same length")
+
+    settings = get_settings()
+    with get_conn(ctx.db_path) as conn:
+        url = effective(conn, "diarization_url")
+        api_key = effective(conn, "diarization_api_key")
+        timeout = effective(conn, "diarization_timeout_sec")
+    transcribe_url = transcriptions_url(url)
+
+    stop = asyncio.Event()
+    started_at = time.monotonic()
+
+    async def heartbeat() -> None:
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=HEARTBEAT_INTERVAL_SEC)
+                return
+            except asyncio.TimeoutError:
+                pass
+            ctx.heartbeat()
+            if duration_sec:
+                elapsed = time.monotonic() - started_at
+                expected = duration_sec * settings.diarize_seconds_per_audio_second
+                ctx.stage_progress(min(elapsed / expected, PROGRESS_CEILING))
+
+    async def _one_channel(
+        index: int, wav: Path, meta: ChannelMeta
+    ) -> tuple[list[dict], list[dict], int]:
+        name = meta.label or f"S{index}"
+        if meta.run_diarization:
+            payload, ms = await asyncio.to_thread(
+                diarize_sync, wav, url=url, model=model, api_key=api_key or None, timeout=timeout,
+            )
+            segments, speakers = _prefix_speaker_ids(payload, f"{name}_")
+        else:
+            payload, ms = await asyncio.to_thread(
+                transcribe_sync,
+                wav,
+                url=transcribe_url,
+                model=model,
+                api_key=api_key or None,
+                timeout=timeout,
+            )
+            segments = _label_segments(payload.get("segments") or [], name)
+            speakers = [_single_speaker_row(name, segments)]
+        return segments, speakers, ms
+
+    ticker = asyncio.create_task(heartbeat())
+    try:
+        results = await asyncio.gather(
+            *(
+                _one_channel(i, wav, meta)
+                for i, (wav, meta) in enumerate(zip(channel_wavs, channel_meta))
+            )
+        )
+    finally:
+        stop.set()
+        await asyncio.gather(ticker, return_exceptions=True)
+
+    all_segments = [segs for segs, _speakers, _ms in results]
+    all_speakers = [speakers for _segs, speakers, _ms in results]
+    total_ms = sum(ms for _segs, _speakers, ms in results)
+
+    merged = _merge_many_segments(*all_segments)
+    speakers_flat = [sp for channel_speakers in all_speakers for sp in channel_speakers]
+    payload = {
+        "task": "diarize",
+        "duration": duration_sec or max((s["end"] or 0 for s in merged), default=0.0),
+        "num_speakers": len(speakers_flat),
+        "segments": merged,
+        "speakers": speakers_flat,
+    }
+    log.info(
+        "multi-channel-diarized %d channel(s): %d segments, %d speakers",
+        len(channel_wavs),
+        len(merged),
+        payload["num_speakers"],
+    )
+    return payload, total_ms
 
 
 def test_connection(

@@ -162,6 +162,23 @@ def build_ffmpeg_command_stereo(src: Path, dest: Path) -> list[str]:
     ]
 
 
+def build_ffmpeg_command_multichannel(src: Path, dest: Path, channels: int) -> list[str]:
+    """Same as build_ffmpeg_command_stereo, generalized past exactly 2
+    channels -- for an uploaded file that already has one speaker per
+    channel (see split_channels, meeting_audio_channels).
+    """
+    return [
+        _require_binary("ffmpeg"),
+        "-nostdin",
+        "-y",
+        "-i", str(src),
+        "-ac", str(channels),
+        "-ar", str(TARGET_SAMPLE_RATE),
+        "-c:a", TARGET_CODEC,
+        str(dest),
+    ]
+
+
 def _run_ffmpeg(cmd: list[str], src_name: str, *outputs: Path) -> None:
     """Shared subprocess plumbing for every ffmpeg call in this module.
 
@@ -197,6 +214,18 @@ def convert_to_wav16k_mono(src: Path, dest: Path) -> Path:
     return dest
 
 
+def convert_to_wav16k_multichannel(src: Path, dest: Path, channels: int) -> Path:
+    """Transcode to 16 kHz N-channel PCM, preserving channel identity.
+
+    Blocking -- call via asyncio.to_thread. Used only for an uploaded
+    "speaker by channel" file (channel_map == 'multi_channel'); see
+    build_ffmpeg_command_multichannel and split_channels.
+    """
+    cmd = build_ffmpeg_command_multichannel(src, dest, channels)
+    _run_ffmpeg(cmd, src.name, dest)
+    return dest
+
+
 def convert_to_wav16k_stereo(src: Path, dest: Path) -> Path:
     """Transcode to 16 kHz stereo PCM, preserving channel 0/1 identity.
 
@@ -218,6 +247,11 @@ def split_stereo_channels(src: Path, left_dest: Path, right_dest: Path) -> None:
     with no error, which would make a channel-separated recording collapse
     back to one speaker without anyone noticing. channelsplit fails loudly on
     a mismatched layout instead.
+
+    Deliberately not implemented in terms of the more general split_channels
+    below: this is the recorder's tested, production mic_room path, and it
+    stays on its own exact implementation rather than sharing code with a
+    brand-new function.
     """
     binary = _require_binary("ffmpeg")
     cmd = [
@@ -228,6 +262,83 @@ def split_stereo_channels(src: Path, left_dest: Path, right_dest: Path) -> None:
         "-map", "[right]", str(right_dest),
     ]
     _run_ffmpeg(cmd, src.name, left_dest, right_dest)
+
+
+def split_channels(src: Path, dests: list[Path]) -> None:
+    """Split an N-channel wav into N mono wavs, dests[i] <- source channel i.
+
+    Blocking -- call via asyncio.to_thread. For an uploaded "speaker by
+    channel" file (see meeting_audio_channels) -- N independent speakers,
+    not a surround mix, so there is no named channel_layout (stereo, 5.1,
+    ...) to hand channelsplit for an arbitrary N. ``pan=mono|c0=cI`` instead
+    picks channel I by raw index regardless of what layout the source
+    claims, and -- like channelsplit -- fails at filter-graph setup rather
+    than silently emitting fewer/shorter channels if the source doesn't
+    actually have that many.
+    """
+    binary = _require_binary("ffmpeg")
+    filters = ";".join(f"[0:a]pan=mono|c0=c{i}[ch{i}]" for i in range(len(dests)))
+    cmd = [binary, "-nostdin", "-y", "-i", str(src), "-filter_complex", filters]
+    for i, dest in enumerate(dests):
+        cmd += ["-map", f"[ch{i}]", str(dest)]
+    _run_ffmpeg(cmd, src.name, *dests)
+
+
+def pad_and_merge_channels(
+    sources: list[tuple[Path, float]], dest_channels: list[Path], merged_dest: Path
+) -> None:
+    """Align N independently-recorded mono files onto one shared timeline.
+
+    Blocking -- call via asyncio.to_thread. Unlike split_channels' input
+    (one file, already sample-aligned by a single recording clock), an
+    uploaded "speaker by file" set was never aligned by anything -- each
+    ``(path, start_offset_sec)`` pair may start and end at a different wall-
+    clock moment. ``adelay`` covers the leading gap; ``apad=whole_dur=...``
+    extends every source to the run's overall longest total length (offset
+    included) so the amerge below -- which needs equal-length inputs --
+    never silently truncates whichever source is shortest.
+
+    Writes each padded, aligned mono file to dest_channels[i] (these feed
+    the diarize stage directly; nothing needs to split them back out of the
+    merged file) and separately amerges all of them into merged_dest, kept
+    only for playback -- the existing single-file audio_path convention.
+    """
+    if len(sources) != len(dest_channels):
+        raise ValueError("sources and dest_channels must be the same length")
+
+    binary = _require_binary("ffmpeg")
+
+    # The longest source, once its own leading silence is counted, sets the
+    # common length every channel pads to.
+    run_length = 0.0
+    for path, offset in sources:
+        info = probe(path)
+        run_length = max(run_length, max(0.0, offset) + (info.duration_sec or 0.0))
+
+    for (path, offset), dest in zip(sources, dest_channels):
+        delay_ms = max(0.0, offset) * 1000
+        cmd = [
+            binary, "-nostdin", "-y",
+            "-i", str(path),
+            "-af", f"adelay={delay_ms}:all=1,apad=whole_dur={run_length}",
+            "-ac", str(TARGET_CHANNELS),
+            "-ar", str(TARGET_SAMPLE_RATE),
+            "-c:a", TARGET_CODEC,
+            str(dest),
+        ]
+        _run_ffmpeg(cmd, path.name, dest)
+
+    merge_cmd = [binary, "-nostdin", "-y"]
+    for dest in dest_channels:
+        merge_cmd += ["-i", str(dest)]
+    merge_cmd += [
+        "-filter_complex", f"amerge=inputs={len(dest_channels)}",
+        "-ac", str(len(dest_channels)),
+        "-ar", str(TARGET_SAMPLE_RATE),
+        "-c:a", TARGET_CODEC,
+        str(merged_dest),
+    ]
+    _run_ffmpeg(merge_cmd, "merged channels", merged_dest)
 
 
 def is_allowed_extension(filename: str) -> bool:

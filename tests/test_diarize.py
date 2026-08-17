@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import httpx
 import pytest
@@ -314,6 +315,86 @@ class TestChannelMergeHelpers:
         assert [s["text"] for s in merged] == ["room-first", "me-second"]
         assert [s["id"] for s in merged] == [0, 1]
 
+    def test_prefix_speaker_ids_takes_an_arbitrary_prefix(self):
+        payload = {
+            "segments": [
+                {"id": 0, "speaker": "SPEAKER_00", "label": "0", "start": 0, "end": 1, "text": "a"},
+            ],
+            "speakers": [
+                {"id": "SPEAKER_00", "label": "0", "total_speech_duration": 1, "segment_count": 1},
+            ],
+        }
+        segments, speakers = diarize_svc._prefix_speaker_ids(payload, "Alice_")
+        assert [s["speaker"] for s in segments] == ["Alice_SPEAKER_00"]
+        assert [s["id"] for s in speakers] == ["Alice_SPEAKER_00"]
+
+    def test_merge_many_segments_interleaves_n_lists(self):
+        a = diarize_svc._label_segments([{"id": 0, "start": 2, "end": 3, "text": "third"}], "A")
+        b = diarize_svc._label_segments([{"id": 0, "start": 0, "end": 1, "text": "first"}], "B")
+        c = diarize_svc._label_segments([{"id": 0, "start": 1, "end": 2, "text": "second"}], "C")
+        merged = diarize_svc._merge_many_segments(a, b, c)
+        assert [s["text"] for s in merged] == ["first", "second", "third"]
+        assert [s["id"] for s in merged] == [0, 1, 2]
+
+
+class TestTranscribeFlatFile:
+    """The 'skip diarization' path: plain ASR wrapped as one speaker."""
+
+    def _ctx(self, db_path) -> JobContext:
+        return JobContext("fake-job", "diarize", {}, db_path=db_path)
+
+    def _configure(self, conn):
+        for key, value in [
+            ("diarization_url", URL),
+            ("diarization_api_key", ""),
+            ("diarization_timeout_sec", "30"),
+        ]:
+            conn.execute(
+                "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+                "VALUES (?, ?, 'str', 0, ?)",
+                (key, value, utcnow()),
+            )
+        conn.commit()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_calls_transcribe_not_diarize(self, conn, initialised_db, tmp_path):
+        self._configure(conn)
+        transcribe_route = respx.post(TRANSCRIBE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "text": "one flat transcript",
+                    "segments": [
+                        {"id": 0, "start": 0, "end": 1, "text": "hello"},
+                        {"id": 1, "start": 1, "end": 2, "text": "world"},
+                    ],
+                },
+            )
+        )
+        # The batch diarization endpoint must never be called here -- that's
+        # the entire point of skipping diarization.
+        diarize_route = respx.post(URL).mock(
+            return_value=httpx.Response(200, json={"segments": [], "num_speakers": 0})
+        )
+
+        path = tmp_path / "audio16k.wav"
+        path.write_bytes(b"\x00")
+
+        payload, _ = await diarize_svc.transcribe_flat_file(
+            self._ctx(initialised_db),
+            path,
+            model="vibevoice-cpp-asr",
+            duration_sec=5.0,
+        )
+
+        assert diarize_route.call_count == 0
+        assert transcribe_route.call_count == 1
+        assert payload["num_speakers"] == 1
+        assert [s["id"] for s in payload["speakers"]] == ["SPEAKER"]
+        assert [s["speaker"] for s in payload["segments"]] == ["SPEAKER", "SPEAKER"]
+        assert [s["text"] for s in payload["segments"]] == ["hello", "world"]
+
 
 class TestDiarizeChannelsFile:
     """Integration of the pieces above through the async orchestration."""
@@ -422,3 +503,83 @@ class TestDiarizeChannelsFile:
         speaker_ids = {s["id"] for s in payload["speakers"]}
         assert speaker_ids == {"ME", "ROOM_SPEAKER_00", "ROOM_SPEAKER_01"}
         assert payload["num_speakers"] == 3
+
+
+class TestDiarizeMultiChannelFile:
+    """N-channel generalization: a mix of known (flat) and mixed (diarized) channels."""
+
+    def _ctx(self, db_path) -> JobContext:
+        return JobContext("fake-job", "diarize", {}, db_path=db_path)
+
+    def _configure(self, conn):
+        for key, value in [
+            ("diarization_url", URL),
+            ("diarization_api_key", ""),
+            ("diarization_timeout_sec", "30"),
+        ]:
+            conn.execute(
+                "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+                "VALUES (?, ?, 'str', 0, ?)",
+                (key, value, utcnow()),
+            )
+        conn.commit()
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_three_channels_two_known_one_mixed(self, conn, initialised_db, tmp_path):
+        self._configure(conn)
+        respx.post(TRANSCRIBE_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"text": "hi", "segments": [{"id": 0, "start": 0, "end": 1, "text": "hi"}]},
+            )
+        )
+        diarize_route = respx.post(URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "segments": [
+                        {"id": 0, "speaker": "SPEAKER_00", "start": 0, "end": 1, "text": "a"},
+                        {"id": 1, "speaker": "SPEAKER_01", "start": 1, "end": 2, "text": "b"},
+                    ],
+                    "num_speakers": 2,
+                    "speakers": [
+                        {"id": "SPEAKER_00", "total_speech_duration": 1, "segment_count": 1},
+                        {"id": "SPEAKER_01", "total_speech_duration": 1, "segment_count": 1},
+                    ],
+                },
+            )
+        )
+
+        wavs = [tmp_path / f"ch{i}.wav" for i in range(3)]
+        for wav in wavs:
+            wav.write_bytes(b"\x00")
+
+        meta = [
+            diarize_svc.ChannelMeta(label="Alice", run_diarization=False),
+            diarize_svc.ChannelMeta(label="Bob", run_diarization=False),
+            diarize_svc.ChannelMeta(label=None, run_diarization=True),
+        ]
+
+        payload, _ = await diarize_svc.diarize_multi_channel_file(
+            self._ctx(initialised_db),
+            channel_wavs=wavs,
+            channel_meta=meta,
+            model="vibevoice-cpp-asr",
+            duration_sec=5.0,
+        )
+
+        assert diarize_route.call_count == 1  # only the mixed channel
+        speaker_ids = {s["id"] for s in payload["speakers"]}
+        assert speaker_ids == {"Alice", "Bob", "S2_SPEAKER_00", "S2_SPEAKER_01"}
+        assert payload["num_speakers"] == 4
+
+    @pytest.mark.asyncio
+    async def test_mismatched_lengths_raise(self, initialised_db):
+        with pytest.raises(ValueError):
+            await diarize_svc.diarize_multi_channel_file(
+                self._ctx(initialised_db),
+                channel_wavs=[Path("a.wav")],
+                channel_meta=[],
+                model="vibevoice-cpp-asr",
+            )

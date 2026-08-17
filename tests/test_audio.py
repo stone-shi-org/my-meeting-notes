@@ -182,6 +182,64 @@ class TestSplitStereoChannels:
             )
 
 
+class TestFfmpegCommandMultichannel:
+    def test_ac_matches_the_requested_channel_count(self, tmp_path):
+        cmd = audio_svc.build_ffmpeg_command_multichannel(
+            tmp_path / "in.webm", tmp_path / "out.wav", channels=4
+        )
+        assert cmd[cmd.index("-ac") + 1] == "4"
+        assert cmd[cmd.index("-ar") + 1] == "16000"
+        assert cmd[cmd.index("-c:a") + 1] == "pcm_s16le"
+
+
+class TestSplitChannels:
+    def test_maps_n_channels_by_index_via_pan(self, tmp_path):
+        cmd_holder = {}
+
+        def fake_run(cmd, **kwargs):
+            cmd_holder["cmd"] = cmd
+            return subprocess.CompletedProcess(cmd, returncode=0, stdout="", stderr="")
+
+        dests = [tmp_path / f"ch{i}.wav" for i in range(3)]
+        import unittest.mock as mock
+
+        with mock.patch.object(subprocess, "run", side_effect=fake_run):
+            with pytest.raises(AudioError, match="no output"):
+                # fake_run does not write the files, so this still raises --
+                # the point here is asserting the command shape.
+                audio_svc.split_channels(tmp_path / "in.wav", dests)
+
+        cmd = cmd_holder["cmd"]
+        joined = " ".join(cmd)
+        # No named channel_layout exists for an arbitrary channel count --
+        # pan=mono|c0=cI picks by raw index instead.
+        assert "pan=mono|c0=c0" in joined
+        assert "pan=mono|c0=c1" in joined
+        assert "pan=mono|c0=c2" in joined
+        for dest in dests:
+            assert str(dest) in cmd
+
+    def test_timeout_raises(self, tmp_path, monkeypatch):
+        def fake_run(*args, **kwargs):
+            raise subprocess.TimeoutExpired(cmd="ffmpeg", timeout=1)
+
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        with pytest.raises(AudioError, match="timed out"):
+            audio_svc.split_channels(
+                tmp_path / "in.wav", [tmp_path / "a.wav", tmp_path / "b.wav"]
+            )
+
+
+class TestPadAndMergeChannels:
+    def test_rejects_mismatched_list_lengths(self, tmp_path):
+        with pytest.raises(ValueError):
+            audio_svc.pad_and_merge_channels(
+                [(tmp_path / "a.wav", 0.0)],
+                [tmp_path / "a-out.wav", tmp_path / "b-out.wav"],
+                tmp_path / "merged.wav",
+            )
+
+
 class TestExtensions:
     @pytest.mark.parametrize("name", ["a.wav", "a.MP3", "recording.m4a", "x.qta", "y.opus"])
     def test_accepted(self, name):
@@ -302,3 +360,78 @@ class TestRealFfmpeg:
         # own un-trimmed Opus pre-skip, adding a few milliseconds per splice.
         # Truncation to ~single_duration is the regression this guards against.
         assert combined_duration > single_duration * 1.9
+
+    def _make_multichannel_wav(self, path, values: list[int], frames: int = 8000):
+        import struct
+        import wave
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(len(values))
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(
+                b"".join(struct.pack(f"<{len(values)}h", *values) for _ in range(frames))
+            )
+
+    def _peak(self, path) -> int:
+        import struct
+        import wave
+
+        with wave.open(str(path), "rb") as w:
+            raw = w.readframes(w.getnframes())
+        values = struct.unpack(f"<{len(raw) // 2}h", raw)
+        return max(abs(v) for v in values) if values else 0
+
+    def test_split_channels_preserves_order_for_n_channels(self, tmp_path):
+        """Three channels, loud on exactly one each -- split_channels must
+        not swap, sum, or drop any of them (the same regression
+        test_channel_zero_and_one_are_not_swapped guards for N=2)."""
+        src = tmp_path / "three_channel.wav"
+        self._make_multichannel_wav(src, [20000, 0, 0])
+
+        dests = [tmp_path / f"ch{i}.wav" for i in range(3)]
+        audio_svc.split_channels(src, dests)
+
+        assert self._peak(dests[0]) > 10000
+        assert self._peak(dests[1]) < 1000
+        assert self._peak(dests[2]) < 1000
+
+    def test_pad_and_merge_channels_aligns_offsets(self, tmp_path):
+        """A shorter, later-starting source and a longer, immediate one --
+        every output channel must land at the same total length, and the
+        offset source's audio must not start until after its silence."""
+        short = tmp_path / "short.wav"
+        long_ = tmp_path / "long.wav"
+        self._make_mono_wav(short, value=20000, frames=8000)  # 0.5s @16kHz
+        self._make_mono_wav(long_, value=20000, frames=24000)  # 1.5s @16kHz
+
+        dest_channels = [tmp_path / "padded0.wav", tmp_path / "padded1.wav"]
+        merged = tmp_path / "merged.wav"
+        audio_svc.pad_and_merge_channels(
+            [(short, 2.0), (long_, 0.0)], dest_channels, merged
+        )
+
+        for dest in [*dest_channels, merged]:
+            info = audio_svc.probe(dest)
+            assert info.duration_sec == pytest.approx(2.5, abs=0.05)
+        assert audio_svc.probe(merged).channels == 2
+
+        # The first 2 seconds of the offset (short) channel must be silence,
+        # not the tone -- adelay applied, not skipped.
+        import struct
+        import wave
+
+        with wave.open(str(dest_channels[0]), "rb") as w:
+            leading = w.readframes(int(1.0 * 16000))
+        leading_values = struct.unpack(f"<{len(leading) // 2}h", leading)
+        assert max(abs(v) for v in leading_values) < 1000
+
+    def _make_mono_wav(self, path, value: int, frames: int):
+        import struct
+        import wave
+
+        with wave.open(str(path), "wb") as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(16000)
+            w.writeframes(struct.pack("<h", value) * frames)
