@@ -42,8 +42,20 @@ const SOURCES: { id: Source; label: string; icon: typeof Mic }[] = [
  * audio" checkbox. Twenty bars that never move say so in the first two seconds
  * rather than after the meeting.
  */
-function LevelMeter({ level, active }: { level: number; active: boolean }) {
-  const bars = 20;
+function LevelMeter({
+  level,
+  active,
+  label = 'Input level',
+  bars = 20,
+}: {
+  level: number;
+  active: boolean;
+  /** Overrides the default aria-label -- used when two meters are on screen
+   * at once and "Input level" would no longer say which one this is. */
+  label?: string;
+  /** Fewer bars when two meters share the row that used to hold one. */
+  bars?: number;
+}) {
   const lit = Math.round(level * bars);
   return (
     <div
@@ -52,7 +64,7 @@ function LevelMeter({ level, active }: { level: number; active: boolean }) {
       aria-valuenow={Math.round(level * 100)}
       aria-valuemin={0}
       aria-valuemax={100}
-      aria-label="Input level"
+      aria-label={label}
     >
       {Array.from({ length: bars }).map((_, i) => (
         <span
@@ -69,6 +81,40 @@ function LevelMeter({ level, active }: { level: number; active: boolean }) {
           )}
         />
       ))}
+    </div>
+  );
+}
+
+/**
+ * One meter, or two side by side when the recording is keeping mic and room
+ * on separate channels (`recorder.mixing` -- see useRecorder). A single
+ * merged meter there would report whichever side is momentarily louder and
+ * hide a genuinely silent one behind it -- the "missed the share-tab-audio
+ * checkbox" failure this panel exists to catch, just on the room side
+ * instead of the mic side.
+ */
+function LevelMeters({
+  level,
+  levelRoom,
+  mixing,
+  active,
+}: {
+  level: number;
+  levelRoom: number;
+  mixing: boolean;
+  active: boolean;
+}) {
+  if (!mixing) return <LevelMeter level={level} active={active} />;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs text-fg-subtle">You</span>
+        <LevelMeter level={level} active={active} label="Your microphone level" bars={12} />
+      </div>
+      <div className="flex items-center gap-1.5">
+        <span className="text-xs text-fg-subtle">Room</span>
+        <LevelMeter level={levelRoom} active={active} label="Room audio level" bars={12} />
+      </div>
     </div>
   );
 }
@@ -428,7 +474,12 @@ export function RecorderPanel({
               />
               {recorder.elapsed}
             </span>
-            <LevelMeter level={recorder.level} active={recorder.phase === 'recording'} />
+            <LevelMeters
+              level={recorder.level}
+              levelRoom={recorder.levelRoom}
+              mixing={recorder.mixing}
+              active={recorder.phase === 'recording'}
+            />
           </>
         )}
       </div>
