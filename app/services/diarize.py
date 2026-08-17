@@ -15,6 +15,7 @@ progress, so a heartbeat task synthesises one from the audio duration.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -32,6 +33,24 @@ log = get_logger("diarize")
 # is worse than an honest one that stalls at 95%.
 PROGRESS_CEILING = 0.95
 HEARTBEAT_INTERVAL_SEC = 5.0
+
+# Some ASR backends leak a BCP-47-looking language tag into the transcribed
+# text itself -- confirmed on parakeet-cpp-nemotron-3.5-asr-streaming-0.6b,
+# which appends e.g. "<en-US>" to what it transcribes. Not a real bracketed
+# non-speech marker like "[Music]" (see transcript.is_non_speech): that
+# classifies a *whole* segment, this strips a substring out of otherwise-real
+# speech, so the two must not be merged into one check. Lowercase language,
+# optional uppercase region -- the exact casing BCP-47 uses, and not one a
+# meeting about markup literally saying "the div tag" would happen to
+# produce -- keeps this narrow rather than eating unrelated bracketed asides.
+_LANGUAGE_TAG_RE = re.compile(r"\s*<[a-z]{2,3}(?:-[A-Z]{2,4})?>")
+
+
+def strip_language_tag(text: str) -> str:
+    """Remove a stray "<en-US>"-style tag the model appended to its own
+    output. Safe to call on any segment text, tagged or not -- a no-op when
+    there is nothing to strip."""
+    return _LANGUAGE_TAG_RE.sub("", text or "").strip()
 
 
 def build_form(model: str) -> dict[str, str]:

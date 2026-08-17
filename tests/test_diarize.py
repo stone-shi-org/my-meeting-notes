@@ -205,6 +205,38 @@ class TestTranscriptionsUrl:
         assert diarize_svc.transcriptions_url(odd) == odd
 
 
+class TestStripLanguageTag:
+    """The parakeet-cpp-nemotron-3.5-asr-streaming-0.6b quirk: a stray
+    "<en-US>"-style tag appended to the model's own transcribed text."""
+
+    def test_strips_a_trailing_language_tag(self):
+        text = "And once they have these tools, they play with it without go back and forth. <en-US>"
+        assert diarize_svc.strip_language_tag(text) == (
+            "And once they have these tools, they play with it without go back and forth."
+        )
+
+    def test_strips_without_a_leading_space(self):
+        assert diarize_svc.strip_language_tag("Hello there<en-US>") == "Hello there"
+
+    def test_leaves_ordinary_text_alone(self):
+        assert diarize_svc.strip_language_tag("Let's sync tomorrow.") == "Let's sync tomorrow."
+
+    def test_leaves_a_real_bracketed_non_speech_marker_alone(self):
+        # Different problem, different shape -- see transcript.is_non_speech.
+        # Uppercase content and no dash-region shape, so this must not match.
+        assert diarize_svc.strip_language_tag("[Music]") == "[Music]"
+
+    def test_none_and_empty_are_safe(self):
+        assert diarize_svc.strip_language_tag("") == ""
+        assert diarize_svc.strip_language_tag(None) == ""
+
+    def test_does_not_eat_an_unrelated_bracketed_aside(self):
+        # Uppercase "DIV" (or any non-language-code-shaped content) must
+        # survive -- only the specific lowercase-language/uppercase-region
+        # BCP-47 shape is stripped.
+        assert diarize_svc.strip_language_tag("check the <DIV> tag") == "check the <DIV> tag"
+
+
 class TestTranscribeSync:
     """The plain-ASR client used for a channel already known to be one speaker."""
 

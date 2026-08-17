@@ -11,10 +11,13 @@ window/interval cycle.
 
 from __future__ import annotations
 
+import httpx
 import pytest
+import respx
 from starlette.websockets import WebSocketDisconnect
 
 from app.db import utcnow
+from app.routers import live_caption
 
 
 class TestAuth:
@@ -54,3 +57,30 @@ class TestFeatureFlag:
         # helpers) rather than a slow, timing-sensitive test here.
         with admin_client.websocket_connect("/api/live-caption/ws"):
             pass
+
+
+class TestTranscribeWindow:
+    """_transcribe_window's SSE parsing. strip_language_tag's own regex is
+    unit-tested in test_diarize.py; this only checks it is actually wired
+    into the committed text, not just available."""
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_a_language_tag_is_stripped_from_the_committed_text(self):
+        url = "http://asr.test/v1/audio/transcriptions"
+        respx.post(url).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text=(
+                    'data: {"type":"transcript.text.delta","delta":"Hello"}\n\n'
+                    'data: {"type":"transcript.text.done","text":"Hello there. <en-US>"}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+            )
+        )
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, url, "some-model", None, b"\x00\x00" * 100
+            )
+        assert text == "Hello there."

@@ -45,7 +45,7 @@ from app.config import effective, get_settings
 from app.db import get_conn
 from app.logging_config import get_logger
 from app.services import users as users_svc
-from app.services.diarize import _headers, transcriptions_url
+from app.services.diarize import _headers, strip_language_tag, transcriptions_url
 
 log = get_logger("live_caption")
 
@@ -149,7 +149,7 @@ async def _transcribe_window(
                 chunk = json.loads(sse.data)
                 if chunk.get("type") == "transcript.text.done":
                     text = chunk.get("text") or ""
-            return text
+            return strip_language_tag(text)
     except (httpx.HTTPError, SSEError, ValueError) as exc:
         # ValueError alongside the transport errors: a non-JSON SSE data line
         # (json.loads above) is the same "drop this window, keep going" case

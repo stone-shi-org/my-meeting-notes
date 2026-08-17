@@ -13,6 +13,7 @@ import re
 import sqlite3
 
 from app.errors import NotFoundError, ValidationError
+from app.services.diarize import strip_language_tag
 
 # Whole-segment markers the diarizer emits for non-speech. A segment that merely
 # contains a bracketed aside is still speech and is never filtered.
@@ -134,7 +135,12 @@ def build_transcript(
 
     segments = []
     for seg in raw_segments:
-        text = seg.get("text") or ""
+        # Applied at render time, same as speaker renames above -- the
+        # stored raw_json stays exactly what the model returned; only what
+        # gets shown/exported is cleaned. See strip_language_tag's doc
+        # comment for why this is a substring strip, not the whole-segment
+        # is_non_speech check just below.
+        text = strip_language_tag(seg.get("text") or "")
         non_speech = is_non_speech(text)
         if non_speech and not include_nonspeech:
             continue
