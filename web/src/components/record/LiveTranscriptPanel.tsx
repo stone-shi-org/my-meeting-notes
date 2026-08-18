@@ -101,17 +101,35 @@ export function LiveTranscriptPanel({
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
   const groups = useMemo(() => groupCaptions(captions), [captions]);
 
   useEffect(() => {
     localStorage.setItem(AUTO_SCROLL_KEY, autoScroll ? '1' : '0');
   }, [autoScroll]);
 
+  // Watches the *content*'s height, not the captions array: a new caption
+  // arriving is one height change, but StreamedText growing an existing
+  // bubble word by word (see above) is a run of further ones with no new
+  // caption behind them. Re-running only on `captions` (the original
+  // version) stuck to the bottom for whichever bubble had just arrived,
+  // then never again -- every word that bubble typed out afterward grew
+  // the page below the fold, so the newest text stayed permanently hidden
+  // until the *next* caption happened to drag the scroll back down.
   useEffect(() => {
-    if (!autoScroll) return;
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
-  }, [captions, autoScroll]);
+    const container = scrollRef.current;
+    const content = contentRef.current;
+    if (!autoScroll || !container || !content) return;
+
+    const stickToBottom = () => {
+      container.scrollTop = container.scrollHeight;
+    };
+    stickToBottom();
+
+    const observer = new ResizeObserver(stickToBottom);
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [autoScroll]);
 
   const labelFor = (channel: 'me' | 'room') => labels[channel].trim() || DEFAULT_LABELS[channel];
 
@@ -191,63 +209,65 @@ export function LiveTranscriptPanel({
       </label>
 
       <div ref={scrollRef} className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
-        {captions.length === 0 ? (
-          <p className="text-sm text-fg-faint">
-            {enabled
-              ? 'Waiting for speech…'
-              : 'Turn on "Show live captions" and start recording to see a running transcript here.'}
-          </p>
-        ) : (
-          <ul className="space-y-3 text-sm">
-            {groups.map((g, gi) => {
-              const isMe = g.channel === 'me';
-              const avatar = (
-                <span
-                  aria-hidden
-                  className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
-                  style={{
-                    ...speakerVars(g.channel),
-                    backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
-                    color: 'var(--sp-ink)',
-                  }}
-                >
-                  {initials(labelFor(g.channel))}
-                </span>
-              );
-              return (
-                <li
-                  key={`${g.parts[0].at}-${g.channel}-${gi}`}
-                  className={cn('flex items-end gap-2', isMe ? 'flex-row-reverse' : 'flex-row')}
-                >
-                  {avatar}
-                  <div
-                    className={cn(
-                      'max-w-[85%] rounded-2xl px-3 py-2',
-                      isMe ? 'bg-primary-soft text-primary-soft-fg' : 'bg-surface-2',
-                    )}
+        <div ref={contentRef}>
+          {captions.length === 0 ? (
+            <p className="text-sm text-fg-faint">
+              {enabled
+                ? 'Waiting for speech…'
+                : 'Turn on "Show live captions" and start recording to see a running transcript here.'}
+            </p>
+          ) : (
+            <ul className="space-y-3 text-sm">
+              {groups.map((g, gi) => {
+                const isMe = g.channel === 'me';
+                const avatar = (
+                  <span
+                    aria-hidden
+                    className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
+                    style={{
+                      ...speakerVars(g.channel),
+                      backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
+                      color: 'var(--sp-ink)',
+                    }}
                   >
-                    <p
+                    {initials(labelFor(g.channel))}
+                  </span>
+                );
+                return (
+                  <li
+                    key={`${g.parts[0].at}-${g.channel}-${gi}`}
+                    className={cn('flex items-end gap-2', isMe ? 'flex-row-reverse' : 'flex-row')}
+                  >
+                    {avatar}
+                    <div
                       className={cn(
-                        'text-xs font-medium',
-                        isMe ? 'text-primary-soft-fg/80' : 'text-fg-subtle',
+                        'max-w-[85%] rounded-2xl px-3 py-2',
+                        isMe ? 'bg-primary-soft text-primary-soft-fg' : 'bg-surface-2',
                       )}
                     >
-                      {labelFor(g.channel)}
-                    </p>
-                    <p className={cn('mt-0.5', isMe ? '' : 'text-fg-muted')}>
-                      {g.parts.map((p, pi) => (
-                        <span key={`${p.at}-${pi}`}>
-                          {pi > 0 && ' '}
-                          <StreamedText text={p.text} />
-                        </span>
-                      ))}
-                    </p>
-                  </div>
-                </li>
-              );
-            })}
-          </ul>
-        )}
+                      <p
+                        className={cn(
+                          'text-xs font-medium',
+                          isMe ? 'text-primary-soft-fg/80' : 'text-fg-subtle',
+                        )}
+                      >
+                        {labelFor(g.channel)}
+                      </p>
+                      <p className={cn('mt-0.5', isMe ? '' : 'text-fg-muted')}>
+                        {g.parts.map((p, pi) => (
+                          <span key={`${p.at}-${pi}`}>
+                            {pi > 0 && ' '}
+                            <StreamedText text={p.text} />
+                          </span>
+                        ))}
+                      </p>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
       </div>
     </Card>
   );
