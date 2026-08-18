@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Badge, Card, Input } from '@/components/ui/primitives';
 import type { Caption } from '@/hooks/useLiveCaption';
 import { cn } from '@/lib/cn';
@@ -7,10 +7,74 @@ import { initials, speakerVars } from '@/lib/speakerColors';
 const DEFAULT_LABELS: Record<'me' | 'room', string> = { me: 'You', room: 'Room' };
 const AUTO_SCROLL_KEY = 'mmn.liveTranscriptAutoScroll';
 
+/** How fast a freshly-arrived chunk types itself out. Each ASR call commits
+ * a whole window's text at once (see live_caption.py) -- there is no real
+ * per-word stream to relay -- so this is a cosmetic reveal on top of an
+ * already-final string, tuned to comfortably finish before the next window
+ * lands (interval_sec defaults to 3s) rather than to match true speaking
+ * pace, which would still be catching up when the next chunk arrives. */
+const STREAM_MS_PER_WORD = 70;
+
 /**
- * The bigger, left-hand panel of the wide recorder layout: a disposable,
- * auto-scrolling draft of what's being said, with room to also rename the
- * two channels while you're on the call.
+ * One already-final caption, revealed word by word on mount instead of all
+ * at once -- Meet-style "streaming" captions, faked on top of chunky
+ * delivery. `text` is immutable for the lifetime of one Caption (see
+ * useLiveCaption -- captions are only ever appended, never edited), so this
+ * only ever animates once, right when its <li> first mounts; a caption that
+ * scrolled by earlier keeps whatever it already revealed; no replay.
+ */
+function StreamedText({ text }: { text: string }) {
+  const words = useMemo(() => text.split(/\s+/).filter(Boolean), [text]);
+  const [count, setCount] = useState(0);
+
+  useEffect(() => {
+    if (words.length === 0) return;
+    let n = 0;
+    const id = window.setInterval(() => {
+      n += 1;
+      setCount(n);
+      if (n >= words.length) window.clearInterval(id);
+    }, STREAM_MS_PER_WORD);
+    return () => window.clearInterval(id);
+    // words is a fresh array each render, but its *contents* are fixed for
+    // the lifetime of this text -- re-running on identity would restart the
+    // reveal on every unrelated re-render of the parent list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  return <>{words.slice(0, count).join(' ')}</>;
+}
+
+interface CaptionGroup {
+  channel: 'me' | 'room';
+  parts: Caption[];
+}
+
+/**
+ * Consecutive same-channel captions collapse into one conversational block
+ * instead of one line per ASR call -- a channel that just keeps talking
+ * produces a new caption every interval_sec, and repeating its name on
+ * every single one read as a wall of "Room: ... / Room: ... / Room: ..."
+ * rather than the one continuous thing actually being said. A channel
+ * *switch* still starts a new group -- that boundary is the one that means
+ * something (an actual turn, not a polling artifact).
+ */
+function groupCaptions(captions: Caption[]): CaptionGroup[] {
+  const groups: CaptionGroup[] = [];
+  for (const c of captions) {
+    const last = groups[groups.length - 1];
+    if (last && last.channel === c.channel) last.parts.push(c);
+    else groups.push({ channel: c.channel, parts: [c] });
+  }
+  return groups;
+}
+
+/**
+ * The bigger panel of the wide recorder layout (right column, next to the
+ * controls -- see RecorderPanel): a disposable, auto-scrolling draft of
+ * what's being said, laid out like a chat -- "you" on the right, the other
+ * side on the left -- with room to also rename the two channels while
+ * you're on the call.
  *
  * Takes captions rather than opening its own useLiveCaption connection --
  * RecorderPanel owns the one websocket and hands the same array to
@@ -37,6 +101,7 @@ export function LiveTranscriptPanel({
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
   const scrollRef = useRef<HTMLDivElement>(null);
+  const groups = useMemo(() => groupCaptions(captions), [captions]);
 
   useEffect(() => {
     localStorage.setItem(AUTO_SCROLL_KEY, autoScroll ? '1' : '0');
@@ -133,15 +198,54 @@ export function LiveTranscriptPanel({
               : 'Turn on "Show live captions" and start recording to see a running transcript here.'}
           </p>
         ) : (
-          <ul className="space-y-1.5 text-sm">
-            {captions.map((c, i) => (
-              <li key={`${c.at}-${c.channel}-${i}`} style={speakerVars(c.channel)}>
-                <span className="font-medium" style={{ color: 'var(--sp-ink)' }}>
-                  {labelFor(c.channel)}:
-                </span>{' '}
-                <span className="text-fg-muted">{c.text}</span>
-              </li>
-            ))}
+          <ul className="space-y-3 text-sm">
+            {groups.map((g, gi) => {
+              const isMe = g.channel === 'me';
+              const avatar = (
+                <span
+                  aria-hidden
+                  className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
+                  style={{
+                    ...speakerVars(g.channel),
+                    backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
+                    color: 'var(--sp-ink)',
+                  }}
+                >
+                  {initials(labelFor(g.channel))}
+                </span>
+              );
+              return (
+                <li
+                  key={`${g.parts[0].at}-${g.channel}-${gi}`}
+                  className={cn('flex items-end gap-2', isMe ? 'flex-row-reverse' : 'flex-row')}
+                >
+                  {avatar}
+                  <div
+                    className={cn(
+                      'max-w-[85%] rounded-2xl px-3 py-2',
+                      isMe ? 'bg-primary-soft text-primary-soft-fg' : 'bg-surface-2',
+                    )}
+                  >
+                    <p
+                      className={cn(
+                        'text-xs font-medium',
+                        isMe ? 'text-primary-soft-fg/80' : 'text-fg-subtle',
+                      )}
+                    >
+                      {labelFor(g.channel)}
+                    </p>
+                    <p className={cn('mt-0.5', isMe ? '' : 'text-fg-muted')}>
+                      {g.parts.map((p, pi) => (
+                        <span key={`${p.at}-${pi}`}>
+                          {pi > 0 && ' '}
+                          <StreamedText text={p.text} />
+                        </span>
+                      ))}
+                    </p>
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
       </div>
