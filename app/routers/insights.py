@@ -10,7 +10,6 @@ the event loop -- same as settings_api.py's /llm/test.
 from __future__ import annotations
 
 import sqlite3
-from typing import Literal
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
@@ -22,7 +21,10 @@ router = APIRouter(prefix="/api/insights", tags=["insights"])
 
 
 class InsightsAnalyzeRequest(BaseModel):
-    meeting_type: Literal["interview", "general"]
+    # An insight_types.slug -- no longer a fixed Literal now that the list is
+    # admin-extensible (see app/services/insight_types.py). An unknown slug
+    # 404s out of insights_svc.analyze rather than failing validation here.
+    meeting_type: str = Field(min_length=1, max_length=100)
     # Trimmed further server-side (see insights_svc.MAX_TRANSCRIPT_CHARS);
     # bounded here mainly so a runaway client can't post an arbitrarily large
     # body.

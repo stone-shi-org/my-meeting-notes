@@ -7,6 +7,13 @@ export interface Caption {
   at: number;
 }
 
+/** Mirrors app/routers/live_caption.py's channel_worker states, pushed over
+ * the same socket as `{"type": "status", channel, state}` -- purely for the
+ * recorder UI's activity dot next to each level meter. */
+export type ActivityState = 'idle' | 'buffering' | 'calling' | 'reading';
+
+const DEFAULT_ACTIVITY: Record<'me' | 'room', ActivityState> = { me: 'idle', room: 'idle' };
+
 const SAMPLE_RATE = 16000;
 // Native render quantum is 128 samples (~2.7 ms at 16 kHz) -- far too small
 // to send one websocket message per callback. Batch to a quarter second: a
@@ -41,10 +48,12 @@ const MAX_CAPTIONS = 2000;
 export function useLiveCaption(streams: LiveStreams, enabled: boolean, language: string) {
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [connected, setConnected] = useState(false);
+  const [activity, setActivity] = useState(DEFAULT_ACTIVITY);
 
   useEffect(() => {
     if (!enabled || (!streams.room && !streams.me)) {
       setConnected(false);
+      setActivity(DEFAULT_ACTIVITY);
       return;
     }
 
@@ -58,7 +67,10 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       if (!cancelled) setConnected(true);
     };
     ws.onclose = () => {
-      if (!cancelled) setConnected(false);
+      if (!cancelled) {
+        setConnected(false);
+        setActivity(DEFAULT_ACTIVITY);
+      }
     };
     ws.onerror = () => {
       if (!cancelled) setConnected(false);
@@ -73,6 +85,12 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
               -MAX_CAPTIONS,
             ),
           );
+        } else if (
+          msg?.type === 'status' &&
+          (msg.channel === 'me' || msg.channel === 'room') &&
+          ['idle', 'buffering', 'calling', 'reading'].includes(msg.state)
+        ) {
+          setActivity((prev) => ({ ...prev, [msg.channel]: msg.state as ActivityState }));
         }
       } catch {
         // A malformed message is not worth surfacing -- this is a disposable
@@ -166,5 +184,5 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     // practice it never changes mid-connection.
   }, [streams.room, streams.me, enabled, language]);
 
-  return { captions, connected };
+  return { captions, connected, activity };
 }

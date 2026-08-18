@@ -1,6 +1,6 @@
 import { FileAudio, Mic, Plus, Trash2, Upload, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
-import { RecorderPanel, type RoomSpeakers } from '@/components/record/RecorderPanel';
+import { RecorderPanel } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select } from '@/components/ui/primitives';
 import type { ChannelMap } from '@/hooks/useRecorder';
@@ -47,8 +47,6 @@ export interface FileMeta {
    * channels. Always null for an uploaded file -- there is no capture graph
    * to have split anything. */
   channelMap: ChannelMap;
-  /** Only meaningful alongside channelMap; see RecorderPanel's selector. */
-  roomSpeakers: RoomSpeakers;
   /** Set only for an upload with more than one speaker source; see
    * MultiSourceUpload. `file` (the first onFile argument) is still that
    * upload's first/primary file -- multi.files is the *rest*, matching the
@@ -60,7 +58,6 @@ const EMPTY_META: FileMeta = {
   recorded: false,
   durationSec: 0,
   channelMap: null,
-  roomSpeakers: 'multiple',
   multi: null,
 };
 
@@ -301,8 +298,8 @@ export function AudioInput({
           layout={recorderLayout}
           rightExtra={rightExtra}
           onLiveChange={setRecordingLive}
-          onRecorded={(next, durationSec, channelMap, roomSpeakers) =>
-            onFile(next, { recorded: true, durationSec, channelMap, roomSpeakers })
+          onRecorded={(next, durationSec, channelMap) =>
+            onFile(next, { recorded: true, durationSec, channelMap })
           }
         />
       )}

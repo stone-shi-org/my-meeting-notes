@@ -15,6 +15,7 @@ import { LoginPage } from '@/pages/LoginPage';
 import { NewMeetingPage } from '@/pages/NewMeetingPage';
 import {
   DiarizationSettingsPage,
+  InsightTypesSettingsPage,
   IntegrationsSettingsPage,
   LiveCaptionsSettingsPage,
   LlmSettingsPage,
@@ -93,6 +94,7 @@ export function App() {
                           has dev data off; the tab is hidden there anyway. */}
                       <Route path="development" element={<DevDataPanel />} />
                       <Route element={<RequireAdmin />}>
+                        <Route path="insight-types" element={<InsightTypesSettingsPage />} />
                         <Route path="users" element={<UsersSettingsPage />} />
                       </Route>
                     </Route>

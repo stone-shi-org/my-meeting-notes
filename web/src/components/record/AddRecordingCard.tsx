@@ -1,7 +1,6 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AudioInput, type FileMeta, type MultiSourceUpload } from '@/components/record/AudioInput';
-import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label } from '@/components/ui/primitives';
 import { watchJob } from '@/hooks/useJob';
@@ -22,7 +21,6 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [channelMap, setChannelMap] = useState<ChannelMap>(null);
-  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [multi, setMulti] = useState<MultiSourceUpload | null>(null);
   const [speakerNames, setSpeakerNames] = useState('');
   const [autoSummarize, setAutoSummarize] = useState(true);
@@ -50,7 +48,6 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
     if (channelMap) {
       form.append('channel_map', channelMap);
-      form.append('room_speakers', roomSpeakers);
     }
     form.append('skip_diarization', String(skipDiarization));
     if (multi) {
@@ -99,7 +96,6 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
           onFile={(next: File | null, meta: FileMeta) => {
             setFile(next);
             setChannelMap(meta.channelMap);
-            setRoomSpeakers(meta.roomSpeakers);
             setMulti(meta.multi ?? null);
           }}
           progress={progress}

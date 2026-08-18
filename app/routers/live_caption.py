@@ -27,6 +27,13 @@ route and the batch route on the same LocalAI instance have been observed
 to behave very differently under load for the same model, so an operator
 needs to be able to point this feature at a more reliable one without
 touching what batch diarization uses.
+
+Besides ``{"type": "caption", ...}`` messages, each channel_worker also
+pushes ``{"type": "status", "channel": ..., "state": ...}`` on every state
+change -- idle (nothing worth sending) -> buffering (real audio, waiting on
+_ASR_CONCURRENCY's one slot) -> calling (request sent) -> reading (SSE
+stream started) -> idle again. Purely cosmetic (the recorder UI's activity
+dot, see useLiveCaption.ts); nothing here or downstream reads it back.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ import asyncio
 import io
 import json
 import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
 import httpx
@@ -150,6 +158,19 @@ def _wav_bytes(pcm: bytes) -> bytes:
     return buf.getvalue()
 
 
+async def _send_status(websocket: WebSocket, channel: str, state: str) -> None:
+    """Best-effort activity signal for the recorder UI's per-channel dot
+    (idle/buffering/calling/reading -- see channel_worker's call sites).
+    Same swallow-everything policy as the caption send below it: a dropped
+    status update is invisible to the user, and letting it raise would kill
+    channel_worker over something that was never essential to begin with.
+    """
+    try:
+        await websocket.send_json({"type": "status", "channel": channel, "state": state})
+    except Exception:
+        pass
+
+
 async def _transcribe_window(
     client: httpx.AsyncClient,
     url: str,
@@ -157,10 +178,16 @@ async def _transcribe_window(
     api_key: str | None,
     pcm: bytes,
     language: str | None = None,
+    on_reading: Callable[[], Awaitable[None]] | None = None,
 ) -> str:
     """One rolling-window call. Returns the committed text, or '' on any
     failure -- a dropped caption is invisible to the user; raising would
     kill the whole live session over one bad window.
+
+    ``on_reading``, when given, fires once the response is confirmed good
+    and we're about to start consuming the SSE stream -- the "reading" state
+    in channel_worker's activity dot. Only meaningful on the happy path: a
+    rejected or errored call never gets far enough to call it.
 
     ``language`` is omitted entirely when unset, which leaves per-window
     auto-detection on -- the default, and the right one for a genuinely
@@ -188,6 +215,8 @@ async def _transcribe_window(
                     "live caption window rejected: %s", event_source.response.status_code
                 )
                 return ""
+            if on_reading is not None:
+                await on_reading()
             text = ""
             async for sse in event_source.aiter_sse():
                 if sse.data == "[DONE]":
@@ -269,9 +298,17 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     async with buf.lock:
                         pcm = buf.window_bytes(window_sec)
                     if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
+                        await _send_status(websocket, name, "idle")
                         continue
                     if _peak_amplitude(pcm) < SILENCE_PEAK_THRESHOLD:
+                        await _send_status(websocket, name, "idle")
                         continue
+
+                    # Real audio, gates cleared -- "buffering" covers the
+                    # (usually brief) wait for _ASR_CONCURRENCY's one slot,
+                    # which the other channel or another session's worker may
+                    # currently hold.
+                    await _send_status(websocket, name, "buffering")
 
                     # Serialized across every channel and every session --
                     # see _ASR_CONCURRENCY's doc comment -- not just this
@@ -280,9 +317,17 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     # itself queues behind whichever other channel/session
                     # got there first.
                     async with _ASR_CONCURRENCY:
+                        await _send_status(websocket, name, "calling")
                         text = await _transcribe_window(
-                            client, url, model, api_key or None, pcm, language or None
+                            client,
+                            url,
+                            model,
+                            api_key or None,
+                            pcm,
+                            language or None,
+                            on_reading=lambda: _send_status(websocket, name, "reading"),
                         )
+                    await _send_status(websocket, name, "idle")
                     if not text.strip():
                         continue
                 except Exception:
@@ -293,6 +338,7 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     # letting an exception escape ends live captions for the
                     # rest of the recording with nothing visible to the user.
                     log.exception("live caption window for %s crashed", name)
+                    await _send_status(websocket, name, "idle")
                     continue
 
                 try:

@@ -2,7 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Caption } from './useLiveCaption';
 
-export type MeetingType = 'interview' | 'general';
+/** A meeting-type slug (see app/services/insight_types.py) -- no longer a
+ * fixed union now that the list is admin-extensible from Settings ->
+ * Meeting types. What shape the response takes is `kind`, passed alongside
+ * it, not derived from the slug string. */
+export type InsightKind = 'topics' | 'questions';
 
 export interface InsightItem {
   question: string;
@@ -47,7 +51,8 @@ function renderTranscript(captions: Caption[]): string {
  */
 export function useInsights(
   captions: Caption[],
-  meetingType: MeetingType,
+  meetingType: string,
+  kind: InsightKind,
   enabled: boolean,
   intervalSec: number = DEFAULT_INSIGHTS_INTERVAL_SEC,
 ) {
@@ -95,7 +100,7 @@ export function useInsights(
         if (cancelled) return;
         previousRef.current = result;
         setError(null);
-        if (meetingType === 'interview') setItems(result.items ?? []);
+        if (kind === 'questions') setItems(result.items ?? []);
         else setTopics(result.topics ?? []);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Insights call failed');
@@ -111,7 +116,7 @@ export function useInsights(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [enabled, meetingType, intervalSec]);
+  }, [enabled, meetingType, kind, intervalSec]);
 
   return { items, topics, error, loading };
 }

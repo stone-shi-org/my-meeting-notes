@@ -1,8 +1,10 @@
 """Live insights over an in-progress recording's rolling transcript.
 
-Two meeting types, two prompts (see app/prompts/insights_*_prompt.md), one
-call shape: hand back whatever the model returned last time plus the
-transcript so far, get back the same shape grown by whatever's new.
+Meeting types are rows in insight_types (see app/services/insight_types.py
+and db.py's SCHEMA), each with its own prompt and output ``kind`` -- a
+running topic list ('topics') or a question/answer list ('questions'). One
+call shape either way: hand back whatever the model returned last time plus
+the transcript so far, get back the same shape grown by whatever's new.
 
 Deliberately stateless on the server, the same reasoning as live captions:
 there is often no meeting row yet (a recording exists before Stop; a meeting
@@ -18,21 +20,17 @@ import sqlite3
 
 from app.config import effective
 from app.errors import ValidationError
+from app.services import insight_types as insight_types_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 
-# A live transcript only grows. Both prompts only need enough trailing
+# A live transcript only grows. Every prompt only needs enough trailing
 # context to place a new question or topic shift against what came just
 # before it -- an unbounded transcript would eventually blow the model's
 # context window and make calls slower the longer a session runs.
 MAX_TRANSCRIPT_CHARS = 12_000
 
 MAX_OUTPUT_TOKENS = 1500
-
-_PROMPT_NAMES = {
-    "interview": "insights_interview_prompt",
-    "general": "insights_general_prompt",
-}
 
 
 def analyze(
@@ -41,9 +39,11 @@ def analyze(
     transcript: str,
     previous: dict | None,
 ) -> dict:
-    prompt_name = _PROMPT_NAMES.get(meeting_type)
-    if prompt_name is None:
-        raise ValidationError(f"Unknown meeting type: {meeting_type!r}")
+    # meeting_type is an insight_types.slug -- get_type raises NotFoundError
+    # for an unknown one (404, not 400: same "doesn't exist" convention as
+    # every other lookup-by-id in this app).
+    type_row = insight_types_svc.get_type(conn, meeting_type)
+    kind = type_row["kind"]
 
     model = effective(conn, "insights_model")
     if not model:
@@ -52,7 +52,10 @@ def analyze(
         )
 
     config = llm_svc.LLMConfig.from_db(conn, model_override=model)
-    prompt = prompts_svc.load(prompt_name)
+    # load_override, not load(name): the prompt text is this row's own
+    # `prompt` column, not a file on disk -- see insight_types_svc's module
+    # docstring for why that table exists at all.
+    prompt = prompts_svc.load_override(meeting_type, type_row["prompt"])
     if prompt.temperature is not None:
         config.temperature = prompt.temperature
 
@@ -61,7 +64,7 @@ def analyze(
     # carries forward everything durable from earlier in the session.
     trimmed = transcript[-MAX_TRANSCRIPT_CHARS:]
 
-    if meeting_type == "interview":
+    if kind == "questions":
         previous_items = (previous or {}).get("items") or []
         values = {
             "transcript": trimmed,
@@ -79,7 +82,7 @@ def analyze(
         config, system, user, max_tokens=MAX_OUTPUT_TOKENS
     )
 
-    if meeting_type == "interview":
+    if kind == "questions":
         items = parsed.get("items")
         return {"items": items if isinstance(items, list) else previous_items}
 

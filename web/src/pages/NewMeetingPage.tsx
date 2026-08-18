@@ -7,7 +7,6 @@ import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives
 import { api, uploadMeeting } from '@/lib/api';
 import { watchJob } from '@/hooks/useJob';
 import type { ChannelMap } from '@/hooks/useRecorder';
-import type { RoomSpeakers } from '@/components/record/RecorderPanel';
 import { localDatetimeValue } from '@/lib/calendar';
 import { cn } from '@/lib/cn';
 import type { Paginated, Thread } from '@/types/api';
@@ -24,7 +23,6 @@ export function NewMeetingPage() {
   // onModeChange).
   const [audioMode, setAudioMode] = useState<'upload' | 'record'>('upload');
   const [channelMap, setChannelMap] = useState<ChannelMap>(null);
-  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [multi, setMulti] = useState<MultiSourceUpload | null>(null);
   const [title, setTitle] = useState('');
   const [when, setWhen] = useState(localDatetimeValue());
@@ -54,7 +52,6 @@ export function NewMeetingPage() {
   const pick = useCallback((next: File | null, meta: FileMeta) => {
     setFile(next);
     setChannelMap(meta.channelMap);
-    setRoomSpeakers(meta.roomSpeakers);
     setMulti(meta.multi ?? null);
     setError(null);
     if (!next) return;
@@ -102,7 +99,6 @@ export function NewMeetingPage() {
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
     if (channelMap) {
       form.append('channel_map', channelMap);
-      form.append('room_speakers', roomSpeakers);
     }
     form.append('skip_diarization', String(skipDiarization));
     if (multi) {
@@ -279,7 +275,12 @@ export function NewMeetingPage() {
   );
 
   return (
-    <div className={cn('mx-auto space-y-6', audioMode === 'record' ? 'max-w-6xl' : 'max-w-2xl')}>
+    <div
+      className={cn(
+        'mx-auto space-y-6',
+        audioMode === 'record' ? 'max-w-[1800px] px-4 sm:px-6 lg:px-8' : 'max-w-2xl',
+      )}
+    >
       <div>
         <h1 className="font-display text-2xl font-semibold">New meeting</h1>
         <p className="mt-1 text-sm text-fg-subtle">

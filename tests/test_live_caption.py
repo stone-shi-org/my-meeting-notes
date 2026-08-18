@@ -94,6 +94,75 @@ class TestTranscribeWindow:
             )
         assert text == "Hello there."
 
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_on_reading_fires_once_the_stream_is_confirmed_good(self):
+        """The recorder's activity dot -- see channel_worker's call sites --
+        only means "reading" once the response is confirmed not to be an
+        error; on_reading is the hook that tells it so."""
+        url = "http://asr.test/v1/audio/transcriptions"
+        respx.post(url).mock(
+            return_value=httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                text='data: {"type":"transcript.text.done","text":"hi"}\n\ndata: [DONE]\n\n',
+            )
+        )
+        calls = []
+
+        async def on_reading():
+            calls.append(1)
+
+        async with httpx.AsyncClient() as client:
+            await live_caption._transcribe_window(
+                client, url, "some-model", None, b"\x00\x00" * 100, on_reading=on_reading
+            )
+        assert calls == [1]
+
+    @respx.mock
+    @pytest.mark.asyncio
+    async def test_on_reading_does_not_fire_on_a_rejected_response(self):
+        url = "http://asr.test/v1/audio/transcriptions"
+        respx.post(url).mock(return_value=httpx.Response(500, text="nope"))
+        calls = []
+
+        async def on_reading():
+            calls.append(1)
+
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, url, "some-model", None, b"\x00\x00" * 100, on_reading=on_reading
+            )
+        assert text == ""
+        assert calls == []
+
+
+class TestSendStatus:
+    """The recorder activity dot's transport -- best-effort, same
+    swallow-everything policy as the caption send it sits next to."""
+
+    @pytest.mark.asyncio
+    async def test_sends_the_expected_shape(self):
+        sent = []
+
+        class FakeWebSocket:
+            async def send_json(self, payload):
+                sent.append(payload)
+
+        await live_caption._send_status(FakeWebSocket(), "room", "calling")
+        assert sent == [{"type": "status", "channel": "room", "state": "calling"}]
+
+    @pytest.mark.asyncio
+    async def test_a_dead_socket_does_not_raise(self):
+        class DeadWebSocket:
+            async def send_json(self, payload):
+                raise RuntimeError("socket is gone")
+
+        # Must not raise -- a dropped status update is invisible to the
+        # user, and letting it escape would kill channel_worker over
+        # something that was never essential to begin with.
+        await live_caption._send_status(DeadWebSocket(), "me", "idle")
+
 
 class TestAsrConcurrencyLimit:
     """room and me are independent asyncio tasks on the same cadence (see

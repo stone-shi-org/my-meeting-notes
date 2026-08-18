@@ -62,6 +62,13 @@ class Prompt:
         return substitute(self.system, values), substitute(self.user, values)
 
 
+def find_placeholders(text: str) -> set[str]:
+    """Every {{name}} token appearing in text -- used by callers validating a
+    prompt (this module's own save(), and insight_types.py for the
+    DB-stored equivalent) without duplicating the regex."""
+    return set(_PLACEHOLDER.findall(text))
+
+
 def substitute(text: str, values: dict[str, str]) -> str:
     out = text
     for key, value in values.items():
@@ -148,7 +155,7 @@ def save(name: str, raw: str, directory: Path | None = None) -> Prompt:
 
     # A prompt that lost {{transcript}} would silently summarise nothing.
     required = candidate.required_placeholders or existing.required_placeholders
-    present = set(_PLACEHOLDER.findall(raw))
+    present = find_placeholders(raw)
     missing = [p for p in required if p not in present]
     if missing:
         raise ValidationError(

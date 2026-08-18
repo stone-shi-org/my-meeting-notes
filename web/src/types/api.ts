@@ -610,6 +610,23 @@ export interface TelegramLink {
   notify_transcript_failed: boolean;
 }
 
+/** A recorder "Meeting type" -- see app/services/insight_types.py. Public
+ * shape (no `prompt`) is what GET /insight-types returns for the recorder's
+ * picker; InsightTypeDetail below adds the rest, for the admin-only
+ * Settings management page. */
+export interface InsightType {
+  slug: string;
+  name: string;
+  kind: 'topics' | 'questions';
+}
+
+export interface InsightTypeDetail extends InsightType {
+  prompt: string;
+  sort_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export interface PromptSummary {
   name: string;
   version: string;

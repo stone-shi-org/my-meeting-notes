@@ -16,7 +16,7 @@ import { Label, Select } from '@/components/ui/primitives';
 import { InsightsPanel } from '@/components/record/InsightsPanel';
 import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
 import { LiveTranscriptPanel } from '@/components/record/LiveTranscriptPanel';
-import { useLiveCaption } from '@/hooks/useLiveCaption';
+import { type ActivityState, useLiveCaption } from '@/hooks/useLiveCaption';
 import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
@@ -29,8 +29,6 @@ import {
   type Source,
 } from '@/lib/recording';
 import type { SettingEntry } from '@/types/api';
-
-export type RoomSpeakers = 'single' | 'multiple';
 
 const SOURCES: { id: Source; label: string; icon: typeof Mic }[] = [
   { id: 'mic', label: 'Microphone', icon: Mic },
@@ -89,6 +87,37 @@ function LevelMeter({
   );
 }
 
+const ACTIVITY_COLOR: Record<ActivityState, string> = {
+  idle: 'bg-fg-faint',
+  buffering: 'bg-warning',
+  calling: 'bg-primary',
+  reading: 'bg-success animate-pulse',
+};
+
+const ACTIVITY_LABEL: Record<ActivityState, string> = {
+  idle: 'idle',
+  buffering: 'audio queued',
+  calling: 'calling the transcription backend',
+  reading: 'streaming a caption back',
+};
+
+/**
+ * Live-transcript activity for one channel -- see live_caption.py's
+ * channel_worker for what actually drives idle/buffering/calling/reading.
+ * Colour-only like the recording dot above it, so it carries an sr-only
+ * equivalent via `title` isn't enough on its own -- LevelMeters below also
+ * renders the text form next to it.
+ */
+function ActivityDot({ state }: { state: ActivityState }) {
+  return (
+    <span
+      className={cn('size-1.5 shrink-0 rounded-full', ACTIVITY_COLOR[state])}
+      aria-hidden
+      title={`Live transcript: ${ACTIVITY_LABEL[state]}`}
+    />
+  );
+}
+
 /**
  * One meter, or two side by side when the recording is keeping mic and room
  * on separate channels (`recorder.mixing` -- see useRecorder). A single
@@ -102,20 +131,34 @@ function LevelMeters({
   levelRoom,
   mixing,
   active,
+  activity,
 }: {
   level: number;
   levelRoom: number;
   mixing: boolean;
   active: boolean;
+  /** Live-caption pipeline state per channel, from useLiveCaption --
+   * omitted entirely when live captions are off, since there is no
+   * channel_worker for the dot to describe then. */
+  activity?: { me: ActivityState; room: ActivityState };
 }) {
-  if (!mixing) return <LevelMeter level={level} active={active} />;
+  if (!mixing) {
+    return (
+      <div className="flex items-center gap-1.5">
+        {activity && <ActivityDot state={activity.me} />}
+        <LevelMeter level={level} active={active} />
+      </div>
+    );
+  }
   return (
     <div className="flex items-center gap-3">
       <div className="flex items-center gap-1.5">
+        {activity && <ActivityDot state={activity.me} />}
         <span className="text-xs text-fg-subtle">You</span>
         <LevelMeter level={level} active={active} label="Your microphone level" bars={12} />
       </div>
       <div className="flex items-center gap-1.5">
+        {activity && <ActivityDot state={activity.room} />}
         <span className="text-xs text-fg-subtle">Room</span>
         <LevelMeter level={levelRoom} active={active} label="Room audio level" bars={12} />
       </div>
@@ -131,14 +174,8 @@ export function RecorderPanel({
   onLiveChange,
 }: {
   /** Handed the finished clip as a File, ready for the normal upload path,
-   * plus whether it kept mic/room on separate channels and -- only
-   * meaningful alongside that -- how many people were on the room side. */
-  onRecorded: (
-    file: File | null,
-    durationSec: number,
-    channelMap: ChannelMap,
-    roomSpeakers: RoomSpeakers,
-  ) => void;
+   * plus whether it kept mic/room on separate channels. */
+  onRecorded: (file: File | null, durationSec: number, channelMap: ChannelMap) => void;
   disabled?: boolean;
   /** 'wide' puts a bigger, always-mounted LiveTranscriptPanel on the left and
    * shrinks these controls to a right-hand column -- see NewMeetingPage,
@@ -164,12 +201,6 @@ export function RecorderPanel({
   const [source, setSource] = useState<Source>('mic');
   const [deviceId, setDeviceId] = useState('');
   const [withMic, setWithMic] = useState(true);
-  // Only meaningful once withMic actually produces a channel-separated
-  // recording (source !== 'mic' && withMic) -- see the select below. Default
-  // to the safe assumption: a mislabeled multi-person room is silent data
-  // loss, a redundant diarization call on a genuinely single remote voice is
-  // just a few wasted seconds.
-  const [roomSpeakers, setRoomSpeakers] = useState<RoomSpeakers>('multiple');
   const [liveCaptionsOn, setLiveCaptionsOn] = useState(false);
 
   // Settings -> Live captions' value is only the *default* -- see
@@ -196,11 +227,11 @@ export function RecorderPanel({
   // what would be identical audio. Only meaningful in 'wide' layout --
   // 'compact' still renders LiveCaptionStrip below, which owns its own.
   const captionsLive = layout === 'wide' && liveCaptionsOn && recorder.phase === 'recording';
-  const { captions, connected: captionsConnected } = useLiveCaption(
-    recorder.liveStreams,
-    captionsLive,
-    captionLanguage,
-  );
+  const {
+    captions,
+    connected: captionsConnected,
+    activity: captionsActivity,
+  } = useLiveCaption(recorder.liveStreams, captionsLive, captionLanguage);
 
   // Labels are blank until permission has been granted once, so re-read the
   // list the moment a recording succeeds -- that is when they appear.
@@ -221,14 +252,9 @@ export function RecorderPanel({
       recorder.clip?.file ?? null,
       recorder.clip?.durationSec ?? 0,
       recorder.clip?.channelMap ?? null,
-      roomSpeakers,
     );
-    // Re-fires on a roomSpeakers change too, not just a new clip -- the
-    // selector stays editable after Stop (see its disabled= below), and
-    // without this the page would keep whatever value was current the
-    // instant recording finished.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [recorder.clip, roomSpeakers]);
+  }, [recorder.clip]);
 
   const chosen = support[source];
   const canStart = chosen.available && !disabled;
@@ -275,7 +301,74 @@ export function RecorderPanel({
     );
   }
 
-  const controls = (
+  // Once a 'wide' recording is actually live, the setup parameters (source,
+  // device, live-caption toggle/language, all their hints) have nothing left
+  // to decide -- they're locked in for this recording anyway (see their own
+  // disabled= checks below) -- and take up the column the transcript panel
+  // now needs (see the wide-layout return below). This condensed block is
+  // what that column shows instead: just enough to stop/pause/resume and
+  // confirm the input is alive. 'compact' layout (the narrower "add a
+  // recording" page) never swaps to this -- it has no spare column to hand
+  // the transcript, so its controls stay fully expanded throughout.
+  const liveCompactControls = (
+    <div className="space-y-4 rounded-xl border border-border bg-surface p-5">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button type="button" variant="primary" onClick={recorder.stop}>
+          <Square className="fill-current" />
+          Stop
+        </Button>
+        {recorder.phase === 'recording' ? (
+          <Button type="button" variant="secondary" onClick={recorder.pause}>
+            <Pause />
+            Pause
+          </Button>
+        ) : (
+          <Button
+            type="button"
+            variant="secondary"
+            loading={recorder.resuming}
+            onClick={() => recorder.resume({ deviceId: deviceId || undefined })}
+          >
+            <Play />
+            Resume
+          </Button>
+        )}
+        <span className="inline-flex items-center gap-2 font-mono text-sm tabular" aria-live="off">
+          <span
+            className={cn(
+              'size-2 rounded-full',
+              recorder.phase === 'recording' ? 'animate-pulse bg-danger' : 'bg-fg-faint',
+            )}
+            aria-hidden
+          />
+          {recorder.elapsed}
+        </span>
+      </div>
+
+      <LevelMeters
+        level={recorder.level}
+        levelRoom={recorder.levelRoom}
+        mixing={recorder.mixing}
+        active={recorder.phase === 'recording'}
+        activity={captionsLive ? captionsActivity : undefined}
+      />
+
+      {/* Status in text, because the dot and the meter are both colour alone. */}
+      <p className="sr-only" role="status">
+        {recorder.phase === 'recording' ? `Recording, ${recorder.elapsed}` : `Paused at ${recorder.elapsed}`}
+        {captionsLive &&
+          ` — live transcript: ${ACTIVITY_LABEL[captionsActivity.me]} (you), ${ACTIVITY_LABEL[captionsActivity.room]} (room)`}
+      </p>
+
+      {recorder.error && (
+        <p role="alert" className="text-sm text-danger-ink">
+          {recorder.error}
+        </p>
+      )}
+    </div>
+  );
+
+  const fullControls = (
     <div className="space-y-4 rounded-xl border border-border bg-surface p-5">
       <div role="radiogroup" aria-label="Recording source" className="grid gap-2 sm:grid-cols-3">
         {SOURCES.map(({ id, label, icon: Icon }) => {
@@ -330,30 +423,6 @@ export function RecorderPanel({
             — without it you capture everyone but yourself
           </span>
         </label>
-      )}
-
-      {/* Only meaningful once a mic and a room stream both exist to keep
-          apart -- see the ChannelMergerNode wiring in useRecorder. Editable
-          after Stop too: the roomSpeakers effect above re-fires on change. */}
-      {source !== 'mic' && withMic && chosen.available && (
-        <div>
-          <Label htmlFor="rec-room-speakers">On the other side</Label>
-          <Select
-            id="rec-room-speakers"
-            className="mt-1.5"
-            value={roomSpeakers}
-            disabled={disabled}
-            onChange={(e) => setRoomSpeakers(e.target.value as RoomSpeakers)}
-          >
-            <option value="multiple">Several people</option>
-            <option value="single">Just one other person</option>
-          </Select>
-          <p className="mt-1 text-xs text-fg-subtle">
-            We can tell your voice from everyone else's for free, from which side of the
-            recording it came from. Saying there's only one other person skips guessing who's
-            who on that side too.
-          </p>
-        </div>
       )}
 
       {(source === 'mic' || withMic) && (
@@ -549,8 +618,8 @@ export function RecorderPanel({
       )}
 
       {/* In 'wide' layout this strip is replaced by the always-mounted
-          LiveTranscriptPanel on the left -- rendering both would show the
-          same rolling captions twice. */}
+          LiveTranscriptPanel further down the same column -- rendering both
+          would show the same rolling captions twice. */}
       {layout === 'compact' && liveCaptionsOn && recorder.phase === 'recording' && (
         <LiveCaptionStrip streams={recorder.liveStreams} enabled language={captionLanguage} />
       )}
@@ -579,27 +648,33 @@ export function RecorderPanel({
     </div>
   );
 
-  if (layout === 'compact') return controls;
+  if (layout === 'compact') return fullControls;
+
+  // Live shrinks the right column's own controls (see liveCompactControls'
+  // doc comment) so the transcript panel below it -- moved here from the
+  // left column precisely to use that freed-up room -- has enough width to
+  // be worth reading during the call, not just after.
+  const controls = recorder.live ? liveCompactControls : fullControls;
 
   return (
-    <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_460px]">
-      {/* Transcript and Insights share the left column and the one caption
-          feed above -- Insights is the analysis of what's shown here, so it
-          reads as "under the transcript", not a separate unrelated panel. */}
+    <div className="grid items-start gap-4 lg:grid-cols-2">
+      {/* Insights is the analysis of the transcript in the right column --
+          it stays on its own here so a long meeting's topic/question list
+          doesn't compete with the transcript for the same column. */}
       <div className="space-y-4">
+        <InsightsPanel captions={captions} enabled={captionsLive} />
+      </div>
+      {/* Controls, the transcript, and the rest of the meeting form (title,
+          when, thread, submit -- see NewMeetingPage's rightExtra) share this
+          column, so "set up the meeting" and "watch it happen" both read as
+          right-hand tasks next to Insights rather than two stacked forms. */}
+      <div className="space-y-4">
+        {controls}
         <LiveTranscriptPanel
           captions={captions}
           connected={captionsConnected}
           enabled={captionsLive}
         />
-        <InsightsPanel captions={captions} enabled={captionsLive} />
-      </div>
-      {/* Controls and the rest of the meeting form (title, when, thread,
-          submit -- see NewMeetingPage's rightExtra) share this column, so
-          "set up the meeting" reads as one right-hand task next to the
-          transcript rather than two stacked forms. */}
-      <div className="space-y-4">
-        {controls}
         {rightExtra}
       </div>
     </div>

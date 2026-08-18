@@ -636,6 +636,30 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_dev_events_integration ON dev_events(integration_id)",
+    """
+    CREATE TABLE IF NOT EXISTS insight_types (
+        id         INTEGER PRIMARY KEY AUTOINCREMENT,
+        -- Opaque, stable identifier -- what the recorder sends as meeting_type
+        -- and what a summary/insights call is keyed on. Never renamed once
+        -- created (the name column is what's editable), so nothing that
+        -- referenced it earlier in a session goes stale mid-recording.
+        slug       TEXT NOT NULL UNIQUE,
+        name       TEXT NOT NULL,
+        -- Which shape services/insights.py should expect back from the model
+        -- and InsightsPanel should render: a running topic list, or a
+        -- question/answer list (see insights_svc.analyze).
+        kind       TEXT NOT NULL DEFAULT 'topics',
+        -- Full prompt markdown -- frontmatter + ## SYSTEM / ## USER, same
+        -- shape as the file-based prompts in app/prompts/ (see
+        -- services/prompts.parse). Stored here instead of on disk because
+        -- this list is admin-extensible at runtime, unlike the fixed
+        -- one-of-a-kind prompts (summary, match_rank, note_title).
+        prompt     TEXT NOT NULL,
+        sort_order INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+    )
+    """,
 )
 
 # Columns added after the initial release go here as (table, column, ddl_fragment).
@@ -746,6 +770,93 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("meetings", "skip_diarization", "INTEGER NOT NULL DEFAULT 0"),
 )
 
+# The two built-in insight_types rows, seeded once on a genuinely empty table
+# (see init_db) -- editable and deletable afterward like any admin-added row,
+# see app/routers/insight_types.py. Kept here rather than loaded from
+# app/prompts/*.md because insight_types.prompt is the row's own column, not
+# a file this table points at.
+_DEFAULT_GENERAL_PROMPT = """---
+name: insights_general_prompt
+version: 2
+description: Live topic tracker -- short, headline-style bullets per topic.
+temperature: 0.2
+required_placeholders: [transcript, previous_topics]
+---
+
+## SYSTEM
+
+You're watching a live, rough transcript of a meeting ("Room" = everyone else, "Me" = the local
+participant; expect typos and dropped words).
+
+Track topics as they come up. Return ONLY this JSON, nothing else:
+
+  {"topics": [{"title": string, "summary": string, "current": boolean}]}
+
+Rules:
+- Keep every topic from previous_topics, same order, "summary" refreshed.
+- New topic only on a real subject change, not every sentence.
+- Exactly one topic has "current": true.
+- "title": 3-6 words. "summary": ONE headline-style bullet, <=12 words, no filler ("discussed",
+  "talked about") -- lead with the news, like a headline, not a recap sentence.
+- Unchanged since previous_topics? Return it unchanged.
+- JSON only. No prose, no code fence.
+
+## USER
+
+Topics so far:
+{{previous_topics}}
+
+Live transcript so far:
+{{transcript}}
+"""
+
+_DEFAULT_INTERVIEW_PROMPT = """---
+name: insights_interview_prompt
+version: 1
+description: Live interview-question detector -- flags a new interviewer question and drafts concise answer points.
+temperature: 0.3
+required_placeholders: [transcript, previous_items]
+---
+
+## SYSTEM
+
+You are watching a live, rough transcript of an interview as it happens. Two
+sides are labelled "Room" (the interviewer, or the other side of the call)
+and "Me" (the person being interviewed). The labels come from separate audio
+channels, not a real diarizer, and every line is a live, low-quality caption
+-- expect typos, dropped words and missing punctuation.
+
+Your job: find questions from Room worth preparing an answer for, and give
+"Me" brief, concrete points to answer each one.
+
+You MUST return a single valid JSON object and nothing else:
+
+  {"items": [{"question": string, "answer_points": [string, ...]}]}
+
+Rules:
+- "items" MUST include every item in previous_items, unchanged and in the
+  same order -- this list only grows across calls, it never loses an entry.
+- Append a new item only for a genuinely new, substantive question from Room
+  that isn't already covered by an existing item. Skip greetings, small talk
+  and logistics ("how are you", "can you hear me", "shall we get started",
+  "any questions before we begin") -- those aren't worth prepping. A
+  rhetorical question Room immediately answers itself is not a new item.
+- "answer_points" is 2-5 short bullet points, each a concrete point to make,
+  not a full sentence. Draw on anything "Me" already said elsewhere in the
+  transcript that's relevant, but do not invent facts about them.
+- If nothing new has happened since previous_items, return it unchanged.
+- Return the JSON only. No prose, no code fence.
+
+## USER
+
+Already-detected questions (carry forward unchanged, then add anything new;
+do not duplicate):
+{{previous_items}}
+
+Live transcript so far (most recent last):
+{{transcript}}
+"""
+
 # Indexes over columns that LATE_COLUMNS adds. They cannot live in SCHEMA: that
 # runs first, so naming group_id there would fail on the boot that adds it.
 LATE_INDEXES: tuple[str, ...] = (
@@ -770,3 +881,18 @@ def init_db(db_path: Path | str | None = None) -> None:
 
         for statement in LATE_INDEXES:
             conn.execute(statement)
+
+        # Seed the two built-in types once, on a genuinely empty table -- not
+        # INSERT OR IGNORE keyed on slug, which would silently resurrect one
+        # an admin deleted on purpose every time the app restarts.
+        if conn.execute("SELECT COUNT(*) FROM insight_types").fetchone()[0] == 0:
+            now = utcnow()
+            conn.executemany(
+                "INSERT INTO insight_types "
+                "(slug, name, kind, prompt, sort_order, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                [
+                    ("general", "General Meeting", "topics", _DEFAULT_GENERAL_PROMPT, 0, now, now),
+                    ("interview", "Interview", "questions", _DEFAULT_INTERVIEW_PROMPT, 1, now, now),
+                ],
+            )

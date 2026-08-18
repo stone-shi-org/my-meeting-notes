@@ -131,5 +131,8 @@ def test_rejects_an_unknown_meeting_type(user_client):
         "/api/insights/analyze",
         json={"meeting_type": "standup", "transcript": "Room: hello"},
     )
-    # Pydantic's Literal validation rejects it before the service ever runs.
-    assert resp.status_code == 422
+    # meeting_type is just a slug now (see insight_types.py) -- no fixed
+    # Literal to reject it at the Pydantic layer, so this 404s out of
+    # insights_svc.analyze's insight_types_svc.get_type lookup instead.
+    assert resp.status_code == 404
+    assert "standup" in resp.json()["error"]["message"]

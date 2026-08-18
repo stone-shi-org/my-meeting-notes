@@ -6,6 +6,13 @@ temperature: 0.3
 required_placeholders: [transcript, previous_items]
 ---
 
+<!--
+  No longer read by code -- the "Interview" insight type's actual prompt
+  lives in the insight_types DB table (seeded from
+  db._DEFAULT_INTERVIEW_PROMPT, editable from Settings -> Meeting types),
+  not this file. Kept here, matching, purely as a readable reference.
+-->
+
 ## SYSTEM
 
 You are watching a live, rough transcript of an interview as it happens. Two

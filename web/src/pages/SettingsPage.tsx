@@ -19,6 +19,7 @@ import { cn } from '@/lib/cn';
 import type {
   Integration,
   IntegrationTestResult,
+  InsightTypeDetail,
   Paginated,
   PromptDetail,
   PromptSummary,
@@ -37,6 +38,7 @@ const TABS = [
   { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/telegram', label: 'Telegram' },
   { to: '/settings/prompt', label: 'Prompts' },
+  { to: '/settings/insight-types', label: 'Meeting types', adminOnly: true },
   { to: '/settings/users', label: 'Users', adminOnly: true },
   // Only on a server with MMN_DEV_PROVIDER_ENABLED set. Detected by whether the
   // provider is offered at all rather than by a capability endpoint of its own:
@@ -1616,6 +1618,339 @@ export function PromptSettingsPage() {
         </>
       )}
     </Card>
+  );
+}
+
+/* -------------------------------------------------------------------------- */
+/* Meeting types (insight_types)                                              */
+/* -------------------------------------------------------------------------- */
+
+const KIND_OPTIONS: { value: InsightTypeDetail['kind']; label: string }[] = [
+  { value: 'topics', label: 'Topic list (like General Meeting)' },
+  { value: 'questions', label: 'Question & answer (like Interview)' },
+];
+
+// Mirrors app/services/insight_types.py's _REQUIRED_PLACEHOLDER_BY_KIND --
+// shown as a hint rather than fetched, since it's a fixed fact about the
+// kind, not something the server needs a round trip to say.
+const REQUIRED_PLACEHOLDER_BY_KIND: Record<InsightTypeDetail['kind'], string> = {
+  topics: 'previous_topics',
+  questions: 'previous_items',
+};
+
+function insightTypesQueryKey() {
+  return ['insight-types', 'admin'];
+}
+
+function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
+  const queryClient = useQueryClient();
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(type.name);
+  const [kind, setKind] = useState(type.kind);
+  const [prompt, setPrompt] = useState(type.prompt);
+
+  const invalidate = () => {
+    void queryClient.invalidateQueries({ queryKey: insightTypesQueryKey() });
+    // The recorder's own picker (see InsightsPanel.tsx) reads the public
+    // list under a different key -- a rename/kind change should show up
+    // there without waiting for that panel's own staleTime to lapse.
+    void queryClient.invalidateQueries({ queryKey: ['insight-types'] });
+  };
+
+  const save = useMutation({
+    mutationFn: () =>
+      api.put<InsightTypeDetail>(`/settings/insight-types/${type.slug}`, { name, kind, prompt }),
+    onSuccess: () => {
+      invalidate();
+      setEditing(false);
+    },
+  });
+
+  const remove = useMutation({
+    mutationFn: () => api.del(`/settings/insight-types/${type.slug}`),
+    onSuccess: invalidate,
+  });
+
+  return (
+    <Card className="p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <p className="truncate font-medium">{type.name}</p>
+            <Badge size="sm">{type.kind === 'questions' ? 'Q&A' : 'Topics'}</Badge>
+          </div>
+          <p className="mt-0.5 truncate text-xs text-fg-subtle">slug: {type.slug}</p>
+        </div>
+        {!editing && (
+          <Button size="sm" variant="ghost" onClick={() => setEditing(true)}>
+            Edit
+          </Button>
+        )}
+      </div>
+
+      {editing && (
+        <div className="mt-3 space-y-3 border-t border-border pt-3">
+          <div>
+            <Label htmlFor={`it-${type.slug}-name`}>Name</Label>
+            <Input
+              id={`it-${type.slug}-name`}
+              className="mt-1.5"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+          <div>
+            <Label htmlFor={`it-${type.slug}-kind`}>Shape</Label>
+            <Select
+              id={`it-${type.slug}-kind`}
+              className="mt-1.5"
+              value={kind}
+              onChange={(e) => setKind(e.target.value as InsightTypeDetail['kind'])}
+            >
+              {KIND_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor={`it-${type.slug}-prompt`}>Prompt</Label>
+            <p className="mt-1 text-xs text-fg-subtle">
+              Required placeholders:{' '}
+              <code className="font-mono">{'{{transcript}}'}</code>{' '}
+              <code className="font-mono">{`{{${REQUIRED_PLACEHOLDER_BY_KIND[kind]}}}`}</code>
+            </p>
+            <Textarea
+              id={`it-${type.slug}-prompt`}
+              className="mt-1.5 min-h-[320px] font-mono text-xs"
+              spellCheck={false}
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+            />
+          </div>
+          {save.error && (
+            <p className="text-sm text-danger-ink">{(save.error as Error).message}</p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" variant="primary" loading={save.isPending} onClick={() => save.mutate()}>
+              Save
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setEditing(false);
+                setName(type.name);
+                setKind(type.kind);
+                setPrompt(type.prompt);
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="ml-auto text-danger-ink"
+              loading={remove.isPending}
+              onClick={() => {
+                if (window.confirm(`Delete "${type.name}"? Recordings already using it keep it.`)) {
+                  remove.mutate();
+                }
+              }}
+            >
+              <Trash2 />
+              Delete
+            </Button>
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+const NEW_TYPE_PROMPT_STUB: Record<InsightTypeDetail['kind'], string> = {
+  topics: [
+    '---',
+    'name: custom_insight_type',
+    'temperature: 0.2',
+    '---',
+    '',
+    '## SYSTEM',
+    '',
+    'You are watching a live, rough transcript. Return ONLY this JSON, nothing else:',
+    '',
+    '  {"topics": [{"title": string, "summary": string, "current": boolean}]}',
+    '',
+    '## USER',
+    '',
+    'Topics so far:',
+    '{{previous_topics}}',
+    '',
+    'Live transcript so far:',
+    '{{transcript}}',
+    '',
+  ].join('\n'),
+  questions: [
+    '---',
+    'name: custom_insight_type',
+    'temperature: 0.3',
+    '---',
+    '',
+    '## SYSTEM',
+    '',
+    'You are watching a live, rough transcript. Return ONLY this JSON, nothing else:',
+    '',
+    '  {"items": [{"question": string, "answer_points": [string, ...]}]}',
+    '',
+    '## USER',
+    '',
+    'Already-detected questions:',
+    '{{previous_items}}',
+    '',
+    'Live transcript so far:',
+    '{{transcript}}',
+    '',
+  ].join('\n'),
+};
+
+function AddInsightType() {
+  const queryClient = useQueryClient();
+  const [open, setOpen] = useState(false);
+  const [name, setName] = useState('');
+  const [kind, setKind] = useState<InsightTypeDetail['kind']>('topics');
+  const [prompt, setPrompt] = useState(NEW_TYPE_PROMPT_STUB.topics);
+
+  const close = () => {
+    setOpen(false);
+    setName('');
+    setKind('topics');
+    setPrompt(NEW_TYPE_PROMPT_STUB.topics);
+  };
+
+  const create = useMutation({
+    mutationFn: () => api.post<InsightTypeDetail>('/settings/insight-types', { name, kind, prompt }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: insightTypesQueryKey() });
+      void queryClient.invalidateQueries({ queryKey: ['insight-types'] });
+      close();
+    },
+  });
+
+  if (!open) {
+    return (
+      <Button variant="secondary" onClick={() => setOpen(true)}>
+        <Plus />
+        Add meeting type
+      </Button>
+    );
+  }
+
+  return (
+    <Card className="space-y-3 p-4">
+      <h3 className="font-display text-base font-semibold">New meeting type</h3>
+      <div>
+        <Label htmlFor="new-it-name">Name</Label>
+        <Input
+          id="new-it-name"
+          className="mt-1.5"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Sales Call"
+        />
+      </div>
+      <div>
+        <Label htmlFor="new-it-kind">Shape</Label>
+        <Select
+          id="new-it-kind"
+          className="mt-1.5"
+          value={kind}
+          onChange={(e) => {
+            const next = e.target.value as InsightTypeDetail['kind'];
+            setKind(next);
+            // Swap the stub too, but only while the prompt is still whatever
+            // the previous stub was -- once someone's actually written their
+            // own text, changing the shape must not clobber it.
+            setPrompt((prev) =>
+              prev === NEW_TYPE_PROMPT_STUB[kind] ? NEW_TYPE_PROMPT_STUB[next] : prev,
+            );
+          }}
+        >
+          {KIND_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <div>
+        <Label htmlFor="new-it-prompt">Prompt</Label>
+        <p className="mt-1 text-xs text-fg-subtle">
+          Required placeholders: <code className="font-mono">{'{{transcript}}'}</code>{' '}
+          <code className="font-mono">{`{{${REQUIRED_PLACEHOLDER_BY_KIND[kind]}}}`}</code>
+        </p>
+        <Textarea
+          id="new-it-prompt"
+          className="mt-1.5 min-h-[280px] font-mono text-xs"
+          spellCheck={false}
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+        />
+      </div>
+      {create.error && <p className="text-sm text-danger-ink">{(create.error as Error).message}</p>}
+      <div className="flex items-center gap-2">
+        <Button
+          variant="primary"
+          disabled={!name.trim()}
+          loading={create.isPending}
+          onClick={() => create.mutate()}
+        >
+          Create
+        </Button>
+        <Button variant="ghost" onClick={close}>
+          Cancel
+        </Button>
+      </div>
+    </Card>
+  );
+}
+
+export function InsightTypesSettingsPage() {
+  const types = useQuery({
+    queryKey: insightTypesQueryKey(),
+    queryFn: () => api.get<InsightTypeDetail[]>('/settings/insight-types'),
+  });
+
+  if (types.isLoading) return <Skeleton className="h-48 w-full" />;
+  if (types.isError) return <ErrorState error={types.error} />;
+
+  const rows = types.data ?? [];
+
+  return (
+    <div className="space-y-4">
+      <Card className="p-5">
+        <h2 className="font-display text-lg font-semibold">Meeting types</h2>
+        <p className="mt-1 text-sm text-fg-subtle">
+          What the recorder's "Meeting type" picker offers, and the prompt behind each one -- see
+          app/services/insight_types.py. General Meeting and Interview are the built-ins; add more
+          for whatever else you record regularly.
+        </p>
+
+        {rows.length === 0 ? (
+          <p className="mt-4 rounded border border-dashed border-border p-4 text-sm text-fg-subtle">
+            No meeting types configured -- the recorder's picker will be empty until you add one.
+          </p>
+        ) : (
+          <div className="mt-4 space-y-3">
+            {rows.map((type) => (
+              <InsightTypeCard key={type.slug} type={type} />
+            ))}
+          </div>
+        )}
+      </Card>
+
+      <AddInsightType />
+    </div>
   );
 }
 
