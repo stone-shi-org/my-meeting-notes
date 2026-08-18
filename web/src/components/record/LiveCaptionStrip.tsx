@@ -1,3 +1,4 @@
+import { Zap } from 'lucide-react';
 import { useLiveCaption } from '@/hooks/useLiveCaption';
 import type { LiveStreams } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
@@ -23,12 +24,23 @@ export function LiveCaptionStrip({
   /** ISO-639-1 code, or '' for auto-detect -- see useLiveCaption. */
   language: string;
 }) {
-  const { captions, connected } = useLiveCaption(streams, enabled, language);
+  const { captions, connected, isCacheAware } = useLiveCaption(streams, enabled, language);
 
   return (
     <div className="space-y-2 rounded-lg border border-border bg-surface-2/50 p-3">
       <div className="flex items-center justify-between">
-        <p className="text-xs font-medium text-fg-subtle">Live captions</p>
+        <div className="flex items-center gap-2">
+          <p className="text-xs font-medium text-fg-subtle">Live captions</p>
+          {isCacheAware && (
+            <span
+              className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400 border border-indigo-500/20"
+              title="Native Cache-Aware Streaming RNN-T Enabled"
+            >
+              <Zap className="size-2.5" />
+              Cache-Aware
+            </span>
+          )}
+        </div>
         <span
           className={cn(
             'inline-flex items-center gap-1.5 text-xs',

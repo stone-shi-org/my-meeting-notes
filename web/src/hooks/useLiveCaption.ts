@@ -49,11 +49,15 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [connected, setConnected] = useState(false);
   const [activity, setActivity] = useState(DEFAULT_ACTIVITY);
+  const [isCacheAware, setIsCacheAware] = useState(false);
+  const [modelName, setModelName] = useState<string | null>(null);
 
   useEffect(() => {
     if (!enabled || (!streams.room && !streams.me)) {
       setConnected(false);
       setActivity(DEFAULT_ACTIVITY);
+      setIsCacheAware(false);
+      setModelName(null);
       return;
     }
 
@@ -70,6 +74,8 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       if (!cancelled) {
         setConnected(false);
         setActivity(DEFAULT_ACTIVITY);
+        setIsCacheAware(false);
+        setModelName(null);
       }
     };
     ws.onerror = () => {
@@ -79,7 +85,10 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       if (cancelled || typeof event.data !== 'string') return;
       try {
         const msg = JSON.parse(event.data);
-        if (msg?.type === 'caption' && (msg.channel === 'me' || msg.channel === 'room')) {
+        if (msg?.type === 'info') {
+          setIsCacheAware(Boolean(msg.is_cache_aware));
+          if (msg.model) setModelName(String(msg.model));
+        } else if (msg?.type === 'caption' && (msg.channel === 'me' || msg.channel === 'room')) {
           setCaptions((prev) =>
             [...prev, { channel: msg.channel, text: String(msg.text ?? ''), at: Date.now() }].slice(
               -MAX_CAPTIONS,
@@ -184,5 +193,5 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     // practice it never changes mid-connection.
   }, [streams.room, streams.me, enabled, language]);
 
-  return { captions, connected, activity };
+  return { captions, connected, activity, isCacheAware, modelName };
 }

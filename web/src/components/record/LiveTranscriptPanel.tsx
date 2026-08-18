@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { Zap } from 'lucide-react';
 import { Badge, Card, Input } from '@/components/ui/primitives';
 import type { Caption } from '@/hooks/useLiveCaption';
 import { cn } from '@/lib/cn';
@@ -93,10 +94,12 @@ export function LiveTranscriptPanel({
   captions,
   connected,
   enabled,
+  isCacheAware,
 }: {
   captions: Caption[];
   connected: boolean;
   enabled: boolean;
+  isCacheAware?: boolean;
 }) {
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
@@ -136,7 +139,18 @@ export function LiveTranscriptPanel({
   return (
     <Card className="flex h-[680px] max-h-[78vh] flex-col overflow-hidden p-5">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="font-display text-lg font-semibold">Live transcript</h2>
+        <div className="flex items-center gap-2">
+          <h2 className="font-display text-lg font-semibold">Live transcript</h2>
+          {isCacheAware && (
+            <span
+              className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 border border-indigo-500/20"
+              title="Native Cache-Aware Streaming RNN-T Enabled"
+            >
+              <Zap className="size-3" />
+              Cache-Aware
+            </span>
+          )}
+        </div>
         <span
           className={cn(
             'inline-flex shrink-0 items-center gap-1.5 text-xs',

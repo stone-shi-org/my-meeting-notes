@@ -126,6 +126,25 @@ class _ChannelBuffer:
             del self.samples[: len(self.samples) - max_bytes]
         return bytes(self.samples)
 
+    def pop_chunk_bytes(self, max_chunk_sec: float) -> bytes:
+        """Extract and consume up to max_chunk_sec of audio samples for non-overlapping
+        cache-aware delta streaming (e.g. for nemotron-3.5-asr-streaming-0.6b).
+        """
+        max_bytes = int(max_chunk_sec * SAMPLE_RATE * BYTES_PER_SAMPLE)
+        chunk_len = min(len(self.samples), max_bytes)
+        chunk = bytes(self.samples[:chunk_len])
+        del self.samples[:chunk_len]
+        return chunk
+
+
+def _is_cache_aware_model(model: str) -> bool:
+    """Returns True if the specified ASR model is a native cache-aware streaming model
+    (e.g., nemotron-3.5-asr-streaming-0.6b).
+    """
+    m = model.lower()
+    return "nemotron" in m or "cache-aware" in m or "cache_aware" in m
+
+
 
 def _peak_amplitude(pcm: bytes) -> float:
     """Peak absolute sample value over a window, 0..1 (int16 full scale is
@@ -274,6 +293,11 @@ async def live_caption_ws(websocket: WebSocket) -> None:
 
     url = transcriptions_url(diarization_url)
     await websocket.accept()
+    await websocket.send_json({
+        "type": "info",
+        "model": model,
+        "is_cache_aware": _is_cache_aware_model(model),
+    })
 
     buffers: dict[int, _ChannelBuffer] = {0: _ChannelBuffer(), 1: _ChannelBuffer()}
     stop = asyncio.Event()
@@ -296,10 +320,14 @@ async def live_caption_ws(websocket: WebSocket) -> None:
 
                 try:
                     async with buf.lock:
-                        pcm = buf.window_bytes(window_sec)
-                    if len(pcm) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
-                        await _send_status(websocket, name, "idle")
-                        continue
+                        if len(buf.samples) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
+                            await _send_status(websocket, name, "idle")
+                            continue
+                        if _is_cache_aware_model(model):
+                            pcm = buf.pop_chunk_bytes(interval_sec)
+                        else:
+                            pcm = buf.window_bytes(window_sec)
+
                     if _peak_amplitude(pcm) < SILENCE_PEAK_THRESHOLD:
                         await _send_status(websocket, name, "idle")
                         continue

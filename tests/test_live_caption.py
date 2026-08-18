@@ -240,3 +240,34 @@ class TestPeakAmplitude:
         # non-negative -- abs() on both ends is what's actually needed.
         peak = live_caption._peak_amplitude(_pcm(10, 25000, 5))
         assert peak == pytest.approx(25000 / 32768)
+
+
+class TestCacheAwareStreaming:
+    """Tests for native cache-aware streaming model detection and chunk extraction."""
+
+    def test_detects_nemotron_and_cache_aware_models(self):
+        assert live_caption._is_cache_aware_model("nemotron-3.5-asr-streaming-0.6b")
+        assert live_caption._is_cache_aware_model("parakeet-cpp-nemotron-3.5-asr-streaming-0.6b")
+        assert live_caption._is_cache_aware_model("stt_en_fastconformer_cache_aware")
+        assert not live_caption._is_cache_aware_model("whisper-large-turbo-q8_0")
+        assert not live_caption._is_cache_aware_model("vibevoice-cpp-asr")
+
+    def test_pop_chunk_bytes_consumes_audio_non_overlapping(self):
+        buf = live_caption._ChannelBuffer()
+        # 1 second of 16kHz mono int16 audio (32,000 bytes)
+        buf.samples.extend(b"\x01\x00" * 16000)
+
+        # Pop 0.5 seconds (16,000 bytes)
+        chunk1 = buf.pop_chunk_bytes(0.5)
+        assert len(chunk1) == 16000
+        assert len(buf.samples) == 16000  # Consumed
+
+        # Pop remaining 0.5 seconds
+        chunk2 = buf.pop_chunk_bytes(0.5)
+        assert len(chunk2) == 16000
+        assert len(buf.samples) == 0  # Fully consumed
+
+        # Popping from empty buffer yields empty bytes
+        chunk3 = buf.pop_chunk_bytes(0.5)
+        assert chunk3 == b""
+

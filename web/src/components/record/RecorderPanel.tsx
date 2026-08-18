@@ -231,6 +231,7 @@ export function RecorderPanel({
     captions,
     connected: captionsConnected,
     activity: captionsActivity,
+    isCacheAware: captionsIsCacheAware,
   } = useLiveCaption(recorder.liveStreams, captionsLive, captionLanguage);
 
   // Labels are blank until permission has been granted once, so re-read the
@@ -674,6 +675,7 @@ export function RecorderPanel({
           captions={captions}
           connected={captionsConnected}
           enabled={captionsLive}
+          isCacheAware={captionsIsCacheAware}
         />
         {rightExtra}
       </div>
