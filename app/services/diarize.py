@@ -72,8 +72,7 @@ def transcriptions_url(diarization_url: str) -> str:
     No separate setting for this: it is the same LocalAI instance and the
     same model, just a different route -- one URL to keep in sync rather than
     two. Used for plain ASR (no diarization) on a channel already known to
-    hold exactly one speaker -- see transcribe_sync -- and by the live
-    caption relay's streaming calls.
+    hold exactly one speaker -- see transcribe_sync.
     """
     suffix = "/v1/audio/diarization"
     if diarization_url.endswith(suffix):
@@ -81,6 +80,31 @@ def transcriptions_url(diarization_url: str) -> str:
     # Not the shape we expected (a test double, a future path) -- leave it
     # alone rather than guessing at a rewrite that might be wrong.
     return diarization_url
+
+
+def realtime_url(diarization_url: str) -> str:
+    """Swap .../v1/audio/diarization for a ws(s)://.../v1/realtime URL on
+    the same host -- the persistent-session endpoint live captions relay
+    through (see routers/live_caption.py's module docstring for why: a
+    model's own cache-aware streaming only helps within one continuous
+    session, and /v1/audio/transcriptions is a stateless call-per-chunk
+    route that can never provide that, no matter how it's called).
+
+    http(s) becomes ws(s): this URL is only ever handed to a websocket
+    client, never a browser, so there is no mixed-content concern requiring
+    it to match the page's own scheme.
+    """
+    suffix = "/v1/audio/diarization"
+    if not diarization_url.endswith(suffix):
+        # Not the shape we expected (a test double, a future path) -- leave
+        # it alone rather than guessing at a rewrite that might be wrong.
+        return diarization_url
+    base = diarization_url[: -len(suffix)]
+    if base.startswith("https://"):
+        base = "wss://" + base[len("https://") :]
+    elif base.startswith("http://"):
+        base = "ws://" + base[len("http://") :]
+    return base + "/v1/realtime"
 
 
 def diarize_sync(

@@ -9,10 +9,17 @@ export interface Caption {
 
 /** Mirrors app/routers/live_caption.py's channel_worker states, pushed over
  * the same socket as `{"type": "status", channel, state}` -- purely for the
- * recorder UI's activity dot next to each level meter. */
-export type ActivityState = 'idle' | 'buffering' | 'calling' | 'reading';
+ * recorder UI's activity dot next to each level meter. idle (no speech) ->
+ * buffering (server VAD heard speech start) -> calling (VAD heard speech
+ * stop, transcription in flight) -> idle again. No `reading` state any
+ * more: that was the old per-chunk SSE route's "response confirmed good,
+ * consuming the stream" moment, which has no equivalent now that a
+ * /v1/realtime session pushes events on its own schedule rather than one
+ * response per call. */
+export type ActivityState = 'idle' | 'buffering' | 'calling';
 
 const DEFAULT_ACTIVITY: Record<'me' | 'room', ActivityState> = { me: 'idle', room: 'idle' };
+const DEFAULT_PARTIAL: Record<'me' | 'room', string> = { me: '', room: '' };
 
 const SAMPLE_RATE = 16000;
 // Native render quantum is 128 samples (~2.7 ms at 16 kHz) -- far too small
@@ -22,10 +29,10 @@ const FLUSH_SAMPLES = SAMPLE_RATE * 0.25;
 // Generous rather than tuned tight: the wide recorder layout's transcript
 // panel and Insights (useInsights) both read this same array as the whole
 // session's transcript so far, not just a rolling display window like the
-// original small caption strip needed. 2000 lines covers many hours at this
-// hook's ~3-8s-per-caption cadence, comfortably more than any realistic
-// single recording, while still bounding memory for a recording nobody
-// remembered to stop.
+// original small caption strip needed. 2000 lines covers many hours of
+// captions -- one per server-VAD-detected utterance, not a fixed cadence --
+// comfortably more than any realistic single recording, while still
+// bounding memory for a recording nobody remembered to stop.
 const MAX_CAPTIONS = 2000;
 
 /**
@@ -49,15 +56,29 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [connected, setConnected] = useState(false);
   const [activity, setActivity] = useState(DEFAULT_ACTIVITY);
-  const [isCacheAware, setIsCacheAware] = useState(false);
+  // True once the backend confirms this session is running through
+  // /v1/realtime (see live_caption.py's `info` message) -- always true
+  // today (there is no other path any more), but still sent explicitly
+  // rather than assumed, the same reasoning `connected` gets its own state
+  // instead of being inferred from `captions.length > 0`.
+  const [isRealtime, setIsRealtime] = useState(false);
   const [modelName, setModelName] = useState<string | null>(null);
+  // In-progress text for a still-open utterance, pushed as
+  // `{"type": "partial", channel, text}` if the backend ever emits a
+  // transcription delta before that utterance's own
+  // `{"type": "caption", ...}` commits -- see live_caption.py's
+  // _handle_realtime_event. Cleared for a channel the moment its next
+  // committed caption arrives (the partial it was building has just been
+  // superseded), and on disconnect/re-enable, same as activity above.
+  const [partial, setPartial] = useState(DEFAULT_PARTIAL);
 
   useEffect(() => {
     if (!enabled || (!streams.room && !streams.me)) {
       setConnected(false);
       setActivity(DEFAULT_ACTIVITY);
-      setIsCacheAware(false);
+      setIsRealtime(false);
       setModelName(null);
+      setPartial(DEFAULT_PARTIAL);
       return;
     }
 
@@ -74,8 +95,9 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       if (!cancelled) {
         setConnected(false);
         setActivity(DEFAULT_ACTIVITY);
-        setIsCacheAware(false);
+        setIsRealtime(false);
         setModelName(null);
+        setPartial(DEFAULT_PARTIAL);
       }
     };
     ws.onerror = () => {
@@ -86,7 +108,7 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       try {
         const msg = JSON.parse(event.data);
         if (msg?.type === 'info') {
-          setIsCacheAware(Boolean(msg.is_cache_aware));
+          setIsRealtime(Boolean(msg.is_realtime));
           if (msg.model) setModelName(String(msg.model));
         } else if (msg?.type === 'caption' && (msg.channel === 'me' || msg.channel === 'room')) {
           setCaptions((prev) =>
@@ -94,10 +116,16 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
               -MAX_CAPTIONS,
             ),
           );
+          // The committed caption supersedes whatever partial preview was
+          // building for this channel -- clear it rather than let it sit
+          // stale until the next partial happens to arrive and overwrite it.
+          setPartial((prev) => ({ ...prev, [msg.channel]: '' }));
+        } else if (msg?.type === 'partial' && (msg.channel === 'me' || msg.channel === 'room')) {
+          setPartial((prev) => ({ ...prev, [msg.channel]: String(msg.text ?? '') }));
         } else if (
           msg?.type === 'status' &&
           (msg.channel === 'me' || msg.channel === 'room') &&
-          ['idle', 'buffering', 'calling', 'reading'].includes(msg.state)
+          ['idle', 'buffering', 'calling'].includes(msg.state)
         ) {
           setActivity((prev) => ({ ...prev, [msg.channel]: msg.state as ActivityState }));
         }
@@ -193,5 +221,5 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     // practice it never changes mid-connection.
   }, [streams.room, streams.me, enabled, language]);
 
-  return { captions, connected, activity, isCacheAware, modelName };
+  return { captions, connected, activity, isRealtime, modelName, partial };
 }

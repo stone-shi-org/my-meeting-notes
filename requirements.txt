@@ -21,6 +21,12 @@ httpx-sse>=0.4.0
 # cannot intercept, so it would take the test suite offline-unsafe.
 icalendar>=6.0
 recurring-ical-events>=3.0
+# Async websocket client for live captions' persistent /v1/realtime session
+# (app/routers/live_caption.py) -- already arrives transitively (fastapi/
+# uvicorn pull it in), but pinned here because that module now imports it
+# directly to hold one long-lived connection per channel for the life of a
+# recording, not just the one-shot request/response respx already covers.
+websockets>=13.0
 pytest>=7.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.10.0

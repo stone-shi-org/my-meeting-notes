@@ -1,32 +1,89 @@
-"""The live-caption websocket: auth and the feature-flag gate.
+"""The live-caption websocket: auth, the feature-flag gate, and the
+/v1/realtime session relay.
 
-The relay's actual transcription plumbing (windowing, the SSE consumption, the
-me/room labelling) is exercised where it is pure and fast to test --
-app/services/diarize.py's transcribe_sync and the channel-merge helpers in
-test_diarize.py. This file covers what is specific to the socket itself:
-nothing gets in without a session, and nothing gets in while the feature is
-off, both fast and deterministic without needing to wait out a real
-window/interval cycle.
+Server VAD is off (see live_caption.py's module docstring for why: it only
+commits on a real pause, which starves continuous speech of any caption at
+all) -- this app commits each channel's buffer itself on a fixed cadence
+(live_caption_commit_interval_sec) instead. Tests that exercise the commit
+cadence pass a tiny interval so they run fast rather than waiting out the
+real default.
+
+Nothing here opens a real socket: _connect_realtime is the one seam every
+test monkeypatches, so the suite stays offline-safe the same way respx keeps
+the httpx-based routes offline-safe elsewhere.
 """
 
 from __future__ import annotations
 
-import array
 import asyncio
+import base64
+import json
 
-import httpx
 import pytest
-import respx
 from starlette.websockets import WebSocketDisconnect
 
 from app.db import utcnow
 from app.routers import live_caption
 
 
-def _pcm(*values: int) -> bytes:
-    """int16 samples -> raw little-endian PCM bytes, matching what the
-    browser actually sends (see useLiveCaption.ts)."""
-    return array.array("h", values).tobytes()
+class FakeRealtimeConnection:
+    """A fake /v1/realtime connection. `replies` is consumed in order by
+    both `recv()` (the two handshake replies _open_session reads) and the
+    `async for` event loop that follows -- same as a real websockets
+    connection, where `recv()` and iteration share one inbound message
+    stream, not two independent ones. `sent` records every outbound frame
+    this app pushed (the session.update handshake and forwarded audio
+    alike), so a test can assert on what was actually sent without needing
+    a real socket.
+    """
+
+    def __init__(self, replies):
+        self._replies = list(replies)
+        self.sent: list[str] = []
+        self.closed = False
+
+    async def send(self, message: str) -> None:
+        self.sent.append(message)
+
+    async def recv(self) -> str:
+        if not self._replies:
+            raise RuntimeError("FakeRealtimeConnection: no more replies queued")
+        return self._replies.pop(0)
+
+    async def close(self) -> None:
+        self.closed = True
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self) -> str:
+        if not self._replies:
+            raise StopAsyncIteration
+        return self._replies.pop(0)
+
+
+class FakeBrowserSocket:
+    """Stands in for the browser-facing WebSocket inside channel_worker.
+    `send_json` pushes onto an asyncio.Queue rather than a plain list, so a
+    test can `await` the next message instead of polling/sleeping for it --
+    this relay has no wall-clock cadence to wait out any more.
+    """
+
+    def __init__(self):
+        self.sent: asyncio.Queue = asyncio.Queue()
+
+    async def send_json(self, payload: dict) -> None:
+        await self.sent.put(payload)
+
+    async def next(self, timeout: float = 2.0) -> dict:
+        return await asyncio.wait_for(self.sent.get(), timeout=timeout)
+
+
+SESSION_CREATED = json.dumps({"type": "session.created"})
+SESSION_UPDATED = json.dumps({"type": "session.updated"})
+MODEL_NOT_PIPELINE_ERROR = json.dumps(
+    {"type": "error", "error": {"message": "Model is not a pipeline model", "code": "invalid_model"}}
+)
 
 
 class TestAuth:
@@ -53,104 +110,161 @@ class TestFeatureFlag:
                 pass
         assert exc.value.code == 4404
 
-    def test_accepts_once_enabled(self, admin_client, conn):
+    def test_accepts_once_enabled(self, admin_client, conn, monkeypatch):
         conn.execute(
             "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
             "VALUES ('live_caption_enabled', 'true', 'bool', 0, ?)",
             (utcnow(),),
         )
         conn.commit()
-        # No assertion beyond "the handshake completes" -- actually exercising
-        # a caption round trip needs a real window/interval wait, which is
-        # covered by unit tests on the pieces (transcribe_sync, the merge
-        # helpers) rather than a slow, timing-sensitive test here.
-        with admin_client.websocket_connect("/api/live-caption/ws"):
-            pass
+
+        # Fails fast rather than attempting a real network connection --
+        # this test only cares that the websocket handshake itself
+        # succeeds, not what a channel's session does with it.
+        async def fake_connect(url, model, api_key, open_timeout):
+            raise RuntimeError("no ASR backend in tests")
+
+        monkeypatch.setattr(live_caption, "_connect_realtime", fake_connect)
+
+        with admin_client.websocket_connect("/api/live-caption/ws") as ws:
+            info = ws.receive_json()
+            assert info["type"] == "info"
+            assert info["is_realtime"] is True
 
 
-class TestTranscribeWindow:
-    """_transcribe_window's SSE parsing. strip_language_tag's own regex is
-    unit-tested in test_diarize.py; this only checks it is actually wired
-    into the committed text, not just available."""
+class TestTranscriptionSessionUpdate:
+    def test_omits_language_when_unset(self):
+        payload = live_caption._transcription_session_update("some-model", None)
+        assert payload == {
+            "type": "session.update",
+            "session": {
+                "type": "transcription",
+                "audio": {
+                    "input": {
+                        "turn_detection": None,
+                        "transcription": {"model": "some-model"},
+                    }
+                },
+            },
+        }
 
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_a_language_tag_is_stripped_from_the_committed_text(self):
-        url = "http://asr.test/v1/audio/transcriptions"
-        respx.post(url).mock(
-            return_value=httpx.Response(
-                200,
-                headers={"content-type": "text/event-stream"},
-                text=(
-                    'data: {"type":"transcript.text.delta","delta":"Hello"}\n\n'
-                    'data: {"type":"transcript.text.done","text":"Hello there. <en-US>"}\n\n'
-                    "data: [DONE]\n\n"
-                ),
-            )
+    def test_turn_detection_is_off(self):
+        """Deliberate: server VAD only commits on a real pause, which
+        starves continuous speech of any caption at all -- see this
+        module's docstring. channel_worker commits on its own cadence
+        instead."""
+        payload = live_caption._transcription_session_update("some-model", None)
+        assert payload["session"]["audio"]["input"]["turn_detection"] is None
+
+    def test_includes_language_when_set(self):
+        payload = live_caption._transcription_session_update("some-model", "en")
+        assert payload["session"]["audio"]["input"]["transcription"] == {
+            "model": "some-model",
+            "language": "en",
+        }
+
+    def test_empty_string_language_is_treated_as_unset(self):
+        """The recorder UI sends '' for an explicit Auto-detect pick (see
+        live_caption_ws's own language-param handling) -- that must not
+        turn into a literal empty language field the backend might choke
+        on the same way it did on an English *name* on the old route."""
+        payload = live_caption._transcription_session_update("some-model", "")
+        assert "language" not in payload["session"]["audio"]["input"]["transcription"]
+
+
+class TestHandleRealtimeEvent:
+    """_handle_realtime_event's mapping from one realtime-session event to
+    what channel_worker should relay -- deliberately pure and side-effect
+    free, so this is exercised directly without a socket, the same
+    reasoning _transcribe_window's SSE parsing used to get on the old
+    per-chunk route."""
+
+    def test_speech_started_and_stopped_are_no_ops(self):
+        """Server VAD is off (see _transcription_session_update), so these
+        structurally cannot fire against this deployment -- but if a future
+        config or model variant ever sent them anyway, they must not be
+        mistaken for the buffering/calling signal channel_worker's own
+        commit cadence already owns."""
+        for etype in (
+            "input_audio_buffer.speech_started",
+            "input_audio_buffer.speech_stopped",
+        ):
+            result = live_caption._handle_realtime_event({"type": etype}, partial_so_far="carry me")
+            assert result == live_caption._RelayResult(next_partial="carry me")
+
+    def test_delta_accumulates_across_events(self):
+        first = live_caption._handle_realtime_event(
+            {"type": "conversation.item.input_audio_transcription.delta", "delta": "Hel"},
+            partial_so_far="",
         )
-        async with httpx.AsyncClient() as client:
-            text = await live_caption._transcribe_window(
-                client, url, "some-model", None, b"\x00\x00" * 100
-            )
-        assert text == "Hello there."
+        assert first.partial == "Hel"
+        assert first.next_partial == "Hel"
 
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_on_reading_fires_once_the_stream_is_confirmed_good(self):
-        """The recorder's activity dot -- see channel_worker's call sites --
-        only means "reading" once the response is confirmed not to be an
-        error; on_reading is the hook that tells it so."""
-        url = "http://asr.test/v1/audio/transcriptions"
-        respx.post(url).mock(
-            return_value=httpx.Response(
-                200,
-                headers={"content-type": "text/event-stream"},
-                text='data: {"type":"transcript.text.done","text":"hi"}\n\ndata: [DONE]\n\n',
-            )
+        second = live_caption._handle_realtime_event(
+            {"type": "conversation.item.input_audio_transcription.delta", "delta": "lo"},
+            partial_so_far=first.next_partial,
         )
-        calls = []
+        assert second.partial == "Hello"
+        assert second.next_partial == "Hello"
 
-        async def on_reading():
-            calls.append(1)
+    def test_completed_commits_a_stripped_caption_and_resets_partial(self):
+        result = live_caption._handle_realtime_event(
+            {
+                "type": "conversation.item.input_audio_transcription.completed",
+                "transcript": "  hello there  ",
+            },
+            partial_so_far="hello",
+        )
+        assert result.caption == "hello there"
+        assert result.status == "idle"
+        assert result.next_partial == ""
 
-        async with httpx.AsyncClient() as client:
-            await live_caption._transcribe_window(
-                client, url, "some-model", None, b"\x00\x00" * 100, on_reading=on_reading
-            )
-        assert calls == [1]
+    def test_completed_with_blank_transcript_does_not_commit_a_caption(self):
+        """A dropped caption is invisible to the user; sending an empty one
+        would not be -- it would render as a blank line."""
+        result = live_caption._handle_realtime_event(
+            {"type": "conversation.item.input_audio_transcription.completed", "transcript": "   "},
+            partial_so_far="",
+        )
+        assert result.caption is None
+        assert result.status == "idle"
 
-    @respx.mock
-    @pytest.mark.asyncio
-    async def test_on_reading_does_not_fire_on_a_rejected_response(self):
-        url = "http://asr.test/v1/audio/transcriptions"
-        respx.post(url).mock(return_value=httpx.Response(500, text="nope"))
-        calls = []
+    def test_failed_surfaces_a_warning_and_resets_to_idle(self):
+        result = live_caption._handle_realtime_event(
+            {
+                "type": "conversation.item.input_audio_transcription.failed",
+                "error": {"message": "boom"},
+            },
+            partial_so_far="partial text",
+        )
+        assert result.warning == "boom"
+        assert result.status == "idle"
+        assert result.caption is None
+        assert result.next_partial == ""
 
-        async def on_reading():
-            calls.append(1)
+    def test_bare_error_event_surfaces_a_warning_without_touching_status(self):
+        result = live_caption._handle_realtime_event(
+            {"type": "error", "error": {"message": "unknown_thing"}}, partial_so_far="carry me"
+        )
+        assert result.warning == "unknown_thing"
+        assert result.status is None
+        # Not reset -- a bare mid-session error is not a transcription
+        # outcome, unlike .failed above.
+        assert result.next_partial == "carry me"
 
-        async with httpx.AsyncClient() as client:
-            text = await live_caption._transcribe_window(
-                client, url, "some-model", None, b"\x00\x00" * 100, on_reading=on_reading
-            )
-        assert text == ""
-        assert calls == []
+    def test_an_unrecognised_event_type_is_a_no_op(self):
+        result = live_caption._handle_realtime_event(
+            {"type": "some.future.event"}, partial_so_far="carry me"
+        )
+        assert result == live_caption._RelayResult(next_partial="carry me")
 
 
 class TestSendStatus:
-    """The recorder activity dot's transport -- best-effort, same
-    swallow-everything policy as the caption send it sits next to."""
-
     @pytest.mark.asyncio
     async def test_sends_the_expected_shape(self):
-        sent = []
-
-        class FakeWebSocket:
-            async def send_json(self, payload):
-                sent.append(payload)
-
-        await live_caption._send_status(FakeWebSocket(), "room", "calling")
-        assert sent == [{"type": "status", "channel": "room", "state": "calling"}]
+        browser = FakeBrowserSocket()
+        await live_caption._send_status(browser, "room", "calling")
+        assert await browser.next() == {"type": "status", "channel": "room", "state": "calling"}
 
     @pytest.mark.asyncio
     async def test_a_dead_socket_does_not_raise(self):
@@ -158,116 +272,232 @@ class TestSendStatus:
             async def send_json(self, payload):
                 raise RuntimeError("socket is gone")
 
-        # Must not raise -- a dropped status update is invisible to the
-        # user, and letting it escape would kill channel_worker over
-        # something that was never essential to begin with.
         await live_caption._send_status(DeadWebSocket(), "me", "idle")
 
 
-class TestAsrConcurrencyLimit:
-    """room and me are independent asyncio tasks on the same cadence (see
-    channel_worker) -- without _ASR_CONCURRENCY they'd fire simultaneous
-    requests at a backend observed to hang under concurrent load. This
-    checks the mutual exclusion directly, deterministically (no wall-clock
-    sleeps to race against), rather than through a real websocket session."""
+class TestSendPartial:
+    @pytest.mark.asyncio
+    async def test_sends_the_expected_shape(self):
+        browser = FakeBrowserSocket()
+        await live_caption._send_partial(browser, "me", "hel")
+        assert await browser.next() == {"type": "partial", "channel": "me", "text": "hel"}
+
+
+class TestOpenSession:
+    @pytest.mark.asyncio
+    async def test_happy_path_sends_the_transcription_session_update(self, monkeypatch):
+        conn = FakeRealtimeConnection([SESSION_CREATED, SESSION_UPDATED])
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
+
+        result = await live_caption._open_session(
+            "ws://asr.test/v1/realtime", "some-model", "key", "en", 5
+        )
+
+        assert result is conn
+        assert conn.closed is False
+        assert json.loads(conn.sent[0]) == live_caption._transcription_session_update(
+            "some-model", "en"
+        )
 
     @pytest.mark.asyncio
-    async def test_a_second_caller_waits_for_the_first_to_release(self):
-        order = []
-        hold_a = asyncio.Event()
-        release_a = asyncio.Event()
-        hold_b = asyncio.Event()
-        release_b = asyncio.Event()
+    async def test_a_rejected_model_raises_and_closes_the_connection(self, monkeypatch):
+        conn = FakeRealtimeConnection([MODEL_NOT_PIPELINE_ERROR])
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
 
-        async def hold(tag, hold_event, release_event):
-            async with live_caption._ASR_CONCURRENCY:
-                order.append(f"{tag}-start")
-                hold_event.set()
-                await release_event.wait()
-                order.append(f"{tag}-end")
+        with pytest.raises(live_caption._RealtimeSessionError, match="pipeline model"):
+            await live_caption._open_session("ws://asr.test/v1/realtime", "bad-model", None, None, 5)
 
-        task_a = asyncio.create_task(hold("a", hold_a, release_a))
-        await hold_a.wait()  # a now holds the semaphore
+        assert conn.closed is True
+        # Never got as far as sending session.update.
+        assert conn.sent == []
 
-        task_b = asyncio.create_task(hold("b", hold_b, release_b))
-        # b must not be able to acquire while a still holds it -- give the
-        # event loop a beat to prove it *doesn't* start, not just that it
-        # hasn't started yet.
-        await asyncio.sleep(0)
-        assert not hold_b.is_set(), "b acquired the semaphore while a still held it"
+    @pytest.mark.asyncio
+    async def test_a_rejected_session_update_raises_and_closes_the_connection(self, monkeypatch):
+        conn = FakeRealtimeConnection([SESSION_CREATED, MODEL_NOT_PIPELINE_ERROR])
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
 
-        release_a.set()
-        await task_a
-        await hold_b.wait()
-        release_b.set()
-        await task_b
+        with pytest.raises(live_caption._RealtimeSessionError):
+            await live_caption._open_session("ws://asr.test/v1/realtime", "some-model", None, None, 5)
 
-        assert order == ["a-start", "a-end", "b-start", "b-end"]
+        assert conn.closed is True
+        assert len(conn.sent) == 1
 
 
-class TestPeakAmplitude:
-    """The local silence gate -- see SILENCE_PEAK_THRESHOLD's doc comment
-    for why MIN_BUFFER_SEC alone (buffer length, not content) never caught
-    a channel that has plenty of buffered audio but none of it is speech."""
+def _fake_connect(conn: FakeRealtimeConnection):
+    async def fake_connect(url, model, api_key, open_timeout):
+        return conn
 
-    def test_digital_silence_is_zero(self):
-        assert live_caption._peak_amplitude(_pcm(0, 0, 0, 0)) == 0.0
-
-    def test_empty_buffer_is_zero(self):
-        assert live_caption._peak_amplitude(b"") == 0.0
-
-    def test_a_torn_trailing_byte_is_dropped_not_raised(self):
-        # One full sample (0) plus one stray odd byte.
-        assert live_caption._peak_amplitude(_pcm(0) + b"\x01") == 0.0
-
-    def test_low_level_noise_floor_stays_below_threshold(self):
-        # A quiet mic's own noise floor -- comfortably under 2% of full scale.
-        peak = live_caption._peak_amplitude(_pcm(50, -60, 40, -30))
-        assert peak < live_caption.SILENCE_PEAK_THRESHOLD
-
-    def test_a_speaking_voice_clears_the_threshold(self):
-        peak = live_caption._peak_amplitude(_pcm(100, -20000, 500, 19000))
-        assert peak > live_caption.SILENCE_PEAK_THRESHOLD
-
-    def test_peak_is_the_largest_magnitude_regardless_of_sign(self):
-        # The most negative sample is the true peak here, not the max().
-        peak = live_caption._peak_amplitude(_pcm(100, -30000, 200))
-        assert peak == pytest.approx(30000 / 32768)
-
-    def test_all_positive_samples_still_find_their_peak(self):
-        # Regression guard: an earlier draft used -min(samples) for the
-        # negative side, which is wrong (and negative) when every sample is
-        # non-negative -- abs() on both ends is what's actually needed.
-        peak = live_caption._peak_amplitude(_pcm(10, 25000, 5))
-        assert peak == pytest.approx(25000 / 32768)
+    return fake_connect
 
 
-class TestCacheAwareStreaming:
-    """Tests for native cache-aware streaming model detection and chunk extraction."""
+class TestChannelWorker:
+    """channel_worker's own commit cadence is what paces captions now (see
+    the module docstring for why server VAD is off) -- tests pass a tiny
+    commit_interval_sec so they run fast rather than waiting out the real
+    default."""
 
-    def test_detects_nemotron_and_cache_aware_models(self):
-        assert live_caption._is_cache_aware_model("nemotron-3.5-asr-streaming-0.6b")
-        assert live_caption._is_cache_aware_model("parakeet-cpp-nemotron-3.5-asr-streaming-0.6b")
-        assert live_caption._is_cache_aware_model("stt_en_fastconformer_cache_aware")
-        assert not live_caption._is_cache_aware_model("whisper-large-turbo-q8_0")
-        assert not live_caption._is_cache_aware_model("vibevoice-cpp-asr")
+    @pytest.mark.asyncio
+    async def test_relays_a_committed_utterance_and_forwards_queued_audio(self, monkeypatch):
+        conn = FakeRealtimeConnection(
+            [
+                SESSION_CREATED,
+                SESSION_UPDATED,
+                json.dumps(
+                    {
+                        "type": "conversation.item.input_audio_transcription.completed",
+                        "transcript": "hello there",
+                    }
+                ),
+            ]
+        )
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
 
-    def test_pop_chunk_bytes_consumes_audio_non_overlapping(self):
-        buf = live_caption._ChannelBuffer()
-        # 1 second of 16kHz mono int16 audio (32,000 bytes)
-        buf.samples.extend(b"\x01\x00" * 16000)
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(b"\x01\x02\x03")
 
-        # Pop 0.5 seconds (16,000 bytes)
-        chunk1 = buf.pop_chunk_bytes(0.5)
-        assert len(chunk1) == 16000
-        assert len(buf.samples) == 16000  # Consumed
+        task = asyncio.create_task(
+            live_caption.channel_worker(
+                0, browser, queue, "ws://asr.test/v1/realtime", "some-model", None, None, 5, 0.05
+            )
+        )
+        try:
+            # forward_audio (buffering) and periodic_commit (calling) fire
+            # from two independent coroutines against a fake connection that
+            # doesn't correlate replies to requests, so their relative order
+            # here isn't meaningful -- only that all three status states and
+            # the caption itself all arrive.
+            messages = [await browser.next() for _ in range(4)]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
-        # Pop remaining 0.5 seconds
-        chunk2 = buf.pop_chunk_bytes(0.5)
-        assert len(chunk2) == 16000
-        assert len(buf.samples) == 0  # Fully consumed
+        statuses = {m["state"] for m in messages if m["type"] == "status"}
+        captions = [m for m in messages if m["type"] == "caption"]
+        assert statuses == {"buffering", "calling", "idle"}
+        assert captions == [{"type": "caption", "channel": "room", "text": "hello there"}]
 
-        # Popping from empty buffer yields empty bytes
-        chunk3 = buf.pop_chunk_bytes(0.5)
-        assert chunk3 == b""
+        assert conn.closed is True
+        sent = [json.loads(s) for s in conn.sent]
+        # sent[0] is _open_session's own session.update handshake -- what
+        # matters here is that an append (with our audio) and a commit both
+        # went out on top of it.
+        appends = [s for s in sent if s["type"] == "input_audio_buffer.append"]
+        assert len(appends) == 1
+        assert base64.b64decode(appends[0]["audio"]) == b"\x01\x02\x03"
+        assert any(s["type"] == "input_audio_buffer.commit" for s in sent)
 
+    @pytest.mark.asyncio
+    async def test_a_channel_with_no_new_audio_never_commits(self, monkeypatch):
+        """pending_audio only becomes true once something is actually
+        forwarded -- an idle channel (nothing ever queued) must not pay for
+        a round trip on silence, the same reasoning the old design's
+        SILENCE_PEAK_THRESHOLD had, just driven by "did anything arrive"
+        rather than a local amplitude check."""
+        conn = FakeRealtimeConnection([SESSION_CREATED, SESSION_UPDATED])
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        task = asyncio.create_task(
+            live_caption.channel_worker(
+                0, browser, queue, "ws://asr.test/v1/realtime", "some-model", None, None, 5, 0.05
+            )
+        )
+        try:
+            # Give periodic_commit several ticks' worth of time to prove it
+            # stays quiet, not just that it hasn't fired *yet*.
+            await asyncio.sleep(0.2)
+            assert browser.sent.empty()
+            # The handshake's own session.update is expected -- nothing
+            # beyond it (no append, no commit) for a channel nothing was
+            # ever queued on.
+            sent_types = [json.loads(s)["type"] for s in conn.sent]
+            assert sent_types == ["session.update"]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    async def test_a_model_rejected_at_open_leaves_the_channel_idle_and_returns(self, monkeypatch):
+        """No session to poll and nothing left to retry -- see
+        _RealtimeSessionError's doc comment -- so channel_worker must end on
+        its own here, not hang waiting on a connection that will never
+        exist."""
+        conn = FakeRealtimeConnection([MODEL_NOT_PIPELINE_ERROR])
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        await asyncio.wait_for(
+            live_caption.channel_worker(
+                1, browser, queue, "ws://asr.test/v1/realtime", "bad-model", None, None, 5, 0.05
+            ),
+            timeout=2,
+        )
+
+        assert await browser.next() == {"type": "status", "channel": "me", "state": "idle"}
+        assert browser.sent.empty()
+
+
+class TestLiveCaptionWsRealtimeRelay:
+    """A full round trip through the real websocket endpoint, given a faked
+    /v1/realtime connection. The only wall-clock dependency left is
+    periodic_commit's cadence, overridden to a tiny interval here rather
+    than waiting out the real default."""
+
+    def test_relays_captions_from_both_channels(self, admin_client, conn, monkeypatch):
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_enabled', 'true', 'bool', 0, ?)",
+            (utcnow(),),
+        )
+        # Real default is 2s -- a tiny override here so the test doesn't
+        # have to wait out periodic_commit's real cadence.
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_commit_interval_sec', '0.05', 'float', 0, ?)",
+            (utcnow(),),
+        )
+        conn.commit()
+
+        script = [
+            SESSION_CREATED,
+            SESSION_UPDATED,
+            json.dumps(
+                {
+                    "type": "conversation.item.input_audio_transcription.completed",
+                    "transcript": "hi there",
+                }
+            ),
+        ]
+
+        # Each channel opens its own connection -- a fresh fake per call, so
+        # the two channels' event streams never share (or contend over) one
+        # FakeRealtimeConnection's internal reply list.
+        async def fake_connect(url, model, api_key, open_timeout):
+            return FakeRealtimeConnection(list(script))
+
+        monkeypatch.setattr(live_caption, "_connect_realtime", fake_connect)
+
+        with admin_client.websocket_connect("/api/live-caption/ws") as ws:
+            info = ws.receive_json()
+            assert info == {
+                "type": "info",
+                "model": "lfm2.5-audio-1.5b-realtime",
+                "is_realtime": True,
+            }
+
+            ws.send_bytes(b"\x00" + b"\x01\x02")  # channel 0 ("room")
+            ws.send_bytes(b"\x01" + b"\x01\x02")  # channel 1 ("me")
+
+            captions: dict[str, str] = {}
+            # 4 messages per channel (buffering, calling, idle, caption).
+            for _ in range(8):
+                msg = ws.receive_json()
+                if msg["type"] == "caption":
+                    captions[msg["channel"]] = msg["text"]
+
+        assert captions == {"room": "hi there", "me": "hi there"}

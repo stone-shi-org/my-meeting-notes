@@ -573,7 +573,7 @@ export function LiveCaptionsSettingsPage() {
   return (
     <SettingsForm
       title="Live captions"
-      description="Rolling-window text captions shown while a recording is in progress. Off by default: every open connection adds periodic extra calls to the diarization endpoint above, on top of the real diarizer and the language model."
+      description="A persistent streaming session per audio channel, held open for the whole recording, shown as a rough transcript while it's in progress. Off by default: every open connection holds a session against the diarization endpoint's host above, on top of the real diarizer and the language model."
       modelsPath="/diarization/models"
       modelKey="live_caption_model"
       testPath="/diarization/test"
@@ -590,30 +590,24 @@ export function LiveCaptionsSettingsPage() {
         {
           key: 'live_caption_model',
           label: 'Model',
-          hint: 'Leave blank to use the Diarization model above. Note the Test button below checks this model against the batch diarization endpoint, not the streaming route live captions actually call -- the two have been observed to behave differently under load for the same model.',
+          hint: 'Must be registered on the backend as a realtime *pipeline* model -- a plain ASR/LLM model (including the Diarization model above) gets the connection rejected outright with "Model is not a pipeline model". The Test button below only checks connectivity to the host, not whether this specific model is realtime-capable there.',
         },
         {
           key: 'live_caption_language',
           label: 'Language',
-          hint: 'ISO-639-1 code, e.g. en -- not the language name (that has been seen to silently break streaming entirely on at least one backend, with an unrelated-looking error). Leave blank for per-window auto-detection, which a short rolling window can misfire on for an accented phrase, a name, or silence.',
+          hint: 'ISO-639-1 code, e.g. en -- not the language name (seen to silently break streaming entirely on at least one backend, with an unrelated-looking error). Leave blank for auto-detection.',
         },
         {
-          key: 'live_caption_window_sec',
-          label: 'Rolling window (seconds)',
+          key: 'live_caption_commit_interval_sec',
+          label: 'Commit interval (seconds)',
           type: 'number',
-          hint: 'How much trailing audio each call covers.',
-        },
-        {
-          key: 'live_caption_interval_sec',
-          label: 'Call interval (seconds)',
-          type: 'number',
-          hint: 'How often a channel gets a new call.',
+          hint: "How often each channel commits whatever audio arrived since the last commit. The backend's own VAD-based auto-commit is off on purpose: it only committed on a real pause, so continuous speech produced no captions at all until the speaker stopped -- this fixed cadence is what paces captions now. Lower is snappier but calls the backend more often.",
         },
         {
           key: 'live_caption_timeout_sec',
-          label: 'Call timeout (seconds)',
+          label: 'Connect timeout (seconds)',
           type: 'number',
-          hint: 'How long one call may run before it is treated as failed and skipped. A short window of real speech can legitimately take longer to decode than a short/silent one.',
+          hint: 'How long one channel may take to open its session and complete the initial handshake before that channel gives up for the rest of the recording. This bounds a one-time cost per channel per recording, not a per-caption one -- once a session is open, it just stays open.',
         },
       ]}
     />

@@ -1,12 +1,61 @@
 """Live captions during an active recording.
 
-Rolling-window relay: the browser streams raw PCM over one websocket, tagged
-by channel (0 = whatever the tab/system capture is picking up -- "the room";
-1 = the local microphone -- see useLiveCaption.ts). This reuses the channel
-convention from the channel-separated recording feature
+Realtime relay: the browser streams raw 16kHz mono PCM16 over one websocket,
+tagged by channel (0 = whatever the tab/system capture is picking up -- "the
+room"; 1 = the local microphone -- see useLiveCaption.ts). This reuses the
+channel convention from the channel-separated recording feature
 (services/audio.py/diarize.py) for labelling only, never for accuracy: a live
 caption is a disposable draft, and unlike diarize_channels_file's output it
 is never written to transcripts/diarizations.
+
+Each channel gets its own persistent session on the ASR backend's
+/v1/realtime endpoint (see services/diarize.realtime_url) -- audio is
+forwarded to that session the moment it arrives off the browser socket, with
+no local windowing on our side.
+
+Server VAD is deliberately turned OFF (_transcription_session_update sends
+``turn_detection: null``), and this app commits the buffer itself on a fixed
+cadence (live_caption_commit_interval_sec) instead. That is not the obvious
+choice -- the realtime protocol's own server-side VAD looks like the "right"
+way to segment turns -- but it measured badly: with VAD on, nothing is
+committed until the backend detects a real pause (its own default is 500ms
+of silence), so a person talking continuously without a clean pause produces
+*no captions at all* until they stop, which is exactly what shows up as
+"big latency until words show up." Attempting to tune that threshold down
+(passing extra fields alongside ``turn_detection.type`` in session.update)
+was tried against this deployment and made it worse, not better: the extra
+fields were silently ignored or -- worse -- the whole VAD detector stopped
+firing "speech_stopped" at all for the rest of the session. Manual
+``input_audio_buffer.commit`` is rejected outright while VAD is active
+("not_implemented"), so there was no middle ground -- it had to be one or
+the other. With VAD off, a periodic commit measured ~50-150ms turnaround
+per commit even under continuous speech with zero pauses, which is what
+actually fixed the reported latency.
+
+This replaces an earlier design that periodically POSTed short windows of
+audio to the stateless /v1/audio/transcriptions route. That design could
+never benefit from a model's own cache-aware streaming architecture no
+matter how it tuned the window/chunk size: every POST was a fresh,
+disconnected call with no session id or persistent connection tying one call
+to the next, so a model's internal cache was reset on every single call
+regardless of chunk size. A persistent /v1/realtime session is the only way
+this backend actually exposes cross-chunk continuity, so that is what this
+now speaks (each commit still shares the one open connection/session per
+channel, unlike the old per-chunk design's fresh connection every time), and
+there is no more cache-aware-vs-not special case: it never delivered a real
+benefit once the old calls were confirmed stateless, so it has been removed
+rather than kept around as a second, effectively-dead code path.
+
+Confirmed against this deployment: only one model
+(live_caption_model's default, "lfm2.5-audio-1.5b-realtime") is registered
+as a realtime *pipeline* model. Every other model tried -- including the
+batch diarizer's own diarization_model -- gets a /v1/realtime connection
+rejected outright with "Model is not a pipeline model" the moment it opens,
+regardless of query parameters. A freshly-opened session also defaults to a
+full voice-assistant pipeline (spoken replies via server-VAD-triggered
+turn_detection.create_response) -- _open_session's session.update switches
+it to a passive transcription-only session before any audio is forwarded,
+so this never talks back.
 
 Deliberately not a job (see jobs/queue.py). Nothing here is durable or
 resumable -- a dropped connection just means the browser reconnects and
@@ -14,82 +63,64 @@ captions resume a moment later. There is nothing to recover, unlike an
 ingest job that must survive a process restart, so this gets its own
 in-memory relay instead of a job type, a jobs row, or any sqlite write.
 
-Each channel gets its own rolling buffer and its own periodic call to
-/v1/audio/transcriptions?stream=true -- the same LocalAI instance and
-credentials as batch diarization, just the plain-text streaming route
-instead of the diarizing one. That route never carries speaker labels (see
-diarize.py's diarize_channels_file docstring); channel identity substitutes
-for it here, at zero extra model cost.
-
-The model defaults to whatever batch diarization uses (diarization_model)
-but can be overridden separately via live_caption_model -- the streaming
-route and the batch route on the same LocalAI instance have been observed
-to behave very differently under load for the same model, so an operator
-needs to be able to point this feature at a more reliable one without
-touching what batch diarization uses.
-
 Besides ``{"type": "caption", ...}`` messages, each channel_worker also
-pushes ``{"type": "status", "channel": ..., "state": ...}`` on every state
-change -- idle (nothing worth sending) -> buffering (real audio, waiting on
-_ASR_CONCURRENCY's one slot) -> calling (request sent) -> reading (SSE
-stream started) -> idle again. Purely cosmetic (the recorder UI's activity
-dot, see useLiveCaption.ts); nothing here or downstream reads it back.
+pushes ``{"type": "status", "channel": ..., "state": ...}`` -- idle (no new
+audio since the last commit) -> buffering (new audio has arrived) -> calling
+(a commit was just sent, transcription in flight) -> idle again -- and
+``{"type": "partial", "channel": ..., "text": ...}`` if the backend ever
+emits ``conversation.item.input_audio_transcription.delta`` events
+mid-commit (not observed against this deployment, but relayed if a future
+model/version produces them). Both are purely cosmetic/best-effort, same as
+before.
+
+No process-wide concurrency cap on open sessions (the old design's
+_ASR_CONCURRENCY is gone): that limit existed to serialize many short-lived
+*calls* against a backend observed to hang under concurrent load, which
+doesn't map cleanly onto a small number of long-lived *connections* held
+open for a whole recording. Concurrent /v1/realtime sessions haven't been
+load-tested on this deployment -- if that turns out to be a problem, a cap
+on total open sessions (not calls) would need to be reintroduced.
 """
 
 from __future__ import annotations
 
-import array
 import asyncio
-import io
+import base64
+import contextlib
 import json
-import wave
-from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from urllib.parse import urlencode
 
-import httpx
+import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
-from httpx_sse import SSEError, aconnect_sse
+from websockets.exceptions import ConnectionClosed
 
 from app.config import effective, get_settings
 from app.db import get_conn
 from app.logging_config import get_logger
 from app.services import users as users_svc
-from app.services.diarize import _headers, strip_language_tag, transcriptions_url
+from app.services.diarize import realtime_url
 
 log = get_logger("live_caption")
 
 router = APIRouter(prefix="/api/live-caption", tags=["live-caption"])
 
-SAMPLE_RATE = 16000
-BYTES_PER_SAMPLE = 2  # int16 mono
 CHANNEL_NAMES = {0: "room", 1: "me"}
-# Below this a window is mostly silence padding from a channel that has
-# barely spoken yet -- not worth a call to a shared, minutes-latency box.
-MIN_BUFFER_SEC = 1.0
 
-# Below this fraction of int16 full scale (32768), a window is treated as
-# silence and never sent to the ASR backend at all. This is a genuine
-# amplitude check, unlike MIN_BUFFER_SEC above (which only gates on how much
-# audio has accumulated, not whether any of it is speech) -- a channel
-# nobody is talking on would otherwise fire a request every interval_sec for
-# the entire session, relying on the model to notice it's silence and
-# return empty text after paying for the round trip and an _ASR_CONCURRENCY
-# slot. ~2% of full scale: comfortably above a quiet mic's own noise floor,
-# comfortably below even a soft speaking voice's peak.
-SILENCE_PEAK_THRESHOLD = 0.02
 
-# room and me are two independent asyncio tasks (see channel_worker below)
-# with the same interval_sec cadence, so without this they fire their ASR
-# calls at essentially the same moment -- two concurrent requests to a
-# backend that has been observed to hang entirely (not just slow down) under
-# concurrent load, per live_caption_timeout_sec's doc comment in config.py.
-# Process-wide, not per-connection: the backend is shared across every
-# simultaneous live-caption session this app has open, not just the two
-# channels of one, and per-connection serialization alone would still let
-# two different users' sessions collide. 1 matches what was actually
-# observed to work reliably; raise it only after confirming the backend
-# genuinely tolerates more concurrent requests than that.
-_ASR_CONCURRENCY = asyncio.Semaphore(1)
+class _RealtimeSessionError(Exception):
+    """A channel's /v1/realtime connection could not be opened or switched
+    to a transcription-only session -- e.g. the configured model is not
+    registered as a realtime pipeline model on this backend ("Model is not a
+    pipeline model", confirmed against this deployment for every model
+    except live_caption_model's default). Unlike a mid-session hiccup
+    (handled inline in the event-relay loop, which just drops one event and
+    keeps going), there is nothing to retry once this happens -- the model
+    will reject the next attempt exactly the same way -- so channel_worker
+    logs it once and leaves that channel silent for the rest of the
+    recording rather than looping forever against a connection that will
+    never succeed.
+    """
 
 
 async def _authenticate(websocket: WebSocket) -> dict | None:
@@ -110,78 +141,11 @@ async def _authenticate(websocket: WebSocket) -> dict | None:
     return dict(user)
 
 
-@dataclass
-class _ChannelBuffer:
-    samples: bytearray = field(default_factory=bytearray)
-    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-
-    def window_bytes(self, window_sec: float) -> bytes:
-        """Trim to the trailing window and hand back a copy.
-
-        Trimming here, not just on read, is what keeps a channel nobody is
-        speaking on from growing its buffer for the entire meeting.
-        """
-        max_bytes = int(window_sec * SAMPLE_RATE * BYTES_PER_SAMPLE)
-        if len(self.samples) > max_bytes:
-            del self.samples[: len(self.samples) - max_bytes]
-        return bytes(self.samples)
-
-    def pop_chunk_bytes(self, max_chunk_sec: float) -> bytes:
-        """Extract and consume up to max_chunk_sec of audio samples for non-overlapping
-        cache-aware delta streaming (e.g. for nemotron-3.5-asr-streaming-0.6b).
-        """
-        max_bytes = int(max_chunk_sec * SAMPLE_RATE * BYTES_PER_SAMPLE)
-        chunk_len = min(len(self.samples), max_bytes)
-        chunk = bytes(self.samples[:chunk_len])
-        del self.samples[:chunk_len]
-        return chunk
-
-
-def _is_cache_aware_model(model: str) -> bool:
-    """Returns True if the specified ASR model is a native cache-aware streaming model
-    (e.g., nemotron-3.5-asr-streaming-0.6b).
-    """
-    m = model.lower()
-    return "nemotron" in m or "cache-aware" in m or "cache_aware" in m
-
-
-
-def _peak_amplitude(pcm: bytes) -> float:
-    """Peak absolute sample value over a window, 0..1 (int16 full scale is
-    32768). Peak, not RMS -- same choice as the recorder's own level meter
-    (see useRecorder.ts's nextLevel): RMS reads near-silent between
-    syllables at this granularity, peak does not.
-
-    Assumes little-endian samples, true for every real deployment target
-    (the browser's Int16Array and every platform this actually runs on) and
-    not worth defending against for a threshold heuristic, not a decode.
-    """
-    # A torn trailing byte (an odd-length buffer) is dropped rather than
-    # raising -- this is a cheap gate, not a decoder; one missing sample
-    # changes nothing.
-    usable = len(pcm) - (len(pcm) % 2)
-    if usable <= 0:
-        return 0.0
-    samples = array.array("h")
-    samples.frombytes(pcm[:usable])
-    return max(abs(min(samples)), abs(max(samples))) / 32768
-
-
-def _wav_bytes(pcm: bytes) -> bytes:
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wav_file:
-        wav_file.setnchannels(1)
-        wav_file.setsampwidth(BYTES_PER_SAMPLE)
-        wav_file.setframerate(SAMPLE_RATE)
-        wav_file.writeframes(pcm)
-    return buf.getvalue()
-
-
 async def _send_status(websocket: WebSocket, channel: str, state: str) -> None:
     """Best-effort activity signal for the recorder UI's per-channel dot
-    (idle/buffering/calling/reading -- see channel_worker's call sites).
-    Same swallow-everything policy as the caption send below it: a dropped
-    status update is invisible to the user, and letting it raise would kill
+    (idle/buffering/calling -- see channel_worker's call sites). Same
+    swallow-everything policy as the caption send below it: a dropped status
+    update is invisible to the user, and letting it raise would kill
     channel_worker over something that was never essential to begin with.
     """
     try:
@@ -190,70 +154,256 @@ async def _send_status(websocket: WebSocket, channel: str, state: str) -> None:
         pass
 
 
-async def _transcribe_window(
-    client: httpx.AsyncClient,
+async def _send_partial(websocket: WebSocket, channel: str, text: str) -> None:
+    """In-progress transcript for one still-open utterance -- pushed if the
+    backend ever emits a transcription delta event before its matching
+    ``completed`` commits a real ``{"type": "caption", ...}``. Same
+    best-effort swallow policy as _send_status.
+    """
+    try:
+        await websocket.send_json({"type": "partial", "channel": channel, "text": text})
+    except Exception:
+        pass
+
+
+def _transcription_session_update(model: str, language: str | None) -> dict:
+    """The session.update payload that switches a freshly-opened
+    /v1/realtime connection from its default full voice-assistant pipeline
+    (spoken replies, turn_detection.create_response=true, a "helpful voice
+    assistant" system prompt) into a passive transcription-only session --
+    confirmed against this backend that without this, the session stays in
+    full-assistant mode and would try to generate spoken responses instead
+    of just transcribing what it hears.
+
+    ``turn_detection: None`` turns off the backend's own server-side VAD --
+    see this module's docstring for why: it only commits on a real pause,
+    which starves continuous speech of any caption at all, and attempts to
+    tune its threshold down were silently ignored or broke it outright.
+    channel_worker commits the buffer itself on a fixed cadence instead.
+
+    ``language`` is omitted entirely when unset, same reasoning the old
+    per-chunk route had: leaves auto-detection on rather than forcing a
+    guess.
+    """
+    transcription: dict[str, str] = {"model": model}
+    if language:
+        transcription["language"] = language
+    return {
+        "type": "session.update",
+        "session": {
+            "type": "transcription",
+            "audio": {
+                "input": {
+                    "turn_detection": None,
+                    "transcription": transcription,
+                }
+            },
+        },
+    }
+
+
+@dataclass
+class _RelayResult:
+    """What one realtime-session event means for channel_worker to relay to
+    the browser -- see _handle_realtime_event. Kept as a plain data carrier,
+    separate from the websocket sends themselves, so the event-to-message
+    mapping is fast and deterministic to test without a real socket.
+    """
+
+    next_partial: str = ""
+    status: str | None = None
+    partial: str | None = None
+    caption: str | None = None
+    warning: str | None = None
+
+
+def _handle_realtime_event(event: dict, partial_so_far: str) -> _RelayResult:
+    """Pure mapping from one /v1/realtime event to what channel_worker
+    should relay -- see this module's docstring for the event shapes.
+    Deliberately side-effect-free (no logging, no websocket sends) so this
+    is fast and deterministic to test, the same reasoning _transcribe_window
+    the old SSE parsing used to get on the per-chunk route.
+
+    No ``input_audio_buffer.speech_started``/``speech_stopped`` handling
+    here on purpose: server VAD is turned off (see
+    _transcription_session_update), so those events structurally cannot
+    fire. buffering/calling status instead comes from channel_worker's own
+    commit cadence, not from anything in this mapping.
+
+    An event type this deployment hasn't been observed to send (or a bare
+    ``{"type": "error", ...}`` with nothing else this app understands) is
+    not an error on its own -- it is simply not relayed, and partial_so_far
+    passes through unchanged.
+    """
+    etype = event.get("type")
+    if etype == "conversation.item.input_audio_transcription.delta":
+        updated = partial_so_far + (event.get("delta") or "")
+        return _RelayResult(next_partial=updated, partial=updated or None)
+    if etype == "conversation.item.input_audio_transcription.completed":
+        text = (event.get("transcript") or "").strip()
+        return _RelayResult(next_partial="", status="idle", caption=text or None)
+    if etype == "conversation.item.input_audio_transcription.failed":
+        message = (event.get("error") or {}).get("message") or "transcription failed"
+        return _RelayResult(next_partial="", status="idle", warning=message)
+    if etype == "error":
+        message = (event.get("error") or {}).get("message") or "unknown realtime error"
+        return _RelayResult(next_partial=partial_so_far, warning=message)
+    return _RelayResult(next_partial=partial_so_far)
+
+
+async def _connect_realtime(url: str, model: str, api_key: str | None, open_timeout: float):
+    """Thin wrapper around websockets.connect -- the one seam tests replace
+    with a fake connection, so _open_session/channel_worker's own logic
+    (handshake, audio forwarding, event relay) is exercised without a real
+    socket.
+    """
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
+    query = urlencode({"model": model})
+    return await websockets.connect(
+        f"{url}?{query}", additional_headers=headers, open_timeout=open_timeout
+    )
+
+
+async def _open_session(
+    url: str, model: str, api_key: str | None, language: str | None, open_timeout: float
+):
+    """Open one channel's /v1/realtime connection and switch it to a
+    passive transcription-only session. Raises _RealtimeSessionError (or
+    lets a websockets/timeout exception through) on any failure -- the
+    caller decides what that means for the channel.
+    """
+    ws = await _connect_realtime(url, model, api_key, open_timeout)
+    try:
+        created = json.loads(await asyncio.wait_for(ws.recv(), timeout=open_timeout))
+        if created.get("type") == "error":
+            raise _RealtimeSessionError(
+                (created.get("error") or {}).get("message") or "session rejected"
+            )
+        await ws.send(json.dumps(_transcription_session_update(model, language)))
+        updated = json.loads(await asyncio.wait_for(ws.recv(), timeout=open_timeout))
+        if updated.get("type") == "error":
+            raise _RealtimeSessionError(
+                (updated.get("error") or {}).get("message") or "session.update rejected"
+            )
+    except Exception:
+        with contextlib.suppress(Exception):
+            await ws.close()
+        raise
+    return ws
+
+
+async def channel_worker(
+    channel: int,
+    websocket: WebSocket,
+    queue: asyncio.Queue,
     url: str,
     model: str,
     api_key: str | None,
-    pcm: bytes,
-    language: str | None = None,
-    on_reading: Callable[[], Awaitable[None]] | None = None,
-) -> str:
-    """One rolling-window call. Returns the committed text, or '' on any
-    failure -- a dropped caption is invisible to the user; raising would
-    kill the whole live session over one bad window.
+    language: str | None,
+    open_timeout: float,
+    commit_interval_sec: float,
+) -> None:
+    """One channel's whole realtime session, for the life of the recording.
 
-    ``on_reading``, when given, fires once the response is confirmed good
-    and we're about to start consuming the SSE stream -- the "reading" state
-    in channel_worker's activity dot. Only meaningful on the happy path: a
-    rejected or errored call never gets far enough to call it.
-
-    ``language`` is omitted entirely when unset, which leaves per-window
-    auto-detection on -- the default, and the right one for a genuinely
-    multilingual meeting. A rolling window is only a few seconds of audio
-    (live_caption_window_sec), which is little enough for language ID to
-    misfire on an accented phrase, a name or a stretch of silence -- pinning
-    a language removes that per-window guesswork for anyone who mostly
-    speaks one language. Must be an ISO-639-1 code ("en"), not the English
-    name ("english"): confirmed against parakeet-cpp-nemotron-3.5-asr-
-    streaming-0.6b that the latter doesn't get rejected, it silently breaks
-    streaming entirely -- every window then fails with "loaded model is not
-    a cache-aware streaming model", an error that has nothing to do with
-    language and would be a nightmare to trace back to this field.
+    Three concurrent loops share the one connection: forwarding audio the
+    browser has already handed us (via ``queue``, fed by live_caption_ws's
+    own receive loop) out to the ASR backend; committing whatever has been
+    forwarded since the last commit on a fixed cadence (server VAD is off --
+    see this module's docstring for why this app segments turns itself
+    instead); and relaying whatever events come back. Cancelling this task
+    (see live_caption_ws's teardown) cancels all three -- there is no
+    separate stop flag to check.
     """
-    files = {"file": ("window.wav", _wav_bytes(pcm), "audio/wav")}
-    data = {"model": model, "stream": "true"}
-    if language:
-        data["language"] = language
+    name = CHANNEL_NAMES[channel]
     try:
-        async with aconnect_sse(
-            client, "POST", url, data=data, files=files, headers=_headers(api_key)
-        ) as event_source:
-            if event_source.response.status_code >= 400:
-                log.warning(
-                    "live caption window rejected: %s", event_source.response.status_code
+        ws = await _open_session(url, model, api_key, language, open_timeout)
+    except Exception as exc:
+        log.warning(
+            "live caption realtime session for %s could not open: %s: %s",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+        await _send_status(websocket, name, "idle")
+        return
+
+    # Set by forward_audio the moment new audio is forwarded, cleared by
+    # periodic_commit right before it commits -- a channel with nothing new
+    # since the last tick sends no commit at all, the same "don't pay for a
+    # round trip on silence" reasoning the old design's SILENCE_PEAK_THRESHOLD
+    # had, just driven by "did anything arrive" rather than a local amplitude
+    # check.
+    pending_audio = False
+
+    async def forward_audio() -> None:
+        nonlocal pending_audio
+        while True:
+            chunk = await queue.get()
+            try:
+                await ws.send(
+                    json.dumps(
+                        {
+                            "type": "input_audio_buffer.append",
+                            "audio": base64.b64encode(chunk).decode("ascii"),
+                        }
+                    )
                 )
-                return ""
-            if on_reading is not None:
-                await on_reading()
-            text = ""
-            async for sse in event_source.aiter_sse():
-                if sse.data == "[DONE]":
-                    break
-                chunk = json.loads(sse.data)
-                if chunk.get("type") == "transcript.text.done":
-                    text = chunk.get("text") or ""
-            return strip_language_tag(text)
-    except (httpx.HTTPError, SSEError, ValueError) as exc:
-        # ValueError alongside the transport errors: a non-JSON SSE data line
-        # (json.loads above) is the same "drop this window, keep going" case
-        # as a timeout, not a reason to let the exception escape and kill the
-        # channel_worker task -- see that function's docstring. The type name
-        # is logged explicitly because httpx's own timeout exceptions
-        # stringify to '' (confirmed: str(httpx.ReadTimeout('')) == ''), which
-        # otherwise reads as a message that silently went missing.
-        log.warning("live caption window failed: %s: %s", type(exc).__name__, exc)
-        return ""
+            except Exception:
+                # The session is gone -- listen_events will hit the same
+                # wall and end the whole channel_worker via gather below.
+                return
+            if not pending_audio:
+                pending_audio = True
+                await _send_status(websocket, name, "buffering")
+
+    async def periodic_commit() -> None:
+        nonlocal pending_audio
+        while True:
+            await asyncio.sleep(commit_interval_sec)
+            if not pending_audio:
+                continue
+            pending_audio = False
+            await _send_status(websocket, name, "calling")
+            try:
+                await ws.send(json.dumps({"type": "input_audio_buffer.commit"}))
+            except Exception:
+                return
+
+    async def listen_events() -> None:
+        partial_state = ""
+        try:
+            async for raw in ws:
+                try:
+                    event = json.loads(raw)
+                except ValueError:
+                    continue
+                result = _handle_realtime_event(event, partial_state)
+                partial_state = result.next_partial
+                if result.warning:
+                    log.warning("live caption realtime event for %s: %s", name, result.warning)
+                if result.status is not None:
+                    await _send_status(websocket, name, result.status)
+                if result.partial is not None:
+                    await _send_partial(websocket, name, result.partial)
+                if result.caption is not None:
+                    try:
+                        await websocket.send_json(
+                            {"type": "caption", "channel": name, "text": result.caption}
+                        )
+                    except Exception:
+                        # The browser socket itself is gone -- further sends
+                        # will fail the same way, so this one should end
+                        # the worker.
+                        return
+        except ConnectionClosed:
+            pass
+
+    try:
+        await asyncio.gather(forward_audio(), periodic_commit(), listen_events())
+    finally:
+        with contextlib.suppress(Exception):
+            await ws.close()
+        await _send_status(websocket, name, "idle")
 
 
 @router.websocket("/ws")
@@ -265,14 +415,9 @@ async def live_caption_ws(websocket: WebSocket) -> None:
 
     with get_conn() as conn:
         enabled = effective(conn, "live_caption_enabled")
-        window_sec = effective(conn, "live_caption_window_sec")
-        interval_sec = effective(conn, "live_caption_interval_sec")
-        timeout_sec = effective(conn, "live_caption_timeout_sec")
-        # Empty live_caption_model means "use whatever batch diarization
-        # uses" -- see RUNTIME_KEYS in config.py for why this is overridable
-        # separately: the two routes on the same LocalAI instance have been
-        # observed to behave very differently under load for the same model.
-        model = effective(conn, "live_caption_model") or effective(conn, "diarization_model")
+        model = effective(conn, "live_caption_model")
+        open_timeout = effective(conn, "live_caption_timeout_sec")
+        commit_interval_sec = effective(conn, "live_caption_commit_interval_sec")
         default_language = effective(conn, "live_caption_language")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
@@ -291,92 +436,27 @@ async def live_caption_ws(websocket: WebSocket) -> None:
     raw_language = websocket.query_params.get("language")
     language = raw_language if raw_language is not None else default_language
 
-    url = transcriptions_url(diarization_url)
+    url = realtime_url(diarization_url)
     await websocket.accept()
-    await websocket.send_json({
-        "type": "info",
-        "model": model,
-        "is_cache_aware": _is_cache_aware_model(model),
-    })
+    await websocket.send_json({"type": "info", "model": model, "is_realtime": True})
 
-    buffers: dict[int, _ChannelBuffer] = {0: _ChannelBuffer(), 1: _ChannelBuffer()}
-    stop = asyncio.Event()
-
-    async def channel_worker(channel: int) -> None:
-        buf = buffers[channel]
-        name = CHANNEL_NAMES[channel]
-        # timeout_sec, not interval_sec + 20: this bounds one ASR call against
-        # a backend the batch diarizer itself waits up to 30 minutes for (see
-        # live_caption_timeout_sec's doc comment in config.py). interval_sec
-        # is just the polling cadence below, unrelated to how long a call is
-        # allowed to take once it starts.
-        async with httpx.AsyncClient(timeout=timeout_sec) as client:
-            while not stop.is_set():
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=interval_sec)
-                    return
-                except asyncio.TimeoutError:
-                    pass
-
-                try:
-                    async with buf.lock:
-                        if len(buf.samples) < MIN_BUFFER_SEC * SAMPLE_RATE * BYTES_PER_SAMPLE:
-                            await _send_status(websocket, name, "idle")
-                            continue
-                        if _is_cache_aware_model(model):
-                            pcm = buf.pop_chunk_bytes(interval_sec)
-                        else:
-                            pcm = buf.window_bytes(window_sec)
-
-                    if _peak_amplitude(pcm) < SILENCE_PEAK_THRESHOLD:
-                        await _send_status(websocket, name, "idle")
-                        continue
-
-                    # Real audio, gates cleared -- "buffering" covers the
-                    # (usually brief) wait for _ASR_CONCURRENCY's one slot,
-                    # which the other channel or another session's worker may
-                    # currently hold.
-                    await _send_status(websocket, name, "buffering")
-
-                    # Serialized across every channel and every session --
-                    # see _ASR_CONCURRENCY's doc comment -- not just this
-                    # worker's own pacing. A window still gets buffered and
-                    # timed independently per channel; only the network call
-                    # itself queues behind whichever other channel/session
-                    # got there first.
-                    async with _ASR_CONCURRENCY:
-                        await _send_status(websocket, name, "calling")
-                        text = await _transcribe_window(
-                            client,
-                            url,
-                            model,
-                            api_key or None,
-                            pcm,
-                            language or None,
-                            on_reading=lambda: _send_status(websocket, name, "reading"),
-                        )
-                    await _send_status(websocket, name, "idle")
-                    if not text.strip():
-                        continue
-                except Exception:
-                    # Anything that reaches here is a bug in this loop, not an
-                    # ASR failure -- those are already turned into "" inside
-                    # _transcribe_window. Log and keep going regardless: for a
-                    # plain mic recording this is the *only* worker, and
-                    # letting an exception escape ends live captions for the
-                    # rest of the recording with nothing visible to the user.
-                    log.exception("live caption window for %s crashed", name)
-                    await _send_status(websocket, name, "idle")
-                    continue
-
-                try:
-                    await websocket.send_json({"type": "caption", "channel": name, "text": text})
-                except Exception:
-                    # The socket itself is gone -- further sends will fail the
-                    # same way, so this one *should* end the worker.
-                    return
-
-    workers = [asyncio.create_task(channel_worker(ch)) for ch in buffers]
+    queues: dict[int, asyncio.Queue] = {0: asyncio.Queue(), 1: asyncio.Queue()}
+    workers = [
+        asyncio.create_task(
+            channel_worker(
+                ch,
+                websocket,
+                queues[ch],
+                url,
+                model,
+                api_key or None,
+                language or None,
+                open_timeout,
+                commit_interval_sec,
+            )
+        )
+        for ch in queues
+    ]
 
     try:
         while True:
@@ -384,15 +464,15 @@ async def live_caption_ws(websocket: WebSocket) -> None:
             if not message:
                 continue
             channel = message[0]
-            buf = buffers.get(channel)
-            if buf is None:
+            queue = queues.get(channel)
+            if queue is None:
                 continue
-            async with buf.lock:
-                buf.samples.extend(message[1:])
+            payload = message[1:]
+            if payload:
+                queue.put_nowait(payload)
     except WebSocketDisconnect:
         pass
     finally:
-        stop.set()
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)

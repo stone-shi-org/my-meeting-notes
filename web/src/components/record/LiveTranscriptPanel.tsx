@@ -94,12 +94,18 @@ export function LiveTranscriptPanel({
   captions,
   connected,
   enabled,
-  isCacheAware,
+  isRealtime,
+  partial,
 }: {
   captions: Caption[];
   connected: boolean;
   enabled: boolean;
-  isCacheAware?: boolean;
+  isRealtime?: boolean;
+  /** In-progress text for a still-open utterance on each channel -- see
+   * useLiveCaption's `partial`. Optional so callers that don't wire it
+   * through (none currently, but nothing here requires it) still compile;
+   * an absent value just means no preview bubble is shown. */
+  partial?: Record<'me' | 'room', string>;
 }) {
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
@@ -136,18 +142,42 @@ export function LiveTranscriptPanel({
 
   const labelFor = (channel: 'me' | 'room') => labels[channel].trim() || DEFAULT_LABELS[channel];
 
+  const avatarFor = (channel: 'me' | 'room') => (
+    <span
+      aria-hidden
+      className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
+      style={{
+        ...speakerVars(channel),
+        backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
+        color: 'var(--sp-ink)',
+      }}
+    >
+      {initials(labelFor(channel))}
+    </span>
+  );
+
+  // Channels with an in-progress preview -- see useLiveCaption's `partial`.
+  // Rendered as their own (at most two) bubbles after the committed groups,
+  // never merged into them: a partial is not yet a Caption (no `at`, no
+  // stable identity) and is about to be replaced wholesale by the next
+  // `caption` message, unlike StreamedText's reveal-in-place of an already
+  // final string.
+  const partialChannels = partial
+    ? (['me', 'room'] as const).filter((ch) => partial[ch])
+    : [];
+
   return (
     <Card className="flex h-[680px] max-h-[78vh] flex-col overflow-hidden p-5">
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h2 className="font-display text-lg font-semibold">Live transcript</h2>
-          {isCacheAware && (
+          {isRealtime && (
             <span
               className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 border border-indigo-500/20"
-              title="Native Cache-Aware Streaming RNN-T Enabled"
+              title="Streaming via a persistent /v1/realtime session"
             >
               <Zap className="size-3" />
-              Cache-Aware
+              Realtime
             </span>
           )}
         </div>
@@ -224,7 +254,7 @@ export function LiveTranscriptPanel({
 
       <div ref={scrollRef} className="mt-2 min-h-0 flex-1 overflow-y-auto pr-1">
         <div ref={contentRef}>
-          {captions.length === 0 ? (
+          {captions.length === 0 && partialChannels.length === 0 ? (
             <p className="text-sm text-fg-faint">
               {enabled
                 ? 'Waiting for speech…'
@@ -234,25 +264,12 @@ export function LiveTranscriptPanel({
             <ul className="space-y-3 text-sm">
               {groups.map((g, gi) => {
                 const isMe = g.channel === 'me';
-                const avatar = (
-                  <span
-                    aria-hidden
-                    className="grid size-6 shrink-0 place-items-center rounded-full text-[10px] font-semibold"
-                    style={{
-                      ...speakerVars(g.channel),
-                      backgroundColor: 'color-mix(in srgb, var(--sp) 18%, transparent)',
-                      color: 'var(--sp-ink)',
-                    }}
-                  >
-                    {initials(labelFor(g.channel))}
-                  </span>
-                );
                 return (
                   <li
                     key={`${g.parts[0].at}-${g.channel}-${gi}`}
                     className={cn('flex items-end gap-2', isMe ? 'flex-row-reverse' : 'flex-row')}
                   >
-                    {avatar}
+                    {avatarFor(g.channel)}
                     <div
                       className={cn(
                         'max-w-[85%] rounded-2xl px-3 py-2',
@@ -274,6 +291,46 @@ export function LiveTranscriptPanel({
                             <StreamedText text={p.text} />
                           </span>
                         ))}
+                      </p>
+                    </div>
+                  </li>
+                );
+              })}
+              {/* In-progress bubbles for an utterance that hasn't committed
+                  yet -- faded/italic so they read as provisional, distinct
+                  from every settled bubble above. Relayed if the backend
+                  ever emits a transcription delta mid-utterance (not
+                  observed against the current /v1/realtime deployment, but
+                  wired up for when it does), so a caption can show up
+                  before the server's own VAD decides the utterance is
+                  over and a `caption` message commits. */}
+              {partialChannels.map((ch) => {
+                const isMe = ch === 'me';
+                return (
+                  <li
+                    key={`partial-${ch}`}
+                    className={cn(
+                      'flex items-end gap-2 opacity-70',
+                      isMe ? 'flex-row-reverse' : 'flex-row',
+                    )}
+                  >
+                    {avatarFor(ch)}
+                    <div
+                      className={cn(
+                        'max-w-[85%] rounded-2xl px-3 py-2',
+                        isMe ? 'bg-primary-soft text-primary-soft-fg' : 'bg-surface-2',
+                      )}
+                    >
+                      <p
+                        className={cn(
+                          'text-xs font-medium',
+                          isMe ? 'text-primary-soft-fg/80' : 'text-fg-subtle',
+                        )}
+                      >
+                        {labelFor(ch)}
+                      </p>
+                      <p className={cn('mt-0.5 italic', isMe ? '' : 'text-fg-muted')}>
+                        {partial![ch]}…
                       </p>
                     </div>
                   </li>

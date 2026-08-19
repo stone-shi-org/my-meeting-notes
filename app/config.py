@@ -78,47 +78,48 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # users.telegram_notify_* columns in LATE_COLUMNS), not a setting here.
     "telegram_enabled": ("bool", False),
     "telegram_bot_token": ("str", True),
-    # Rolling-window text captions during an active recording, over the same
-    # LocalAI instance as batch diarization (see routers/live_caption.py).
-    # Off by default: every open connection adds periodic extra calls to a
-    # box that also serves the LLM and the real diarizer, and an operator
-    # should opt into that load deliberately -- same reasoning as
+    # Realtime-session text captions during an active recording, over the
+    # same LocalAI instance/host as batch diarization but a different
+    # endpoint (see services/diarize.realtime_url and routers/live_caption.py's
+    # module docstring). Off by default: every open connection holds a
+    # persistent /v1/realtime session per channel open for the whole
+    # recording, on a box that also serves the LLM and the real diarizer, and
+    # an operator should opt into that load deliberately -- same reasoning as
     # auto_match_enabled, not the env-only dev_provider_enabled bar, since
     # nothing here is written anywhere for good.
     "live_caption_enabled": ("bool", False),
-    "live_caption_window_sec": ("int", False),
-    "live_caption_interval_sec": ("int", False),
-    # How long one rolling-window ASR call is allowed to run before it's
-    # treated as failed. Deliberately its own setting rather than derived
-    # from interval_sec (interval_sec + 20 used to be the whole budget,
-    # 23s by default) -- the ASR backend is the same "shared, minutes-latency
-    # box" the batch diarizer waits up to diarization_timeout_sec (30
-    # minutes) for, and a live window of real speech routinely takes longer
-    # to decode than a short/silent one. A late caption beats a caption that
-    # silently never arrives.
+    # How often channel_worker commits whatever audio has been forwarded
+    # since the last commit. Server-side VAD is deliberately off (see
+    # live_caption.py's module docstring: it only commits on a real pause,
+    # so continuous speech got zero captions until the speaker stopped) --
+    # this is what actually bounds "how long until words show up" now.
+    # Tuned low: a manual commit measured ~50-150ms turnaround against this
+    # deployment, cheap enough that a snappier cadence costs little.
+    "live_caption_commit_interval_sec": ("float", False),
+    # How long one channel's /v1/realtime connection is allowed to take to
+    # open and complete its session.update handshake before that channel
+    # gives up for the rest of the recording (see live_caption.py's
+    # _open_session). Generous on purpose: this is a cold-start budget paid
+    # once per channel per recording, not a per-caption one -- there is no
+    # equivalent of the old per-window round trip to bound any more, since a
+    # session, once open, just stays open.
     "live_caption_timeout_sec": ("int", False),
-    # Empty means "use diarization_model" -- the historical behaviour, and
-    # still the right default since it's the model tuned for this app's
-    # audio. Deliberately its own setting rather than always reusing
-    # diarization_model: the two routes on the same LocalAI instance can
-    # behave very differently under load (observed: the streaming
-    # /v1/audio/transcriptions route intermittently hangs for a specific
-    # model with zero response, while the batch /v1/audio/diarization route
-    # for that same model, and the streaming route for a different model,
-    # both respond fine) -- an operator who hits that needs to be able to
-    # point live captions at a different, more reliable model without
-    # touching what batch diarization uses.
+    # The model must be registered on the LocalAI instance as a realtime
+    # *pipeline* model -- confirmed against this deployment that every plain
+    # ASR/LLM model (including the batch diarizer's own diarization_model)
+    # gets rejected outright with "Model is not a pipeline model" the moment
+    # a /v1/realtime connection is opened for it. There is deliberately no
+    # "empty means fall back to diarization_model" behaviour here any more
+    # (that used to be live_caption_model's default): diarization_model is
+    # essentially never a realtime pipeline model, so falling back to it
+    # would just swap one guaranteed rejection for another.
     "live_caption_model": ("str", False),
-    # ISO-639-1 code ("en"), not a language name ("english") -- see
-    # _transcribe_window's doc comment for why the latter silently breaks
-    # streaming entirely on at least one real backend, with an error that
-    # doesn't mention language at all. Empty means "let the model
-    # auto-detect per window", which is right for a genuinely multilingual
-    # meeting; a rolling window is only a few seconds of audio, though, which
-    # is little enough for auto-detection to misfire on an accented phrase,
-    # a name, or silence -- pinning a language is worth trying for anyone
-    # who mostly speaks one. This is only the *default*: the recorder UI
-    # lets someone pick a language per recording before Start (a `language`
+    # ISO-639-1 code ("en"), not a language name ("english") -- carried over
+    # from the same requirement on the old per-chunk route, unconfirmed on
+    # this one but kept narrow rather than risk the same silent breakage.
+    # Empty means "let the model auto-detect", right for a genuinely
+    # multilingual meeting. This is only the *default*: the recorder UI lets
+    # someone pick a language per recording before Start (a `language`
     # websocket query param, checked in live_caption_ws before falling back
     # to this), for a one-off meeting in a different language than usual
     # without a trip to Settings.
@@ -267,20 +268,24 @@ class Settings(BaseSettings):
 
     # --- live captions ----------------------------------------------------
     # See RUNTIME_KEYS above for why this is a Settings toggle rather than an
-    # env-only flag. window_sec is how much trailing audio each rolling call
-    # covers; interval_sec is how often a channel gets a new call. All reuse
-    # diarization_url's host/key -- see diarize.transcriptions_url -- but the
-    # model can be overridden separately; see live_caption_model.
+    # env-only flag. Reuses diarization_url's host/key -- see
+    # services/diarize.realtime_url -- but the model is its own setting
+    # (live_caption_model), since it must specifically be one registered as a
+    # realtime pipeline model, which diarization_model essentially never is.
     live_caption_enabled: bool = False
-    live_caption_window_sec: int = 8
-    live_caption_interval_sec: int = 3
-    # See RUNTIME_KEYS above. Generous relative to interval_sec on purpose --
-    # this bounds one ASR call, not the gap between captions.
+    # See RUNTIME_KEYS above -- server VAD is off, so this is what actually
+    # paces captions now.
+    live_caption_commit_interval_sec: float = 2.0
+    # See RUNTIME_KEYS above -- a per-channel connect+handshake budget, not a
+    # per-caption one.
     live_caption_timeout_sec: int = 45
-    # Empty means "fall back to diarization_model" -- see RUNTIME_KEYS above.
-    live_caption_model: str = ""
-    # ISO-639-1 code, or empty for per-window auto-detect -- see RUNTIME_KEYS
-    # above.
+    # No fallback-to-diarization_model default any more -- see RUNTIME_KEYS
+    # above for why. This is the one model confirmed registered as a
+    # realtime pipeline on the deployment this was built against; an
+    # operator pointing at a different LocalAI instance will need to confirm
+    # what that instance has registered the same way.
+    live_caption_model: str = "lfm2.5-audio-1.5b-realtime"
+    # ISO-639-1 code, or empty for auto-detect -- see RUNTIME_KEYS above.
     live_caption_language: str = ""
 
     # --- insights ---------------------------------------------------------

@@ -205,6 +205,30 @@ class TestTranscriptionsUrl:
         assert diarize_svc.transcriptions_url(odd) == odd
 
 
+class TestRealtimeUrl:
+    """Builds the ws(s):// URL live captions hold a persistent session
+    against -- see routers/live_caption.py's module docstring for why this
+    is a different route from transcriptions_url above."""
+
+    def test_swaps_diarization_for_realtime_and_http_for_ws(self):
+        assert (
+            diarize_svc.realtime_url("http://x.test:4012/v1/audio/diarization")
+            == "ws://x.test:4012/v1/realtime"
+        )
+
+    def test_swaps_https_for_wss(self):
+        assert (
+            diarize_svc.realtime_url("https://x.test:4012/v1/audio/diarization")
+            == "wss://x.test:4012/v1/realtime"
+        )
+
+    def test_leaves_an_unrecognised_shape_alone(self):
+        """Same reasoning as transcriptions_url's own version of this test:
+        a test double or a future path should not get guessed at."""
+        odd = "http://x.test/some/other/path"
+        assert diarize_svc.realtime_url(odd) == odd
+
+
 class TestStripLanguageTag:
     """The parakeet-cpp-nemotron-3.5-asr-streaming-0.6b quirk: a stray
     "<en-US>"-style tag appended to the model's own transcribed text."""

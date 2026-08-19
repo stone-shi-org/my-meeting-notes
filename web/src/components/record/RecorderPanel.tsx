@@ -90,23 +90,22 @@ function LevelMeter({
 const ACTIVITY_COLOR: Record<ActivityState, string> = {
   idle: 'bg-fg-faint',
   buffering: 'bg-warning',
-  calling: 'bg-primary',
-  reading: 'bg-success animate-pulse',
+  calling: 'bg-primary animate-pulse',
 };
 
 const ACTIVITY_LABEL: Record<ActivityState, string> = {
   idle: 'idle',
-  buffering: 'audio queued',
-  calling: 'calling the transcription backend',
-  reading: 'streaming a caption back',
+  buffering: 'speech detected',
+  calling: 'transcribing',
 };
 
 /**
  * Live-transcript activity for one channel -- see live_caption.py's
- * channel_worker for what actually drives idle/buffering/calling/reading.
- * Colour-only like the recording dot above it, so it carries an sr-only
- * equivalent via `title` isn't enough on its own -- LevelMeters below also
- * renders the text form next to it.
+ * channel_worker/_handle_realtime_event for what actually drives
+ * idle/buffering/calling (server VAD heard speech start/stop, or nothing is
+ * happening). Colour-only like the recording dot above it, so it carries an
+ * sr-only equivalent via `title` isn't enough on its own -- LevelMeters
+ * below also renders the text form next to it.
  */
 function ActivityDot({ state }: { state: ActivityState }) {
   return (
@@ -231,7 +230,8 @@ export function RecorderPanel({
     captions,
     connected: captionsConnected,
     activity: captionsActivity,
-    isCacheAware: captionsIsCacheAware,
+    isRealtime: captionsIsRealtime,
+    partial: captionsPartial,
   } = useLiveCaption(recorder.liveStreams, captionsLive, captionLanguage);
 
   // Labels are blank until permission has been granted once, so re-read the
@@ -675,7 +675,8 @@ export function RecorderPanel({
           captions={captions}
           connected={captionsConnected}
           enabled={captionsLive}
-          isCacheAware={captionsIsCacheAware}
+          isRealtime={captionsIsRealtime}
+          partial={captionsPartial}
         />
         {rightExtra}
       </div>
