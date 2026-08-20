@@ -546,6 +546,11 @@ class TestChannelWorkerLiveSTT:
                     asr_pb2.TranscriptionEvent(
                         delta=asr_pb2.TranscriptDelta(text="hello from live stt")
                     ),
+                    # Deltas only buffer (see channel_worker_livestt's
+                    # docstring on why -- fragments must be concatenated with
+                    # no separator, not relayed as independent captions); an
+                    # EndOfUtterance is the real flush trigger.
+                    asr_pb2.TranscriptionEvent(eou=asr_pb2.EndOfUtterance(at_sec=1.0)),
                 ]
                 return FakeGrpcCall(events)
 
@@ -569,7 +574,7 @@ class TestChannelWorkerLiveSTT:
 
         task = asyncio.create_task(
             live_caption.channel_worker_livestt(
-                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, 30.0
             )
         )
         try:

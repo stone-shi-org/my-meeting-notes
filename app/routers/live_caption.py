@@ -414,12 +414,34 @@ async def channel_worker_livestt(
     target_url: str,
     model: str,
     language: str | None,
+    commit_interval_sec: float,
 ) -> None:
     """One channel's live-stt gRPC session, for the life of the recording.
 
     Connects to live-stt gRPC StreamingASR service, streams PCM16 audio
-    chunks from queue, and relays TranscriptDelta / Final events back to the
-    browser WebSocket.
+    chunks from queue, and relays committed text back to the browser
+    WebSocket.
+
+    live-stt's TranscriptDelta.text fragments are meant to be *appended*, not
+    treated as independently-formatted units -- see asr.proto's doc comment
+    on TranscriptDelta: each fragment's own leading space (present or absent)
+    is the sole word-boundary signal, e.g. " sen" + "ior man" + "age" ==
+    "senior manage" when concatenated with NO separator. An earlier version
+    of this function relayed every single delta straight to the browser as
+    its own {"type": "caption", ...} message, which broke that contract: the
+    frontend (LiveTranscriptPanel.tsx's groupCaptions) treats each caption
+    message as one complete, already-correctly-spaced unit and rejoins
+    consecutive ones with a literal " " -- exactly right for channel_worker's
+    whole-utterance commits above, but wrong for a bare mid-word fragment,
+    producing garbled captions like "manager" -> "manag er".
+    So: buffer delta text with no separator and only emit a caption message
+    on a real utterance boundary -- an EndOfUtterance event (the default
+    model's real <EOU>), Final (stream end), or, for a model with no <EOU>
+    token at all (e.g. nemotron -- see Ready.supports_turn_detection /
+    WARNING_CODE_NO_TURN_DETECTION in asr.proto), a periodic flush on the
+    same commit_interval_sec cadence channel_worker uses above, so a
+    turn-detection-less model still produces incremental captions instead of
+    one giant blob only at Final.
     """
     name = CHANNEL_NAMES[channel]
     try:
@@ -429,6 +451,25 @@ async def channel_worker_livestt(
         log.warning("gRPC stubs or grpcio not available for live-stt (%s)", exc)
         await _send_status(websocket, name, "idle")
         return
+
+    buffer = ""
+    buffering = False  # already told the UI "calling" for the in-flight buffer
+
+    async def flush() -> bool:
+        """Send whatever's in ``buffer`` as one caption message and clear it.
+        Returns False if the browser socket is gone (caller should stop)."""
+        nonlocal buffer, buffering
+        text = buffer
+        buffer = ""
+        if not text:
+            return True
+        try:
+            await websocket.send_json({"type": "caption", "channel": name, "text": text})
+        except Exception:
+            return False
+        buffering = False
+        await _send_status(websocket, name, "idle")
+        return True
 
     try:
         async with grpc.aio.insecure_channel(target_url) as grpc_channel:
@@ -453,35 +494,42 @@ async def channel_worker_livestt(
 
             call = stub.Transcribe(request_generator())
 
-            async for event in call:
-                kind = event.WhichOneof("event")
-                if kind == "ready":
-                    await _send_status(websocket, name, "idle")
-                elif kind == "delta":
-                    text = (event.delta.text or "").strip()
-                    if text:
-                        await _send_status(websocket, name, "calling")
-                        try:
-                            await websocket.send_json(
-                                {"type": "caption", "channel": name, "text": text}
-                            )
-                        except Exception:
-                            return
+            async def periodic_flush() -> None:
+                # Fallback cadence for models with no <EOU> (nemotron) so
+                # they still produce incremental captions; harmless no-op
+                # for EOU-capable models except covering an unusually long
+                # utterance that hasn't hit an <EOU> yet.
+                while True:
+                    await asyncio.sleep(commit_interval_sec)
+                    if not await flush():
+                        return
+
+            async def listen_events() -> None:
+                nonlocal buffer, buffering
+                async for event in call:
+                    kind = event.WhichOneof("event")
+                    if kind == "ready":
                         await _send_status(websocket, name, "idle")
-                elif kind == "final":
-                    text = (event.final.text or "").strip()
-                    if text:
-                        try:
-                            await websocket.send_json(
-                                {"type": "caption", "channel": name, "text": text}
-                            )
-                        except Exception:
+                    elif kind == "delta":
+                        text = event.delta.text or ""
+                        if text:
+                            buffer += text
+                            if not buffering:
+                                buffering = True
+                                await _send_status(websocket, name, "calling")
+                    elif kind == "eou":
+                        if not await flush():
                             return
-                        await _send_status(websocket, name, "idle")
-                elif kind == "warning":
-                    log.warning("live-stt warning for %s: %s", name, event.warning.message)
-                elif kind == "recycled":
-                    log.info("live-stt recycled worker for %s: %s", name, event.recycled.reason)
+                    elif kind == "final":
+                        buffer += event.final.text or ""
+                        if not await flush():
+                            return
+                    elif kind == "warning":
+                        log.warning("live-stt warning for %s: %s", name, event.warning.message)
+                    elif kind == "recycled":
+                        log.info("live-stt recycled worker for %s: %s", name, event.recycled.reason)
+
+            await asyncio.gather(listen_events(), periodic_flush())
 
     except Exception as exc:
         log.warning(
@@ -491,6 +539,7 @@ async def channel_worker_livestt(
             exc,
         )
     finally:
+        await flush()
         await _send_status(websocket, name, "idle")
 
 
@@ -541,6 +590,7 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     live_stt_url,
                     model,
                     language or None,
+                    commit_interval_sec,
                 )
             )
             for ch in queues
