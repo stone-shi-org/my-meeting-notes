@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 import sqlite3
 import uuid
@@ -128,76 +127,6 @@ def _check_extension(filename: str) -> None:
         )
 
 
-def _normalize_channel_fields(
-    channel_map: str | None, room_speakers: str | None
-) -> tuple[str | None, str]:
-    """Validate the two fields useRecorder sends for a channel-separated capture.
-
-    channel_map is empty/None for an ordinary recording -- the overwhelming
-    majority. room_speakers only means anything alongside it, and defaults to
-    the safe assumption, 'multiple', so an omitted value never silently
-    collapses several remote voices into one (see room_speakers' comment in
-    db.py).
-    """
-    if not channel_map:
-        return None, "multiple"
-    if channel_map != "mic_room":
-        raise ValidationError(f"Unknown channel_map {channel_map!r}")
-    resolved = room_speakers or "multiple"
-    if resolved not in ("single", "multiple"):
-        raise ValidationError(
-            f"room_speakers must be 'single' or 'multiple', got {resolved!r}"
-        )
-    return channel_map, resolved
-
-
-def _parse_multi_channels(mode: str, channels_json: str | None, num_files: int) -> list[dict]:
-    """Validate and parse the ``channels`` field for a multi-source upload.
-
-    Each entry becomes one meeting_audio_channels row: {"label": str | None,
-    "run_diarization": bool, "start_offset_sec": float}. For 'multi_file' the
-    list length must match the number of uploaded files -- channel i comes
-    from file i. For 'multi_channel' it declares how many channels the
-    single uploaded file is claimed to have; that claim is checked against
-    ffprobe's real channel count in the convert stage, not here, since
-    nothing here has decoded the file yet.
-    """
-    if not channels_json:
-        raise ValidationError(f"channels is required when mode={mode!r}")
-    try:
-        parsed = json.loads(channels_json)
-    except json.JSONDecodeError as exc:
-        raise ValidationError(f"channels is not valid JSON: {exc}") from exc
-    if not isinstance(parsed, list) or not parsed:
-        raise ValidationError("channels must be a non-empty JSON array")
-    if mode == "multi_file" and len(parsed) != num_files:
-        raise ValidationError(
-            f"channels has {len(parsed)} entries but {num_files} file(s) were uploaded"
-        )
-
-    result = []
-    for i, entry in enumerate(parsed):
-        if not isinstance(entry, dict):
-            raise ValidationError(f"channels[{i}] must be an object")
-        label = entry.get("label")
-        if label is not None and not isinstance(label, str):
-            raise ValidationError(f"channels[{i}].label must be a string or null")
-        run_diarization = entry.get("run_diarization", False)
-        if not isinstance(run_diarization, bool):
-            raise ValidationError(f"channels[{i}].run_diarization must be a boolean")
-        offset = entry.get("start_offset_sec", 0)
-        try:
-            offset = float(offset)
-        except (TypeError, ValueError):
-            raise ValidationError(f"channels[{i}].start_offset_sec must be a number") from None
-        if offset < 0:
-            raise ValidationError(f"channels[{i}].start_offset_sec must not be negative")
-        result.append(
-            {"label": label or None, "run_diarization": run_diarization, "start_offset_sec": offset}
-        )
-    return result
-
-
 async def _stream_to_disk(file: UploadFile, dest: Path) -> int:
     """Write the upload out in chunks and return the byte count.
 
@@ -277,9 +206,6 @@ def _create_ingest_job(
 @router.post("/upload", status_code=202)
 async def upload_meeting(
     file: UploadFile = File(...),
-    extra_files: list[UploadFile] = File(
-        default=[], description="Additional files for mode='multi_file' -- file is channel 0"
-    ),
     title: str = Form(...),
     thread_id: int | None = Form(None),
     new_thread_title: str | None = Form(None),
@@ -290,21 +216,6 @@ async def upload_meeting(
     summary_model: str | None = Form(None),
     auto_summarize: bool = Form(True),
     speaker_names: str | None = Form(None, description="Comma-separated, optional"),
-    channel_map: str | None = Form(
-        None, description="'mic_room' if the recorder kept mic and room audio on separate channels"
-    ),
-    room_speakers: str | None = Form(
-        None, description="'single' or 'multiple' -- only meaningful alongside channel_map"
-    ),
-    skip_diarization: bool = Form(
-        False, description="Skip the model diarization call; produce a flat, single-speaker transcript"
-    ),
-    mode: str = Form(
-        "single", description="'single' | 'multi_channel' | 'multi_file' -- multi-source upload shape"
-    ),
-    channels: str | None = Form(
-        None, description="JSON array of {label, run_diarization, start_offset_sec}, one per channel"
-    ),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
@@ -316,46 +227,21 @@ async def upload_meeting(
     settings = get_settings()
     filename = file.filename or "upload"
     _check_extension(filename)
-    channel_map, room_speakers = _normalize_channel_fields(channel_map, room_speakers)
-
-    all_files = [file, *extra_files]
-    multi_channels: list[dict] | None = None
-    if mode in ("multi_channel", "multi_file"):
-        if channel_map == "mic_room":
-            raise ValidationError("mode cannot be combined with channel_map='mic_room'")
-        if mode == "multi_channel" and len(all_files) != 1:
-            raise ValidationError("mode='multi_channel' takes exactly one file")
-        for f in all_files:
-            _check_extension(f.filename or "upload")
-        multi_channels = _parse_multi_channels(mode, channels, len(all_files))
-        channel_map = mode
-    elif mode != "single":
-        raise ValidationError(f"Unknown mode {mode!r}")
 
     staged: Path | None = None
-    staged_multi: list[tuple[Path, str]] = []
     try:
-        if channel_map == "multi_file":
-            for f in all_files:
-                suffix_i = Path(f.filename or "upload").suffix.lower()
-                staged_path = _staged_upload_path(settings.audio_dir, suffix_i)
-                await _stream_to_disk(f, staged_path)
-                staged_multi.append((staged_path, suffix_i))
-        else:
-            suffix = Path(filename).suffix.lower()
-            staged = _staged_upload_path(settings.audio_dir, suffix)
-            written = await _stream_to_disk(file, staged)
+        suffix = Path(filename).suffix.lower()
+        staged = _staged_upload_path(settings.audio_dir, suffix)
+        written = await _stream_to_disk(file, staged)
     except Exception:
         if staged is not None:
             staged.unlink(missing_ok=True)
-        for staged_path, _ in staged_multi:
-            staged_path.unlink(missing_ok=True)
         raise
 
     dest: Path | None = None
     created_meeting_dir: Path | None = None
     try:
-        # Nothing writes to SQLite until every file has passed the size and
+        # Nothing writes to SQLite until the file has passed the size and
         # non-empty checks above. A rejected upload therefore creates neither
         # an orphan meeting nor an orphan thread.
         resolved_thread = resolve_thread(
@@ -376,57 +262,19 @@ async def upload_meeting(
         meeting_id = meeting["id"]
         meeting_dir = settings.audio_dir / str(meeting_id)
         meeting_dir.mkdir(parents=True, exist_ok=True)
-        # Tracked separately from `dest`: for multi_file, a failure partway
-        # through moving N files would otherwise leave `dest` unset and skip
-        # cleanup below, orphaning whichever files had already landed.
         created_meeting_dir = meeting_dir
 
-        if channel_map == "multi_file":
-            written = 0
-            for i, (staged_path, suffix_i) in enumerate(staged_multi):
-                dest_i = meeting_dir / f"source_{i}{suffix_i}"
-                staged_path.replace(dest_i)
-                written += dest_i.stat().st_size
-            # original_path/original_filename point at source 0 -- there is
-            # no single "the" original for N separately uploaded files, and
-            # existing code (e.g. the "download original" link) reads those
-            # columns generically expecting exactly one path.
-            dest = meeting_dir / f"source_0{staged_multi[0][1]}"
-            original_filename = all_files[0].filename or "upload"
-            original_mime = all_files[0].content_type
-        else:
-            dest = meeting_dir / f"original{suffix}"
-            staged.replace(dest)
-            original_filename = filename
-            original_mime = file.content_type
+        dest = meeting_dir / f"original{suffix}"
+        staged.replace(dest)
+        original_filename = filename
+        original_mime = file.content_type
 
         conn.execute(
             "UPDATE meetings SET original_filename = ?, original_path = ?, "
             "original_mime = ?, original_bytes = ?, status = 'processing', "
-            "channel_map = ?, room_speakers = ?, skip_diarization = ?, "
             "updated_at = ? WHERE id = ?",
-            (
-                original_filename, str(dest), original_mime, written,
-                channel_map, room_speakers, int(skip_diarization), utcnow(), meeting_id,
-            ),
+            (original_filename, str(dest), original_mime, written, utcnow(), meeting_id),
         )
-
-        if multi_channels is not None:
-            for i, ch in enumerate(multi_channels):
-                source_filename = (
-                    all_files[i].filename
-                    if channel_map == "multi_file"
-                    else (all_files[0].filename or "upload")
-                )
-                conn.execute(
-                    "INSERT INTO meeting_audio_channels "
-                    "(meeting_id, channel_index, label, run_diarization, start_offset_sec, source_filename) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id, i, ch["label"], int(ch["run_diarization"]),
-                        ch["start_offset_sec"], source_filename,
-                    ),
-                )
 
         if speaker_names:
             threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
@@ -449,8 +297,6 @@ async def upload_meeting(
     finally:
         if staged is not None:
             staged.unlink(missing_ok=True)
-        for staged_path, _ in staged_multi:
-            staged_path.unlink(missing_ok=True)
 
     await queue_mod.get_queue().enqueue(job_id)
 
@@ -470,28 +316,10 @@ async def upload_meeting(
 async def add_meeting_audio(
     meeting_id: int,
     file: UploadFile = File(...),
-    extra_files: list[UploadFile] = File(
-        default=[], description="Additional files for mode='multi_file' -- file is channel 0"
-    ),
     diarization_model: str | None = Form(None),
     summary_model: str | None = Form(None),
     auto_summarize: bool = Form(True),
     speaker_names: str | None = Form(None, description="Comma-separated, optional"),
-    channel_map: str | None = Form(
-        None, description="'mic_room' if the recorder kept mic and room audio on separate channels"
-    ),
-    room_speakers: str | None = Form(
-        None, description="'single' or 'multiple' -- only meaningful alongside channel_map"
-    ),
-    skip_diarization: bool = Form(
-        False, description="Skip the model diarization call; produce a flat, single-speaker transcript"
-    ),
-    mode: str = Form(
-        "single", description="'single' | 'multi_channel' | 'multi_file' -- multi-source upload shape"
-    ),
-    channels: str | None = Form(
-        None, description="JSON array of {label, run_diarization, start_offset_sec}, one per channel"
-    ),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
@@ -521,43 +349,18 @@ async def add_meeting_audio(
 
     filename = file.filename or "upload"
     _check_extension(filename)
-    channel_map, room_speakers = _normalize_channel_fields(channel_map, room_speakers)
-
-    all_files = [file, *extra_files]
-    multi_channels: list[dict] | None = None
-    if mode in ("multi_channel", "multi_file"):
-        if channel_map == "mic_room":
-            raise ValidationError("mode cannot be combined with channel_map='mic_room'")
-        if mode == "multi_channel" and len(all_files) != 1:
-            raise ValidationError("mode='multi_channel' takes exactly one file")
-        for f in all_files:
-            _check_extension(f.filename or "upload")
-        multi_channels = _parse_multi_channels(mode, channels, len(all_files))
-        channel_map = mode
-    elif mode != "single":
-        raise ValidationError(f"Unknown mode {mode!r}")
 
     target_dir = get_settings().audio_dir / str(meeting_id)
     staged: Path | None = None
-    staged_multi: list[tuple[Path, str]] = []
     try:
         # Do not touch the failed attempt until its replacement is complete and
         # valid. Browser recordings may have no other surviving copy.
-        if channel_map == "multi_file":
-            for f in all_files:
-                suffix_i = Path(f.filename or "upload").suffix.lower()
-                staged_path = _staged_upload_path(get_settings().audio_dir, suffix_i)
-                await _stream_to_disk(f, staged_path)
-                staged_multi.append((staged_path, suffix_i))
-        else:
-            suffix = Path(filename).suffix.lower()
-            staged = _staged_upload_path(get_settings().audio_dir, suffix)
-            written = await _stream_to_disk(file, staged)
+        suffix = Path(filename).suffix.lower()
+        staged = _staged_upload_path(get_settings().audio_dir, suffix)
+        written = await _stream_to_disk(file, staged)
     except Exception:
         if staged is not None:
             staged.unlink(missing_ok=True)
-        for staged_path, _ in staged_multi:
-            staged_path.unlink(missing_ok=True)
         raise
 
     backup = target_dir.parent / f".{meeting_id}-{uuid.uuid4().hex}.replaced"
@@ -567,20 +370,10 @@ async def add_meeting_audio(
             target_dir.replace(backup)
         target_dir.mkdir(parents=True, exist_ok=False)
 
-        if channel_map == "multi_file":
-            written = 0
-            for i, (staged_path, suffix_i) in enumerate(staged_multi):
-                dest_i = target_dir / f"source_{i}{suffix_i}"
-                staged_path.replace(dest_i)
-                written += dest_i.stat().st_size
-            dest = target_dir / f"source_0{staged_multi[0][1]}"
-            original_filename = all_files[0].filename or "upload"
-            original_mime = all_files[0].content_type
-        else:
-            dest = target_dir / f"original{suffix}"
-            staged.replace(dest)
-            original_filename = filename
-            original_mime = file.content_type
+        dest = target_dir / f"original{suffix}"
+        staged.replace(dest)
+        original_filename = filename
+        original_mime = file.content_type
 
         conn.execute(
             "UPDATE meetings SET original_filename = ?, original_path = ?, "
@@ -588,35 +381,9 @@ async def add_meeting_audio(
             # Reset what described the audio that is no longer there.
             "audio_path = NULL, audio_converted = 0, audio_duration_sec = NULL, "
             "audio_sample_rate = NULL, audio_channels = NULL, "
-            "channel_map = ?, room_speakers = ?, skip_diarization = ?, "
             "updated_at = ? WHERE id = ?",
-            (
-                original_filename, str(dest), original_mime, written,
-                channel_map, room_speakers, int(skip_diarization), utcnow(), meeting_id,
-            ),
+            (original_filename, str(dest), original_mime, written, utcnow(), meeting_id),
         )
-
-        # A previous attempt's channel rows (if it was also multi-source)
-        # describe audio that no longer exists -- same reasoning as the
-        # audio_* column reset above, and required for the unique
-        # (meeting_id, channel_index) index below to accept the new set.
-        conn.execute("DELETE FROM meeting_audio_channels WHERE meeting_id = ?", (meeting_id,))
-        if multi_channels is not None:
-            for i, ch in enumerate(multi_channels):
-                source_filename = (
-                    all_files[i].filename
-                    if channel_map == "multi_file"
-                    else (all_files[0].filename or "upload")
-                )
-                conn.execute(
-                    "INSERT INTO meeting_audio_channels "
-                    "(meeting_id, channel_index, label, run_diarization, start_offset_sec, source_filename) "
-                    "VALUES (?, ?, ?, ?, ?, ?)",
-                    (
-                        meeting_id, i, ch["label"], int(ch["run_diarization"]),
-                        ch["start_offset_sec"], source_filename,
-                    ),
-                )
 
         if speaker_names:
             threads_svc.seed_speaker_names(conn, meeting_id, speaker_names.split(","))
@@ -641,8 +408,6 @@ async def add_meeting_audio(
     finally:
         if staged is not None:
             staged.unlink(missing_ok=True)
-        for staged_path, _ in staged_multi:
-            staged_path.unlink(missing_ok=True)
 
     if had_previous:
         shutil.rmtree(backup, ignore_errors=True)

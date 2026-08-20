@@ -1,10 +1,9 @@
 import { useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AudioInput, type FileMeta, type MultiSourceUpload } from '@/components/record/AudioInput';
+import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label } from '@/components/ui/primitives';
 import { watchJob } from '@/hooks/useJob';
-import type { ChannelMap } from '@/hooks/useRecorder';
 import { uploadMeetingAudio } from '@/lib/api';
 import type { Meeting } from '@/types/api';
 
@@ -20,11 +19,8 @@ import type { Meeting } from '@/types/api';
 export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
-  const [channelMap, setChannelMap] = useState<ChannelMap>(null);
-  const [multi, setMulti] = useState<MultiSourceUpload | null>(null);
   const [speakerNames, setSpeakerNames] = useState('');
   const [autoSummarize, setAutoSummarize] = useState(true);
-  const [skipDiarization, setSkipDiarization] = useState(false);
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const abort = useRef<AbortController | null>(null);
@@ -46,24 +42,6 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
     form.append('file', file);
     form.append('auto_summarize', String(autoSummarize));
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
-    if (channelMap) {
-      form.append('channel_map', channelMap);
-    }
-    form.append('skip_diarization', String(skipDiarization));
-    if (multi) {
-      form.append('mode', multi.mode);
-      for (const extra of multi.files) form.append('extra_files', extra);
-      form.append(
-        'channels',
-        JSON.stringify(
-          multi.channels.map((c) => ({
-            label: c.label.trim() || null,
-            run_diarization: c.runDiarization,
-            start_offset_sec: c.startOffsetSec,
-          })),
-        ),
-      );
-    }
 
     abort.current = new AbortController();
     setProgress({ loaded: 0, total: file.size });
@@ -93,14 +71,8 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
       <form onSubmit={submit} className="mt-4 space-y-5">
         <AudioInput
           file={file}
-          onFile={(next: File | null, meta: FileMeta) => {
-            setFile(next);
-            setChannelMap(meta.channelMap);
-            setMulti(meta.multi ?? null);
-          }}
+          onFile={(next: File | null, _meta: FileMeta) => setFile(next)}
           progress={progress}
-          skipDiarization={skipDiarization}
-          onSkipDiarizationChange={setSkipDiarization}
         />
 
         {askForSpeakers && (

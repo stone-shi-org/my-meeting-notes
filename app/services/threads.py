@@ -445,7 +445,6 @@ def row_to_meeting(row: sqlite3.Row) -> dict:
         "audio_sample_rate": row["audio_sample_rate"],
         "audio_channels": row["audio_channels"],
         "audio_converted": bool(row["audio_converted"]),
-        "channel_map": row["channel_map"] if "channel_map" in keys else None,
         "has_audio": bool(row["audio_path"]),
         "has_transcript": row["active_diarization_id"] is not None,
         "has_summary": row["active_summary_id"] is not None,

@@ -165,29 +165,6 @@ SCHEMA: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_diar_meeting ON diarizations(meeting_id, created_at DESC)",
-    # ------------------------------------------------------- audio channels
-    # Upload-only, generalizing the recorder's fixed 2-channel 'mic_room'
-    # scheme (meetings.channel_map/room_speakers) to N channels: one row per
-    # channel of a channel_map == 'multi' upload, produced either by
-    # splitting one already-multi-channel file ("speaker by channel") or by
-    # padding/aligning N separately-uploaded mono files onto one timeline
-    # ("speaker by file") -- see services/pipeline.py's _convert_stage and
-    # services/diarize.py's diarize_multi_channel_file. label is the
-    # human-given speaker name, nullable: an unnamed "mixed, diarize this
-    # one" channel still needs a row to carry run_diarization/channel_index.
-    """
-    CREATE TABLE IF NOT EXISTS meeting_audio_channels (
-        id               INTEGER PRIMARY KEY AUTOINCREMENT,
-        meeting_id       INTEGER NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-        channel_index    INTEGER NOT NULL,
-        label            TEXT,
-        run_diarization  INTEGER NOT NULL DEFAULT 0,
-        start_offset_sec REAL NOT NULL DEFAULT 0,
-        source_filename  TEXT
-    )
-    """,
-    "CREATE UNIQUE INDEX IF NOT EXISTS uq_meeting_audio_channels "
-    "ON meeting_audio_channels(meeting_id, channel_index)",
     # ---------------------------------------------------------- speaker_map
     """
     CREATE TABLE IF NOT EXISTS speaker_map (
@@ -746,28 +723,6 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "telegram_notify_next_steps", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_ready", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_failed", "INTEGER NOT NULL DEFAULT 0"),
-    # Set when a recording captured two distinct channels instead of mixing to
-    # mono -- currently only 'mic_room' (channel 0 = whatever the tab/system
-    # capture picked up, "the room"; channel 1 = the local microphone). NULL
-    # means an ordinary single-source recording. This is what lets the diarize
-    # stage use ground-truth channel identity instead of the model's voice
-    # clustering -- see services/diarize.py's diarize_channels_file.
-    ("meetings", "channel_map", "TEXT"),
-    # Only meaningful alongside channel_map. The channel split alone cannot
-    # tell a two-person call from a five-person one -- both look like one
-    # "everyone else" channel -- so this is a fact only the person recording
-    # knows. 'multiple' is the safe default: it costs one extra diarization
-    # call on the room channel, where 'single' assumed on an actually
-    # multi-person room would silently mislabel every remote voice as one.
-    ("meetings", "room_speakers", "TEXT NOT NULL DEFAULT 'multiple'"),
-    # Upload-only: skip the model diarization call entirely and produce a
-    # flat, single-speaker transcript instead (see pipeline._diarize_stage).
-    # Meaningless alongside channel_map -- a channel-separated recording
-    # already gets per-channel diarize-or-not from meeting_audio_channels,
-    # so this only applies to the plain single-file case. Default 0 (off,
-    # i.e. diarize normally) so every existing upload keeps its exact
-    # current behaviour.
-    ("meetings", "skip_diarization", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # The two built-in insight_types rows, seeded once on a genuinely empty table

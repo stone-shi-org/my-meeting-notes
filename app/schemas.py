@@ -185,7 +185,6 @@ class MeetingOut(BaseModel):
     audio_sample_rate: int | None = None
     audio_channels: int | None = None
     audio_converted: bool = False
-    channel_map: str | None = None
     has_audio: bool = False
     has_transcript: bool = False
     has_summary: bool = False

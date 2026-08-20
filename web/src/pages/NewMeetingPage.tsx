@@ -1,12 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
 import { useCallback, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { AudioInput, type FileMeta, type MultiSourceUpload } from '@/components/record/AudioInput';
+import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { api, uploadMeeting } from '@/lib/api';
 import { watchJob } from '@/hooks/useJob';
-import type { ChannelMap } from '@/hooks/useRecorder';
 import { localDatetimeValue } from '@/lib/calendar';
 import { cn } from '@/lib/cn';
 import type { Paginated, Thread } from '@/types/api';
@@ -22,8 +21,6 @@ export function NewMeetingPage() {
   // same right column -- see metaForm/rightExtra below and AudioInput's
   // onModeChange).
   const [audioMode, setAudioMode] = useState<'upload' | 'record'>('upload');
-  const [channelMap, setChannelMap] = useState<ChannelMap>(null);
-  const [multi, setMulti] = useState<MultiSourceUpload | null>(null);
   const [title, setTitle] = useState('');
   const [when, setWhen] = useState(localDatetimeValue());
   const [threadId, setThreadId] = useState(presetThread ?? '');
@@ -31,7 +28,6 @@ export function NewMeetingPage() {
   const [newThreadDescription, setNewThreadDescription] = useState('');
   const [speakerNames, setSpeakerNames] = useState('');
   const [autoSummarize, setAutoSummarize] = useState(true);
-  const [skipDiarization, setSkipDiarization] = useState(false);
 
   const [progress, setProgress] = useState<{ loaded: number; total: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -51,8 +47,6 @@ export function NewMeetingPage() {
    * clock instead. */
   const pick = useCallback((next: File | null, meta: FileMeta) => {
     setFile(next);
-    setChannelMap(meta.channelMap);
-    setMulti(meta.multi ?? null);
     setError(null);
     if (!next) return;
 
@@ -97,24 +91,6 @@ export function NewMeetingPage() {
       form.append('thread_id', threadId);
     }
     if (speakerNames.trim()) form.append('speaker_names', speakerNames);
-    if (channelMap) {
-      form.append('channel_map', channelMap);
-    }
-    form.append('skip_diarization', String(skipDiarization));
-    if (multi) {
-      form.append('mode', multi.mode);
-      for (const extra of multi.files) form.append('extra_files', extra);
-      form.append(
-        'channels',
-        JSON.stringify(
-          multi.channels.map((c) => ({
-            label: c.label.trim() || null,
-            run_diarization: c.runDiarization,
-            start_offset_sec: c.startOffsetSec,
-          })),
-        ),
-      );
-    }
 
     abort.current = new AbortController();
     setProgress({ loaded: 0, total: file.size });
@@ -297,8 +273,6 @@ export function NewMeetingPage() {
           onModeChange={setAudioMode}
           recorderLayout="wide"
           rightExtra={metaForm}
-          skipDiarization={skipDiarization}
-          onSkipDiarizationChange={setSkipDiarization}
         />
       </form>
     </div>

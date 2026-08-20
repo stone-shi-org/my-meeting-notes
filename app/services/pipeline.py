@@ -60,174 +60,15 @@ async def _probe_stage(ctx: JobContext, meeting_id: int) -> audio_svc.AudioInfo 
     return info
 
 
-async def _convert_channel_stage(
-    ctx: JobContext, meeting_id: int, original: Path, info: audio_svc.AudioInfo | None
-) -> None:
-    """Convert stage for a channel-separated (mic + room) recording.
-
-    Keeps both channels instead of downmixing to mono: channel 0 (the
-    tab/system capture, "the room") and channel 1 (the local mic) carry two
-    different speakers, and the ordinary mono path would sum them back into
-    one signal. Produces the stereo file used for playback plus two mono
-    splits used by the diarize stage -- see diarize_channels_file.
-    """
-    meeting_dir = _meeting_dir(meeting_id)
-    stereo_dest = meeting_dir / "audio16k.wav"
-    room_dest = meeting_dir / "room16k.wav"
-    me_dest = meeting_dir / "me16k.wav"
-
-    with get_conn(ctx.db_path) as conn:
-        existing = conn.execute(
-            "SELECT audio_path FROM meetings WHERE id = ?", (meeting_id,)
-        ).fetchone()
-
-    # Checkpoint: a previous attempt may already have produced all three files.
-    if room_dest.exists() and me_dest.exists() and existing and existing["audio_path"]:
-        ctx.skip("converting", "Channel-separated audio already present")
-        return
-
-    ctx.stage("converting", "Converting to 16 kHz stereo WAV and splitting channels")
-    await asyncio.to_thread(audio_svc.convert_to_wav16k_stereo, original, stereo_dest)
-    await asyncio.to_thread(audio_svc.split_stereo_channels, stereo_dest, room_dest, me_dest)
-
-    duration = info.duration_sec if info else None
-    if duration is None:
-        try:
-            duration = (await asyncio.to_thread(audio_svc.probe, stereo_dest)).duration_sec
-            if duration:
-                ctx.event(f"Length {duration:.0f}s (the source did not declare one)")
-        except AudioError as exc:
-            log.warning("could not read the length of the converted audio: %s", exc)
-
-    with get_conn(ctx.db_path) as conn:
-        conn.execute(
-            "UPDATE meetings SET audio_path = ?, audio_converted = 1, "
-            "audio_sample_rate = ?, audio_channels = 2, "
-            "audio_duration_sec = COALESCE(audio_duration_sec, ?), "
-            "updated_at = ? WHERE id = ?",
-            (str(stereo_dest), audio_svc.TARGET_SAMPLE_RATE, duration, utcnow(), meeting_id),
-        )
-
-    ctx.event(f"Wrote {stereo_dest.name}, split into {room_dest.name} and {me_dest.name}")
-    ctx.complete_stage()
-
-
-async def _convert_multi_stage(
-    ctx: JobContext,
-    meeting_id: int,
-    channel_map: str,
-    original: str | None,
-    info: audio_svc.AudioInfo | None,
-) -> None:
-    """Convert stage for an upload-only N-channel recording (see
-    meeting_audio_channels), generalizing _convert_channel_stage's fixed
-    2-channel mic_room scheme.
-
-    Two ways N channels arrive, both producing the same output shape --
-    channel{i}.wav per row (the diarize stage's input) plus audio16k.wav
-    (playback, the same single-file convention every other recording uses):
-
-    - 'multi_channel': one upload already has N channels -- convert then
-      split_channels, same two-step shape as _convert_channel_stage.
-    - 'multi_file': N separately uploaded mono files, stored by the upload
-      route as source_{channel_index}{suffix} -- pad_and_merge_channels
-      aligns them by each row's start_offset_sec and writes both the
-      per-channel files and the merged playback file in one call.
-    """
-    meeting_dir = _meeting_dir(meeting_id)
-    with get_conn(ctx.db_path) as conn:
-        channel_rows = conn.execute(
-            "SELECT channel_index, start_offset_sec, source_filename "
-            "FROM meeting_audio_channels WHERE meeting_id = ? ORDER BY channel_index",
-            (meeting_id,),
-        ).fetchall()
-        existing_audio_path = conn.execute(
-            "SELECT audio_path FROM meetings WHERE id = ?", (meeting_id,)
-        ).fetchone()["audio_path"]
-
-    n = len(channel_rows)
-    channel_wavs = [meeting_dir / f"channel{row['channel_index']}.wav" for row in channel_rows]
-    merged_dest = meeting_dir / "audio16k.wav"
-
-    # Checkpoint: a previous attempt may already have produced every file.
-    if all(p.exists() for p in channel_wavs) and merged_dest.exists() and existing_audio_path:
-        ctx.skip("converting", "Multi-channel audio already present")
-        return
-
-    ctx.stage("converting", f"Converting {n} channel(s) to 16 kHz")
-
-    if channel_map == "multi_channel":
-        if not original:
-            raise AudioError("No audio to convert")
-        await asyncio.to_thread(
-            audio_svc.convert_to_wav16k_multichannel, Path(original), merged_dest, n
-        )
-        await asyncio.to_thread(audio_svc.split_channels, merged_dest, channel_wavs)
-    else:  # multi_file
-        sources = []
-        for row in channel_rows:
-            suffix = Path(row["source_filename"] or "").suffix or ".wav"
-            path = meeting_dir / f"source_{row['channel_index']}{suffix}"
-            sources.append((path, row["start_offset_sec"] or 0.0))
-        await asyncio.to_thread(audio_svc.pad_and_merge_channels, sources, channel_wavs, merged_dest)
-
-    # multi_file's probed `info` is source 0's own duration (the probe stage
-    # runs on original_path, which points at source 0 -- see the upload
-    # route), not the padded/merged run length, which can be much longer
-    # once other sources' offsets are counted. Only multi_channel's `info`
-    # (the one file everything came from) is trustworthy here.
-    duration = info.duration_sec if (info and channel_map == "multi_channel") else None
-    if duration is None:
-        try:
-            duration = (await asyncio.to_thread(audio_svc.probe, merged_dest)).duration_sec
-            if duration:
-                ctx.event(f"Length {duration:.0f}s (the source did not declare one)")
-        except AudioError as exc:
-            log.warning("could not read the length of the converted audio: %s", exc)
-
-    with get_conn(ctx.db_path) as conn:
-        conn.execute(
-            "UPDATE meetings SET audio_path = ?, audio_converted = 1, "
-            "audio_sample_rate = ?, audio_channels = ?, "
-            # Unconditional, not COALESCE(audio_duration_sec, ?) like the
-            # plain path: the probe stage already wrote a duration here, but
-            # for 'multi_file' that was source 0's own length alone (see
-            # original_path's doc comment above), not the padded/merged run
-            # length -- COALESCE would keep that wrong, shorter value since
-            # it is non-null. This stage's own `duration` is authoritative
-            # for both multi_channel and multi_file.
-            "audio_duration_sec = ?, "
-            "updated_at = ? WHERE id = ?",
-            (str(merged_dest), audio_svc.TARGET_SAMPLE_RATE, n, duration, utcnow(), meeting_id),
-        )
-
-    ctx.event(f"Wrote {n} channel file(s) and {merged_dest.name}")
-    ctx.complete_stage()
-
-
 async def _convert_stage(ctx: JobContext, meeting_id: int, info: audio_svc.AudioInfo | None) -> None:
     """Transcode to 16 kHz mono, unless the upload already is."""
     with get_conn(ctx.db_path) as conn:
         row = threads_svc.require_meeting(conn, meeting_id)
         original = row["original_path"]
         existing = row["audio_path"]
-        channel_map = row["channel_map"]
-
-    if channel_map in ("multi_channel", "multi_file"):
-        # multi_file has no single "original" -- its N sources are staged
-        # under their own source_{index} paths (see the upload route) rather
-        # than a single original_path, so this checks it up front instead of
-        # falling into the "not original" guard below, which multi_channel
-        # (which does have one, its single uploaded file) would still need.
-        await _convert_multi_stage(ctx, meeting_id, channel_map, original, info)
-        return
 
     if not original:
         ctx.skip("converting", "No audio to convert")
-        return
-
-    if channel_map == "mic_room":
-        await _convert_channel_stage(ctx, meeting_id, Path(original), info)
         return
 
     # Checkpoint: a previous attempt may already have produced the wav.
@@ -291,9 +132,6 @@ async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = N
         duration = row["audio_duration_sec"]
         chosen_model = model or effective(conn, "diarization_model")
         provider_url = effective(conn, "diarization_url")
-        channel_map = row["channel_map"]
-        room_speakers = row["room_speakers"]
-        skip_diarization = bool(row["skip_diarization"])
 
         # Checkpoint: an existing diarization for this model means a previous
         # attempt got this far.
@@ -321,49 +159,6 @@ async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = N
         if settings.diarize_fake:
             payload = await _fake_diarize(ctx, duration)
             request_ms = 0
-        elif channel_map == "mic_room":
-            from app.services.diarize import diarize_channels_file
-
-            meeting_dir = _meeting_dir(meeting_id)
-            payload, request_ms = await diarize_channels_file(
-                ctx,
-                room_wav=meeting_dir / "room16k.wav",
-                me_wav=meeting_dir / "me16k.wav",
-                room_speakers=room_speakers or "multiple",
-                model=chosen_model,
-                duration_sec=duration,
-            )
-        elif channel_map in ("multi_channel", "multi_file"):
-            from app.services.diarize import ChannelMeta, diarize_multi_channel_file
-
-            meeting_dir = _meeting_dir(meeting_id)
-            with get_conn(ctx.db_path) as conn:
-                channel_rows = conn.execute(
-                    "SELECT channel_index, label, run_diarization "
-                    "FROM meeting_audio_channels WHERE meeting_id = ? ORDER BY channel_index",
-                    (meeting_id,),
-                ).fetchall()
-            payload, request_ms = await diarize_multi_channel_file(
-                ctx,
-                channel_wavs=[
-                    meeting_dir / f"channel{row['channel_index']}.wav" for row in channel_rows
-                ],
-                channel_meta=[
-                    ChannelMeta(label=row["label"], run_diarization=bool(row["run_diarization"]))
-                    for row in channel_rows
-                ],
-                model=chosen_model,
-                duration_sec=duration,
-            )
-        elif skip_diarization:
-            from app.services.diarize import transcribe_flat_file
-
-            payload, request_ms = await transcribe_flat_file(
-                ctx,
-                Path(audio_path),
-                model=chosen_model,
-                duration_sec=duration,
-            )
         else:
             from app.services.diarize import diarize_file
 
@@ -383,16 +178,6 @@ async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = N
             chosen_model,
             request_ms,
         )
-
-        if channel_map == "mic_room":
-            # Ground truth from the channel split, not a guess -- mark it now
-            # rather than asking the user to tick "this one is me" by hand.
-            with get_conn(ctx.db_path) as conn:
-                conn.execute(
-                    "UPDATE speaker_map SET is_me = 1, updated_at = ? "
-                    "WHERE meeting_id = ? AND speaker_id = 'ME'",
-                    (utcnow(), meeting_id),
-                )
     except JobCancelled:
         raise
     except Exception as exc:

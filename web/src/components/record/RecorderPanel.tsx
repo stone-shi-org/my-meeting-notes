@@ -17,7 +17,7 @@ import { InsightsPanel } from '@/components/record/InsightsPanel';
 import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
 import { LiveTranscriptPanel } from '@/components/record/LiveTranscriptPanel';
 import { type ActivityState, useLiveCaption } from '@/hooks/useLiveCaption';
-import { type ChannelMap, useAudioInputs, useRecorder } from '@/hooks/useRecorder';
+import { useAudioInputs, useRecorder } from '@/hooks/useRecorder';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import {
@@ -118,49 +118,26 @@ function ActivityDot({ state }: { state: ActivityState }) {
 }
 
 /**
- * One meter, or two side by side when the recording is keeping mic and room
- * on separate channels (`recorder.mixing` -- see useRecorder). A single
- * merged meter there would report whichever side is momentarily louder and
- * hide a genuinely silent one behind it -- the "missed the share-tab-audio
- * checkbox" failure this panel exists to catch, just on the room side
- * instead of the mic side.
+ * The recording's one input meter, plus the live-caption activity dot when
+ * captions are on. Mic and tab/system audio are always summed into a single
+ * track now (see useRecorder), so there is only ever one level to show.
  */
 function LevelMeters({
   level,
-  levelRoom,
-  mixing,
   active,
   activity,
 }: {
   level: number;
-  levelRoom: number;
-  mixing: boolean;
   active: boolean;
-  /** Live-caption pipeline state per channel, from useLiveCaption --
-   * omitted entirely when live captions are off, since there is no
-   * channel_worker for the dot to describe then. */
+  /** Live-caption pipeline state, from useLiveCaption -- omitted entirely
+   * when live captions are off, since there is no channel_worker for the
+   * dot to describe then. */
   activity?: { me: ActivityState; room: ActivityState };
 }) {
-  if (!mixing) {
-    return (
-      <div className="flex items-center gap-1.5">
-        {activity && <ActivityDot state={activity.me} />}
-        <LevelMeter level={level} active={active} />
-      </div>
-    );
-  }
   return (
-    <div className="flex items-center gap-3">
-      <div className="flex items-center gap-1.5">
-        {activity && <ActivityDot state={activity.me} />}
-        <span className="text-xs text-fg-subtle">You</span>
-        <LevelMeter level={level} active={active} label="Your microphone level" bars={12} />
-      </div>
-      <div className="flex items-center gap-1.5">
-        {activity && <ActivityDot state={activity.room} />}
-        <span className="text-xs text-fg-subtle">Room</span>
-        <LevelMeter level={levelRoom} active={active} label="Room audio level" bars={12} />
-      </div>
+    <div className="flex items-center gap-1.5">
+      {activity && <ActivityDot state={activity.me} />}
+      <LevelMeter level={level} active={active} />
     </div>
   );
 }
@@ -172,9 +149,8 @@ export function RecorderPanel({
   rightExtra,
   onLiveChange,
 }: {
-  /** Handed the finished clip as a File, ready for the normal upload path,
-   * plus whether it kept mic/room on separate channels. */
-  onRecorded: (file: File | null, durationSec: number, channelMap: ChannelMap) => void;
+  /** Handed the finished clip as a File, ready for the normal upload path. */
+  onRecorded: (file: File | null, durationSec: number) => void;
   disabled?: boolean;
   /** 'wide' puts a bigger, always-mounted LiveTranscriptPanel on the left and
    * shrinks these controls to a right-hand column -- see NewMeetingPage,
@@ -249,11 +225,7 @@ export function RecorderPanel({
   }, [recorder.live]);
 
   useEffect(() => {
-    onRecorded(
-      recorder.clip?.file ?? null,
-      recorder.clip?.durationSec ?? 0,
-      recorder.clip?.channelMap ?? null,
-    );
+    onRecorded(recorder.clip?.file ?? null, recorder.clip?.durationSec ?? 0);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [recorder.clip]);
 
@@ -348,8 +320,6 @@ export function RecorderPanel({
 
       <LevelMeters
         level={recorder.level}
-        levelRoom={recorder.levelRoom}
-        mixing={recorder.mixing}
         active={recorder.phase === 'recording'}
         activity={captionsLive ? captionsActivity : undefined}
       />
@@ -591,12 +561,7 @@ export function RecorderPanel({
               />
               {recorder.elapsed}
             </span>
-            <LevelMeters
-              level={recorder.level}
-              levelRoom={recorder.levelRoom}
-              mixing={recorder.mixing}
-              active={recorder.phase === 'recording'}
-            />
+            <LevelMeters level={recorder.level} active={recorder.phase === 'recording'} />
           </>
         )}
       </div>

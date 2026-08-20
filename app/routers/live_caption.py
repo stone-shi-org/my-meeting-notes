@@ -2,11 +2,10 @@
 
 Realtime relay: the browser streams raw 16kHz mono PCM16 over one websocket,
 tagged by channel (0 = whatever the tab/system capture is picking up -- "the
-room"; 1 = the local microphone -- see useLiveCaption.ts). This reuses the
-channel convention from the channel-separated recording feature
-(services/audio.py/diarize.py) for labelling only, never for accuracy: a live
-caption is a disposable draft, and unlike diarize_channels_file's output it
-is never written to transcripts/diarizations.
+room"; 1 = the local microphone -- see useLiveCaption.ts). This 0/room,
+1/mic tagging is for labelling only, independent of how (or whether) the
+recording itself keeps those sources apart: a live caption is a disposable
+draft and is never written to transcripts/diarizations.
 
 Each channel gets its own persistent session on the ASR backend's
 /v1/realtime endpoint (see services/diarize.realtime_url) -- audio is
