@@ -184,17 +184,15 @@ def test_diarization(
     url = effective(conn, "diarization_url")
     model = effective(conn, "diarization_model")
     api_key = effective(conn, "diarization_api_key")
-
-    if payload is not None:
-        if payload.url:
-            url = payload.url
-        if payload.model:
-            model = payload.model
-        if payload.api_key is not None and not payload.api_key.startswith(MASK):
-            api_key = payload.api_key
-
     live_stt_url = effective(conn, "live_stt_url")
-    backend = effective(conn, "live_caption_backend")
+    # Unlike url/model/api_key above, backend has no saved-default fallback:
+    # the Diarization settings panel tests this endpoint too and never sends
+    # live_caption_backend, and that setting's own default is "live_stt" --
+    # defaulting to it here would make every plain diarization test silently
+    # probe the live-stt gRPC service instead of the URL/model being tested.
+    # diarize_svc.test_connection() falls back to is_live_stt_model(model)
+    # when backend is None, which is the right signal for that panel.
+    backend = None
 
     if payload is not None:
         if payload.url:

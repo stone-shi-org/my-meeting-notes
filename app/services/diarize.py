@@ -779,22 +779,20 @@ def test_connection(
 
 
 def list_models(base_url: str, api_key: str | None = None, timeout: int = 15) -> list[dict]:
-    """Populate the model dropdown from the service's own /v1/models."""
+    """Populate the model dropdown from the service's own /v1/models.
+
+    Returns exactly what the service reports -- test_connection() counts on
+    that for models_count/model_found, and callers that want to also offer
+    the live-stt realtime models (which this HTTP service doesn't know about)
+    add those themselves, e.g. routers/system.py's dropdown endpoint.
+    """
     root = base_url.split("/v1/")[0].rstrip("/")
-    models = []
     try:
         response = httpx.get(
             f"{root}/v1/models", headers=_headers(api_key), timeout=timeout
         )
         response.raise_for_status()
-        data = response.json().get("data", [])
-        if isinstance(data, list):
-            models = data
-    except httpx.HTTPError:
-        pass
-
-    ids = {m.get("id") for m in models if isinstance(m, dict)}
-    if "realtime_eou_120m-v1" not in ids:
-        models.append({"id": "realtime_eou_120m-v1", "object": "model"})
-    return models
+    except httpx.HTTPError as exc:
+        raise DiarizationError(f"Could not list diarization models: {exc}") from exc
+    return response.json().get("data", [])
 

@@ -160,11 +160,23 @@ def diarization_models(
     if refresh:
         _MODEL_CACHE.pop("diarization", None)
 
+    # This dropdown backs both the Diarization panel's model field and the
+    # Live Caption panel's (see SettingsPage.tsx, both pass modelsPath=
+    # "/diarization/models") -- the latter needs the live-stt realtime model
+    # offered too, even when the diarization HTTP service itself is down,
+    # since it's served by an entirely separate gRPC process. Added here
+    # rather than in diarize_svc.list_models() because that function's exact
+    # output also feeds test_connection()'s models_count/model_found.
+    live_stt_option = {"id": "realtime_eou_120m-v1", "object": "model"}
+
     try:
         models = _cached(
             "diarization", lambda: diarize_svc.list_models(url, api_key or None)
         )
     except AppError as exc:
-        return {"models": [], "error": exc.message, "base_url": url}
+        return {"models": [live_stt_option], "error": exc.message, "base_url": url}
+
+    if not any(m.get("id") == live_stt_option["id"] for m in models if isinstance(m, dict)):
+        models = [*models, live_stt_option]
 
     return {"models": models, "error": None, "base_url": url}
