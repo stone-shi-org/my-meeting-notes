@@ -124,6 +124,13 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # to this), for a one-off meeting in a different language than usual
     # without a trip to Settings.
     "live_caption_language": ("str", False),
+    # Host:port for the standalone live-stt gRPC service (e.g. "localhost:4030").
+    # Used when live_caption_model is set to a live-stt model (e.g. "realtime_eou_120m-v1").
+    "live_stt_url": ("str", False),
+    # Backend type for live captions: "live_stt" (gRPC) or "realtime" (WebSocket).
+    "live_caption_backend": ("str", False),
+
+
     # Periodic LLM analysis of the rolling live-caption transcript during a
     # recording (see routers/insights.py) -- a distinct model from llm_model,
     # reusing llm_base_url/llm_api_key/llm_ssl_verify/llm_timeout_sec, since
@@ -287,6 +294,10 @@ class Settings(BaseSettings):
     live_caption_model: str = "lfm2.5-audio-1.5b-realtime"
     # ISO-639-1 code, or empty for auto-detect -- see RUNTIME_KEYS above.
     live_caption_language: str = ""
+    live_stt_url: str = "localhost:4030"
+    live_caption_backend: str = "live_stt"
+
+
 
     # --- insights ---------------------------------------------------------
     # See RUNTIME_KEYS above. 30s balances "feels live" against the cost of a

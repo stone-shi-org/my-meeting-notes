@@ -15,3 +15,5 @@ web/dist/
 .pytest_cache/
 version.txt
 .playwright-mcp/
+.pocketagent/
+

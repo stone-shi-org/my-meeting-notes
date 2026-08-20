@@ -54,6 +54,10 @@ class DiarizationTestRequest(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
+    live_stt_url: str | None = Field(default=None, max_length=500)
+    live_caption_backend: str | None = Field(default=None, max_length=50)
+
+
 
 
 class TelegramTestRequest(BaseModel):
@@ -189,9 +193,27 @@ def test_diarization(
         if payload.api_key is not None and not payload.api_key.startswith(MASK):
             api_key = payload.api_key
 
+    live_stt_url = effective(conn, "live_stt_url")
+    backend = effective(conn, "live_caption_backend")
+
+    if payload is not None:
+        if payload.url:
+            url = payload.url
+        if payload.model:
+            model = payload.model
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            api_key = payload.api_key
+        if payload.live_stt_url:
+            live_stt_url = payload.live_stt_url
+        if payload.live_caption_backend:
+            backend = payload.live_caption_backend
+
     result = diarize_svc.test_connection(
-        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC
+        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC, live_stt_url=live_stt_url, backend=backend
     )
+
+
+
     log.info(
         "admin %s tested diarization (%s): ok=%s %sms",
         admin.username, model, result["ok"], result["latency_ms"],

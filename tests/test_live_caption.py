@@ -102,13 +102,21 @@ class TestAuth:
 
 
 class TestFeatureFlag:
-    def test_rejects_when_disabled_by_default(self, admin_client):
+    def test_rejects_when_disabled_by_default(self, admin_client, monkeypatch):
         """live_caption_enabled defaults False -- see RUNTIME_KEYS and the
         Settings field, both deliberately off out of the box."""
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with admin_client.websocket_connect("/api/live-caption/ws"):
-                pass
-        assert exc.value.code == 4404
+        from app.config import get_settings
+        monkeypatch.setenv("MMN_LIVE_CAPTION_ENABLED", "false")
+        get_settings.cache_clear()
+        try:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                with admin_client.websocket_connect("/api/live-caption/ws"):
+                    pass
+            assert exc.value.code == 4404
+        finally:
+            get_settings.cache_clear()
+
+
 
     def test_accepts_once_enabled(self, admin_client, conn, monkeypatch):
         conn.execute(
@@ -501,3 +509,78 @@ class TestLiveCaptionWsRealtimeRelay:
                     captions[msg["channel"]] = msg["text"]
 
         assert captions == {"room": "hi there", "me": "hi there"}
+
+
+class TestIsLiveSttModel:
+    def test_identifies_live_stt_models(self):
+        assert live_caption.is_live_stt_model("realtime_eou_120m-v1") is True
+        assert live_caption.is_live_stt_model("nemotron-3.5-asr-streaming-0.6b") is True
+        assert live_caption.is_live_stt_model("lfm2.5-audio-1.5b-realtime") is False
+        assert live_caption.is_live_stt_model("") is False
+
+
+class TestChannelWorkerLiveSTT:
+    @pytest.mark.asyncio
+    async def test_relays_delta_events_as_captions(self, monkeypatch):
+        from app.pb.livestt.v1 import asr_pb2
+
+        class FakeGrpcCall:
+            def __init__(self, events):
+                self._events = events
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._events:
+                    raise StopAsyncIteration
+                return self._events.pop(0)
+
+        class FakeGrpcStub:
+            def __init__(self, channel):
+                pass
+
+            def Transcribe(self, request_iterator):
+                events = [
+                    asr_pb2.TranscriptionEvent(ready=asr_pb2.Ready(model="realtime_eou_120m-v1")),
+                    asr_pb2.TranscriptionEvent(
+                        delta=asr_pb2.TranscriptDelta(text="hello from live stt")
+                    ),
+                ]
+                return FakeGrpcCall(events)
+
+        class FakeGrpcChannel:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        def fake_insecure_channel(target):
+            return FakeGrpcChannel()
+
+        import grpc
+        monkeypatch.setattr(grpc.aio, "insecure_channel", fake_insecure_channel)
+        monkeypatch.setattr("app.pb.livestt.v1.asr_pb2_grpc.StreamingASRStub", FakeGrpcStub)
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(b"\x01\x02\x03")
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_livestt(
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None
+            )
+        )
+        try:
+            messages = [await browser.next() for _ in range(4)]
+            statuses = [m["state"] for m in messages if m["type"] == "status"]
+            captions = [m for m in messages if m["type"] == "caption"]
+            assert captions == [{"type": "caption", "channel": "room", "text": "hello from live stt"}]
+            assert "calling" in statuses
+            assert "idle" in statuses
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+

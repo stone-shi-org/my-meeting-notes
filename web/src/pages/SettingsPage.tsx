@@ -126,7 +126,16 @@ function SettingsForm({
 }: {
   title: string;
   description: string;
-  keys: { key: string; label: string; hint?: string; type?: string; step?: string }[];
+  keys: {
+    key: string;
+    label: string;
+    hint?: string;
+    type?: string;
+    step?: string;
+    options?: { value: string; label: string }[];
+    badge?: (value: string) => { label: string; variant: 'info' | 'success' | 'warning' | 'neutral' | 'primary' | 'danger' } | null;
+    visible?: (draft: Record<string, string>, entries: Record<string, { value?: unknown }>) => boolean;
+  }[];
   modelsPath?: string;
   modelKey?: string;
   /** Endpoint that tests the connection this form configures. */
@@ -189,17 +198,44 @@ function SettingsForm({
       <p className="mt-1 text-sm text-fg-subtle">{description}</p>
 
       <div className="mt-5 space-y-4">
-        {keys.map(({ key, label, hint, type, step }) => {
+        {keys.map(({ key, label, hint, type, step, options, badge, visible }) => {
           const entry = entries[key];
           if (!entry) return null;
+          if (visible && !visible(draft, entries)) return null;
+
           const value = draft[key] ?? (entry.value ?? '');
           const isModelField = key === modelKey;
+          const badgeObj = badge ? badge(String(value)) : null;
 
           return (
             <div key={key}>
-              <Label htmlFor={key}>{label}</Label>
+              <div className="flex items-center gap-2">
+                <Label htmlFor={key}>{label}</Label>
+                {badgeObj && (
+                  <Badge variant={badgeObj.variant} size="sm">
+                    {badgeObj.label}
+                  </Badge>
+                )}
+              </div>
 
-              {entry.type === 'bool' ? (
+              {options ? (
+                <Select
+                  id={key}
+                  className="mt-1.5"
+                  value={String(value)}
+                  disabled={!isAdmin}
+                  onChange={(e) => {
+                    setDraft((d) => ({ ...d, [key]: e.target.value }));
+                    setTestResult(null);
+                  }}
+                >
+                  {options.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </Select>
+              ) : entry.type === 'bool' ? (
                 // A select rather than a checkbox: the rest of this form is a
                 // draft you save, and a checkbox reads as taking effect on click.
                 <Select
@@ -244,6 +280,7 @@ function SettingsForm({
               )}
 
               {hint && <p className="mt-1 text-xs text-fg-subtle">{hint}</p>}
+
               {isModelField && modelOptions.length > 0 && (
                 <p className="mt-1 text-xs text-fg-subtle">
                   {modelOptions.length} models available — start typing to filter, or clear
@@ -573,7 +610,7 @@ export function LiveCaptionsSettingsPage() {
   return (
     <SettingsForm
       title="Live captions"
-      description="A persistent streaming session per audio channel, held open for the whole recording, shown as a rough transcript while it's in progress. Off by default: every open connection holds a session against the diarization endpoint's host above, on top of the real diarizer and the language model."
+      description="A persistent streaming session per audio channel, held open for the whole recording, shown as a rough transcript while it's in progress."
       modelsPath="/diarization/models"
       modelKey="live_caption_model"
       testPath="/diarization/test"
@@ -581,6 +618,8 @@ export function LiveCaptionsSettingsPage() {
         diarization_url: 'url',
         diarization_api_key: 'api_key',
         live_caption_model: 'model',
+        live_stt_url: 'live_stt_url',
+        live_caption_backend: 'live_caption_backend',
       }}
       keys={[
         {
@@ -588,31 +627,61 @@ export function LiveCaptionsSettingsPage() {
           label: 'Show live captions while recording',
         },
         {
+          key: 'live_caption_backend',
+          label: 'Endpoint type',
+          hint: 'Select the live caption streaming endpoint architecture.',
+          options: [
+            { value: 'live_stt', label: 'Live STT (gRPC)' },
+            { value: 'realtime', label: 'OpenAI /v1/realtime (WebSocket)' },
+          ],
+          badge: (val: string) => {
+            if (val === 'live_stt') {
+              return { label: 'gRPC live-stt', variant: 'success' };
+            }
+            return { label: 'WebSocket /v1/realtime', variant: 'info' };
+          },
+        },
+        {
+          key: 'live_stt_url',
+          label: 'Live STT gRPC URL',
+          hint: 'Host:port for the standalone live-stt gRPC streaming service (e.g. localhost:4030).',
+          visible: (draft, entries) => {
+            const val = draft.live_caption_backend ?? entries.live_caption_backend?.value ?? 'live_stt';
+            return val === 'live_stt';
+          },
+        },
+        {
           key: 'live_caption_model',
           label: 'Model',
-          hint: 'Must be registered on the backend as a realtime *pipeline* model -- a plain ASR/LLM model (including the Diarization model above) gets the connection rejected outright with "Model is not a pipeline model". The Test button below only checks connectivity to the host, not whether this specific model is realtime-capable there.',
+          hint: 'The streaming ASR model name. Default for Live STT gRPC: realtime_eou_120m-v1. Default for WebSocket /v1/realtime: lfm2.5-audio-1.5b-realtime.',
         },
         {
           key: 'live_caption_language',
           label: 'Language',
-          hint: 'ISO-639-1 code, e.g. en -- not the language name (seen to silently break streaming entirely on at least one backend, with an unrelated-looking error). Leave blank for auto-detection.',
+          hint: 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
         },
         {
           key: 'live_caption_commit_interval_sec',
           label: 'Commit interval (seconds)',
           type: 'number',
-          hint: "How often each channel commits whatever audio arrived since the last commit. The backend's own VAD-based auto-commit is off on purpose: it only committed on a real pause, so continuous speech produced no captions at all until the speaker stopped -- this fixed cadence is what paces captions now. Lower is snappier but calls the backend more often.",
+          hint: "How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode only).",
+          visible: (draft, entries) => {
+            const val = draft.live_caption_backend ?? entries.live_caption_backend?.value ?? 'live_stt';
+            return val === 'realtime';
+          },
         },
         {
           key: 'live_caption_timeout_sec',
           label: 'Connect timeout (seconds)',
           type: 'number',
-          hint: 'How long one channel may take to open its session and complete the initial handshake before that channel gives up for the rest of the recording. This bounds a one-time cost per channel per recording, not a per-caption one -- once a session is open, it just stays open.',
+          hint: 'How long one channel may take to open its session and complete the initial handshake before timing out.',
         },
       ]}
     />
   );
 }
+
+
 
 export function WebSearchSettingsPage() {
   return (

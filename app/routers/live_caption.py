@@ -99,7 +99,8 @@ from app.config import effective, get_settings
 from app.db import get_conn
 from app.logging_config import get_logger
 from app.services import users as users_svc
-from app.services.diarize import realtime_url
+from app.services.diarize import is_live_stt_model, realtime_url
+
 
 log = get_logger("live_caption")
 
@@ -406,6 +407,93 @@ async def channel_worker(
         await _send_status(websocket, name, "idle")
 
 
+async def channel_worker_livestt(
+    channel: int,
+    websocket: WebSocket,
+    queue: asyncio.Queue,
+    target_url: str,
+    model: str,
+    language: str | None,
+) -> None:
+    """One channel's live-stt gRPC session, for the life of the recording.
+
+    Connects to live-stt gRPC StreamingASR service, streams PCM16 audio
+    chunks from queue, and relays TranscriptDelta / Final events back to the
+    browser WebSocket.
+    """
+    name = CHANNEL_NAMES[channel]
+    try:
+        import grpc
+        from app.pb.livestt.v1 import asr_pb2, asr_pb2_grpc
+    except ImportError as exc:
+        log.warning("gRPC stubs or grpcio not available for live-stt (%s)", exc)
+        await _send_status(websocket, name, "idle")
+        return
+
+    try:
+        async with grpc.aio.insecure_channel(target_url) as grpc_channel:
+            stub = asr_pb2_grpc.StreamingASRStub(grpc_channel)
+
+            async def request_generator():
+                yield asr_pb2.TranscriptionRequest(
+                    config=asr_pb2.StreamConfig(
+                        call_id=f"live-caption-{name}",
+                        encoding=asr_pb2.AUDIO_ENCODING_LINEAR16,
+                        sample_rate_hz=16000,
+                        language=language or "",
+                        model=model,
+                        enable_word_timestamps=False,
+                    )
+                )
+                while True:
+                    chunk = await queue.get()
+                    if chunk is None:
+                        break
+                    yield asr_pb2.TranscriptionRequest(audio=chunk)
+
+            call = stub.Transcribe(request_generator())
+
+            async for event in call:
+                kind = event.WhichOneof("event")
+                if kind == "ready":
+                    await _send_status(websocket, name, "idle")
+                elif kind == "delta":
+                    text = (event.delta.text or "").strip()
+                    if text:
+                        await _send_status(websocket, name, "calling")
+                        try:
+                            await websocket.send_json(
+                                {"type": "caption", "channel": name, "text": text}
+                            )
+                        except Exception:
+                            return
+                        await _send_status(websocket, name, "idle")
+                elif kind == "final":
+                    text = (event.final.text or "").strip()
+                    if text:
+                        try:
+                            await websocket.send_json(
+                                {"type": "caption", "channel": name, "text": text}
+                            )
+                        except Exception:
+                            return
+                        await _send_status(websocket, name, "idle")
+                elif kind == "warning":
+                    log.warning("live-stt warning for %s: %s", name, event.warning.message)
+                elif kind == "recycled":
+                    log.info("live-stt recycled worker for %s: %s", name, event.recycled.reason)
+
+    except Exception as exc:
+        log.warning(
+            "live caption live-stt session for %s failed: %s: %s",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+    finally:
+        await _send_status(websocket, name, "idle")
+
+
 @router.websocket("/ws")
 async def live_caption_ws(websocket: WebSocket) -> None:
     user = await _authenticate(websocket)
@@ -421,6 +509,8 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         default_language = effective(conn, "live_caption_language")
         api_key = effective(conn, "diarization_api_key")
         diarization_url = effective(conn, "diarization_url")
+        live_stt_url = effective(conn, "live_stt_url")
+        backend = effective(conn, "live_caption_backend")
 
     if not enabled:
         await websocket.close(code=4404)
@@ -436,27 +526,44 @@ async def live_caption_ws(websocket: WebSocket) -> None:
     raw_language = websocket.query_params.get("language")
     language = raw_language if raw_language is not None else default_language
 
-    url = realtime_url(diarization_url)
     await websocket.accept()
     await websocket.send_json({"type": "info", "model": model, "is_realtime": True})
 
     queues: dict[int, asyncio.Queue] = {0: asyncio.Queue(), 1: asyncio.Queue()}
-    workers = [
-        asyncio.create_task(
-            channel_worker(
-                ch,
-                websocket,
-                queues[ch],
-                url,
-                model,
-                api_key or None,
-                language or None,
-                open_timeout,
-                commit_interval_sec,
+
+    if backend == "live_stt" or is_live_stt_model(model):
+        workers = [
+            asyncio.create_task(
+                channel_worker_livestt(
+                    ch,
+                    websocket,
+                    queues[ch],
+                    live_stt_url,
+                    model,
+                    language or None,
+                )
             )
-        )
-        for ch in queues
-    ]
+            for ch in queues
+        ]
+
+    else:
+        url = realtime_url(diarization_url)
+        workers = [
+            asyncio.create_task(
+                channel_worker(
+                    ch,
+                    websocket,
+                    queues[ch],
+                    url,
+                    model,
+                    api_key or None,
+                    language or None,
+                    open_timeout,
+                    commit_interval_sec,
+                )
+            )
+            for ch in queues
+        ]
 
     try:
         while True:
@@ -476,3 +583,4 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         for worker in workers:
             worker.cancel()
         await asyncio.gather(*workers, return_exceptions=True)
+

@@ -31,3 +31,7 @@ pytest>=7.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.10.0
 respx>=0.21.0
+# gRPC client for live-stt streaming ASR service (app/routers/live_caption.py)
+grpcio>=1.60.0
+protobuf>=4.25.0
+

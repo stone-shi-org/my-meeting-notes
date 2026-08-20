@@ -685,8 +685,58 @@ async def diarize_multi_channel_file(
     return payload, total_ms
 
 
+LIVE_STT_MODELS = {
+    "realtime_eou_120m-v1",
+    "nemotron-3.5-asr-streaming-0.6b",
+}
+
+
+def is_live_stt_model(model: str) -> bool:
+    if not model:
+        return False
+    if model in LIVE_STT_MODELS:
+        return True
+    m_lower = model.lower()
+    return "realtime_eou" in m_lower or "nemotron" in m_lower or "live-stt" in m_lower or "livestt" in m_lower
+
+
+def test_live_stt_connection(target_url: str, model: str, timeout: int = 15) -> dict:
+    started = time.monotonic()
+    try:
+        import grpc
+        from app.pb.livestt.v1 import asr_pb2, asr_pb2_grpc
+
+        channel = grpc.insecure_channel(target_url)
+        stub = asr_pb2_grpc.StreamingASRStub(channel)
+        info = stub.GetServerInfo(asr_pb2.ServerInfoRequest(), timeout=timeout)
+        channel.close()
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "ok": True,
+            "latency_ms": latency_ms,
+            "error": None,
+            "models_count": 1,
+            "model_found": True,
+            "server_version": info.version,
+        }
+    except Exception as exc:
+        latency_ms = int((time.monotonic() - started) * 1000)
+        return {
+            "ok": False,
+            "latency_ms": latency_ms,
+            "error": f"Could not reach live-stt service at {target_url}: {exc}",
+            "models_count": 0,
+            "model_found": False,
+        }
+
+
 def test_connection(
-    base_url: str, model: str, api_key: str | None = None, timeout: int = 15
+    base_url: str,
+    model: str,
+    api_key: str | None = None,
+    timeout: int = 15,
+    live_stt_url: str | None = None,
+    backend: str | None = None,
 ) -> dict:
     """Check the service is reachable and the configured model exists.
 
@@ -695,6 +745,11 @@ def test_connection(
     model dropdown: cheap enough to click freely, honest about what it did and
     didn't verify.
     """
+    if backend == "live_stt" or is_live_stt_model(model):
+        target = live_stt_url or "localhost:4030"
+        return test_live_stt_connection(target, model, timeout=timeout)
+
+
     started = time.monotonic()
     try:
         models = list_models(base_url, api_key, timeout=timeout)
@@ -726,11 +781,20 @@ def test_connection(
 def list_models(base_url: str, api_key: str | None = None, timeout: int = 15) -> list[dict]:
     """Populate the model dropdown from the service's own /v1/models."""
     root = base_url.split("/v1/")[0].rstrip("/")
+    models = []
     try:
         response = httpx.get(
             f"{root}/v1/models", headers=_headers(api_key), timeout=timeout
         )
         response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise DiarizationError(f"Could not list diarization models: {exc}") from exc
-    return response.json().get("data", [])
+        data = response.json().get("data", [])
+        if isinstance(data, list):
+            models = data
+    except httpx.HTTPError:
+        pass
+
+    ids = {m.get("id") for m in models if isinstance(m, dict)}
+    if "realtime_eou_120m-v1" not in ids:
+        models.append({"id": "realtime_eou_120m-v1", "object": "model"})
+    return models
+
