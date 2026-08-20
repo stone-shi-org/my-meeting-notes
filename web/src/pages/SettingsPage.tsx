@@ -610,7 +610,7 @@ export function LiveCaptionsSettingsPage() {
   return (
     <SettingsForm
       title="Live captions"
-      description="A persistent streaming session per audio channel, held open for the whole recording, shown as a rough transcript while it's in progress."
+      description="A rough transcript shown while a recording is in progress. Live STT and /v1/realtime hold one persistent streaming session open per audio channel for the whole recording; /v1/audio/transcriptions instead POSTs short chunks on a fixed interval."
       modelsPath="/diarization/models"
       modelKey="live_caption_model"
       testPath="/diarization/test"
@@ -633,10 +633,14 @@ export function LiveCaptionsSettingsPage() {
           options: [
             { value: 'live_stt', label: 'Live STT (gRPC)' },
             { value: 'realtime', label: 'OpenAI /v1/realtime (WebSocket)' },
+            { value: 'transcriptions', label: '/v1/audio/transcriptions (periodic POST)' },
           ],
           badge: (val: string) => {
             if (val === 'live_stt') {
               return { label: 'gRPC live-stt', variant: 'success' };
+            }
+            if (val === 'transcriptions') {
+              return { label: 'Periodic /v1/audio/transcriptions', variant: 'warning' };
             }
             return { label: 'WebSocket /v1/realtime', variant: 'info' };
           },
@@ -653,7 +657,7 @@ export function LiveCaptionsSettingsPage() {
         {
           key: 'live_caption_model',
           label: 'Model',
-          hint: 'The streaming ASR model name. Default for Live STT gRPC: realtime_eou_120m-v1. Default for WebSocket /v1/realtime: lfm2.5-audio-1.5b-realtime.',
+          hint: 'The streaming ASR model name. Default for Live STT gRPC: realtime_eou_120m-v1. Default for WebSocket /v1/realtime: lfm2.5-audio-1.5b-realtime. /v1/audio/transcriptions mode uses whatever plain ASR model the diarization service has registered.',
         },
         {
           key: 'live_caption_language',
@@ -664,17 +668,17 @@ export function LiveCaptionsSettingsPage() {
           key: 'live_caption_commit_interval_sec',
           label: 'Commit interval (seconds)',
           type: 'number',
-          hint: "How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode only).",
+          hint: 'How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode), or how long a chunk is before it is POSTed (periodic /v1/audio/transcriptions mode). Not used by Live STT gRPC, which flushes on its own utterance boundaries.',
           visible: (draft, entries) => {
             const val = draft.live_caption_backend ?? entries.live_caption_backend?.value ?? 'live_stt';
-            return val === 'realtime';
+            return val === 'realtime' || val === 'transcriptions';
           },
         },
         {
           key: 'live_caption_timeout_sec',
           label: 'Connect timeout (seconds)',
           type: 'number',
-          hint: 'How long one channel may take to open its session and complete the initial handshake before timing out.',
+          hint: 'How long one channel may take to open its session and complete the initial handshake before timing out (WebSocket /v1/realtime mode), or the per-call timeout for one chunk\'s POST (periodic /v1/audio/transcriptions mode).',
         },
       ]}
     />

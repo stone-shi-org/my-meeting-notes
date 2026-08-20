@@ -230,7 +230,7 @@ export function RecorderPanel({
     captions,
     connected: captionsConnected,
     activity: captionsActivity,
-    isRealtime: captionsIsRealtime,
+    backend: captionsBackend,
     partial: captionsPartial,
   } = useLiveCaption(recorder.liveStreams, captionsLive, captionLanguage);
 
@@ -675,7 +675,7 @@ export function RecorderPanel({
           captions={captions}
           connected={captionsConnected}
           enabled={captionsLive}
-          isRealtime={captionsIsRealtime}
+          backend={captionsBackend}
           partial={captionsPartial}
         />
         {rightExtra}

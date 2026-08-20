@@ -18,6 +18,27 @@ export interface Caption {
  * response per call. */
 export type ActivityState = 'idle' | 'buffering' | 'calling';
 
+/** Mirrors live_caption_ws's `resolved_backend` -- which of the three
+ * channel_worker* functions is actually relaying this session, sent once as
+ * `{"type": "info", model, backend}` right after the socket is accepted.
+ * See app/routers/live_caption.py's module docstring for what each one is. */
+export type LiveCaptionBackend = 'live_stt' | 'realtime' | 'transcriptions';
+
+/** Badge copy for each backend -- one shared map so LiveTranscriptPanel's
+ * (wide layout) and LiveCaptionStrip's (compact layout) badges can't drift
+ * from each other or from what live_caption.py actually named the value. */
+export const LIVE_CAPTION_BACKEND_BADGE: Record<
+  LiveCaptionBackend,
+  { label: string; title: string }
+> = {
+  live_stt: { label: 'Live Stream', title: 'Streaming via a persistent live-stt gRPC session' },
+  realtime: { label: 'Realtime', title: 'Streaming via a persistent /v1/realtime session' },
+  transcriptions: {
+    label: 'Transcription',
+    title: 'Periodic calls to /v1/audio/transcriptions -- no persistent session',
+  },
+};
+
 const DEFAULT_ACTIVITY: Record<'me' | 'room', ActivityState> = { me: 'idle', room: 'idle' };
 const DEFAULT_PARTIAL: Record<'me' | 'room', string> = { me: '', room: '' };
 
@@ -56,12 +77,12 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
   const [captions, setCaptions] = useState<Caption[]>([]);
   const [connected, setConnected] = useState(false);
   const [activity, setActivity] = useState(DEFAULT_ACTIVITY);
-  // True once the backend confirms this session is running through
-  // /v1/realtime (see live_caption.py's `info` message) -- always true
-  // today (there is no other path any more), but still sent explicitly
-  // rather than assumed, the same reasoning `connected` gets its own state
-  // instead of being inferred from `captions.length > 0`.
-  const [isRealtime, setIsRealtime] = useState(false);
+  // Set once the backend's `info` message names which of the three
+  // channel_worker* backends this session is actually running through --
+  // see live_caption.py's live_caption_ws. null before that message
+  // arrives (or once disconnected), same reasoning `connected` gets its own
+  // state instead of being inferred from `captions.length > 0`.
+  const [backend, setBackend] = useState<LiveCaptionBackend | null>(null);
   const [modelName, setModelName] = useState<string | null>(null);
   // In-progress text for a still-open utterance, pushed as
   // `{"type": "partial", channel, text}` if the backend ever emits a
@@ -76,7 +97,7 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     if (!enabled || (!streams.room && !streams.me)) {
       setConnected(false);
       setActivity(DEFAULT_ACTIVITY);
-      setIsRealtime(false);
+      setBackend(null);
       setModelName(null);
       setPartial(DEFAULT_PARTIAL);
       return;
@@ -95,7 +116,7 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       if (!cancelled) {
         setConnected(false);
         setActivity(DEFAULT_ACTIVITY);
-        setIsRealtime(false);
+        setBackend(null);
         setModelName(null);
         setPartial(DEFAULT_PARTIAL);
       }
@@ -108,7 +129,9 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       try {
         const msg = JSON.parse(event.data);
         if (msg?.type === 'info') {
-          setIsRealtime(Boolean(msg.is_realtime));
+          if (msg.backend === 'live_stt' || msg.backend === 'realtime' || msg.backend === 'transcriptions') {
+            setBackend(msg.backend);
+          }
           if (msg.model) setModelName(String(msg.model));
         } else if (msg?.type === 'caption' && (msg.channel === 'me' || msg.channel === 'room')) {
           setCaptions((prev) =>
@@ -221,5 +244,5 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     // practice it never changes mid-connection.
   }, [streams.room, streams.me, enabled, language]);
 
-  return { captions, connected, activity, isRealtime, modelName, partial };
+  return { captions, connected, activity, backend, modelName, partial };
 }

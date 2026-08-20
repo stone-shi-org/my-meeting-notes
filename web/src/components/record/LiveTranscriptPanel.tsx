@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Zap } from 'lucide-react';
 import { Badge, Card, Input } from '@/components/ui/primitives';
-import type { Caption } from '@/hooks/useLiveCaption';
+import { LIVE_CAPTION_BACKEND_BADGE, type Caption, type LiveCaptionBackend } from '@/hooks/useLiveCaption';
 import { cn } from '@/lib/cn';
 import { initials, speakerVars } from '@/lib/speakerColors';
 
@@ -94,13 +94,13 @@ export function LiveTranscriptPanel({
   captions,
   connected,
   enabled,
-  isRealtime,
+  backend,
   partial,
 }: {
   captions: Caption[];
   connected: boolean;
   enabled: boolean;
-  isRealtime?: boolean;
+  backend?: LiveCaptionBackend | null;
   /** In-progress text for a still-open utterance on each channel -- see
    * useLiveCaption's `partial`. Optional so callers that don't wire it
    * through (none currently, but nothing here requires it) still compile;
@@ -171,13 +171,13 @@ export function LiveTranscriptPanel({
       <div className="flex items-center justify-between gap-3">
         <div className="flex items-center gap-2">
           <h2 className="font-display text-lg font-semibold">Live transcript</h2>
-          {isRealtime && (
+          {backend && (
             <span
               className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-2 py-0.5 text-xs font-medium text-indigo-400 border border-indigo-500/20"
-              title="Streaming via a persistent /v1/realtime session"
+              title={LIVE_CAPTION_BACKEND_BADGE[backend].title}
             >
               <Zap className="size-3" />
-              Realtime
+              {LIVE_CAPTION_BACKEND_BADGE[backend].label}
             </span>
           )}
         </div>

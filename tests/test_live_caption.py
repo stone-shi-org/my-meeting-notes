@@ -9,8 +9,9 @@ cadence pass a tiny interval so they run fast rather than waiting out the
 real default.
 
 Nothing here opens a real socket: _connect_realtime is the one seam every
-test monkeypatches, so the suite stays offline-safe the same way respx keeps
-the httpx-based routes offline-safe elsewhere.
+realtime/live-stt test monkeypatches, so the suite stays offline-safe.
+channel_worker_transcriptions is the exception -- it is a plain httpx POST,
+so its tests use respx like every other httpx-based route in this suite.
 """
 
 from __future__ import annotations
@@ -19,7 +20,9 @@ import asyncio
 import base64
 import json
 
+import httpx
 import pytest
+import respx
 from starlette.websockets import WebSocketDisconnect
 
 from app.db import utcnow
@@ -124,6 +127,15 @@ class TestFeatureFlag:
             "VALUES ('live_caption_enabled', 'true', 'bool', 0, ?)",
             (utcnow(),),
         )
+        # live_caption_backend defaults to "live_stt" (see config.py), which
+        # would dispatch to channel_worker_livestt instead of the
+        # _connect_realtime seam this test fakes below -- pin it to
+        # "realtime" explicitly so this exercises the path it's named for.
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_backend', 'realtime', 'str', 0, ?)",
+            (utcnow(),),
+        )
         conn.commit()
 
         # Fails fast rather than attempting a real network connection --
@@ -137,7 +149,7 @@ class TestFeatureFlag:
         with admin_client.websocket_connect("/api/live-caption/ws") as ws:
             info = ws.receive_json()
             assert info["type"] == "info"
-            assert info["is_realtime"] is True
+            assert info["backend"] == "realtime"
 
 
 class TestTranscriptionSessionUpdate:
@@ -469,6 +481,15 @@ class TestLiveCaptionWsRealtimeRelay:
             "VALUES ('live_caption_commit_interval_sec', '0.05', 'float', 0, ?)",
             (utcnow(),),
         )
+        # live_caption_backend defaults to "live_stt" (see config.py), which
+        # would dispatch to channel_worker_livestt instead of the
+        # _connect_realtime seam this test fakes below -- pin it to
+        # "realtime" explicitly so this exercises the path it's named for.
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_backend', 'realtime', 'str', 0, ?)",
+            (utcnow(),),
+        )
         conn.commit()
 
         script = [
@@ -495,7 +516,7 @@ class TestLiveCaptionWsRealtimeRelay:
             assert info == {
                 "type": "info",
                 "model": "lfm2.5-audio-1.5b-realtime",
-                "is_realtime": True,
+                "backend": "realtime",
             }
 
             ws.send_bytes(b"\x00" + b"\x01\x02")  # channel 0 ("room")
@@ -587,5 +608,253 @@ class TestChannelWorkerLiveSTT:
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+
+TRANSCRIPTIONS_URL = "http://asr.test/v1/audio/transcriptions"
+
+
+def _sse_transcript_body(text: str) -> bytes:
+    """One SSE frame in the wire shape _transcribe_window expects, same
+    shape the old per-chunk route (and chat's LLM streaming) used: a
+    ``transcript.text.done`` data line carrying the final text, terminated
+    by a literal ``data: [DONE]``."""
+    frame = {"type": "transcript.text.done", "text": text}
+    return f"data: {json.dumps(frame)}\n\ndata: [DONE]\n\n".encode()
+
+
+def _sse_transcript_response(text: str) -> httpx.Response:
+    return httpx.Response(
+        200, content=_sse_transcript_body(text), headers={"content-type": "text/event-stream"}
+    )
+
+
+# 4000 Hz square-ish wave samples, comfortably above SILENCE_PEAK_THRESHOLD's
+# 2% of full scale -- a stand-in for "someone is speaking."
+LOUD_PCM = (b"\x00\x40" + b"\x00\xc0") * 100
+SILENT_PCM = b"\x00\x00" * 200
+
+
+class TestPeakAmplitude:
+    def test_silence_is_below_threshold(self):
+        assert live_caption._peak_amplitude(SILENT_PCM) < live_caption.SILENCE_PEAK_THRESHOLD
+
+    def test_loud_audio_is_above_threshold(self):
+        assert live_caption._peak_amplitude(LOUD_PCM) > live_caption.SILENCE_PEAK_THRESHOLD
+
+    def test_empty_input_is_zero(self):
+        assert live_caption._peak_amplitude(b"") == 0.0
+
+    def test_a_torn_trailing_byte_is_dropped_not_raised(self):
+        # An odd-length buffer is a cheap gate's problem to ignore, not a
+        # decoder's problem to crash on.
+        live_caption._peak_amplitude(LOUD_PCM + b"\x01")
+
+
+class TestWavBytes:
+    def test_wraps_pcm_in_a_wav_container(self):
+        import wave
+        from io import BytesIO
+
+        wav = live_caption._wav_bytes(LOUD_PCM)
+        with wave.open(BytesIO(wav), "rb") as wav_file:
+            assert wav_file.getnchannels() == 1
+            assert wav_file.getsampwidth() == live_caption.BYTES_PER_SAMPLE
+            assert wav_file.getframerate() == live_caption.SAMPLE_RATE
+            assert wav_file.readframes(wav_file.getnframes()) == LOUD_PCM
+
+
+class TestTranscribeWindow:
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_returns_the_committed_text(self):
+        respx.post(TRANSCRIPTIONS_URL).mock(return_value=_sse_transcript_response("hello there"))
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, TRANSCRIPTIONS_URL, "some-model", None, LOUD_PCM, None
+            )
+        assert text == "hello there"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_strips_a_stray_language_tag(self):
+        respx.post(TRANSCRIPTIONS_URL).mock(
+            return_value=_sse_transcript_response("hello there <en-US>")
+        )
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, TRANSCRIPTIONS_URL, "some-model", None, LOUD_PCM, None
+            )
+        assert text == "hello there"
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_a_rejected_chunk_returns_empty_string(self):
+        respx.post(TRANSCRIPTIONS_URL).mock(return_value=httpx.Response(500, text="boom"))
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, TRANSCRIPTIONS_URL, "some-model", None, LOUD_PCM, None
+            )
+        assert text == ""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_a_connection_error_returns_empty_string_rather_than_raising(self):
+        """A dropped chunk is invisible to the user; raising would kill the
+        whole channel over one bad call -- same reasoning channel_worker's
+        own send-failure handling uses."""
+        respx.post(TRANSCRIPTIONS_URL).mock(side_effect=httpx.ConnectError("refused"))
+        async with httpx.AsyncClient() as client:
+            text = await live_caption._transcribe_window(
+                client, TRANSCRIPTIONS_URL, "some-model", None, LOUD_PCM, None
+            )
+        assert text == ""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_sends_language_only_when_set(self):
+        route = respx.post(TRANSCRIPTIONS_URL).mock(
+            return_value=_sse_transcript_response("hi")
+        )
+        async with httpx.AsyncClient() as client:
+            await live_caption._transcribe_window(
+                client, TRANSCRIPTIONS_URL, "some-model", None, LOUD_PCM, "en"
+            )
+        # Decoded with "replace" rather than plain utf-8: the multipart body
+        # also carries the raw (non-utf-8) wav file field, and this only
+        # cares about the text-form "language" field alongside it.
+        sent = route.calls.last.request.content.decode("utf-8", errors="replace")
+        assert 'name="language"' in sent
+        assert "en" in sent
+
+
+class TestChannelWorkerTranscriptions:
+    """channel_worker_transcriptions's own commit cadence paces captions the
+    same way channel_worker's does -- tests pass a tiny commit_interval_sec
+    rather than waiting out a real one."""
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_relays_a_committed_chunk(self):
+        respx.post(TRANSCRIPTIONS_URL).mock(return_value=_sse_transcript_response("hi there"))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(LOUD_PCM)
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_transcriptions(
+                0, browser, queue, TRANSCRIPTIONS_URL, "some-model", None, None, 0.05, 5
+            )
+        )
+        try:
+            messages = [await browser.next() for _ in range(4)]
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        statuses = {m["state"] for m in messages if m["type"] == "status"}
+        captions = [m for m in messages if m["type"] == "caption"]
+        assert statuses == {"buffering", "calling", "idle"}
+        assert captions == [{"type": "caption", "channel": "room", "text": "hi there"}]
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_a_silent_chunk_is_dropped_without_a_call(self):
+        route = respx.post(TRANSCRIPTIONS_URL).mock(return_value=_sse_transcript_response("hi"))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+        await queue.put(SILENT_PCM)
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_transcriptions(
+                0, browser, queue, TRANSCRIPTIONS_URL, "some-model", None, None, 0.05, 5
+            )
+        )
+        try:
+            # Give periodic_call several ticks' worth of time to prove it
+            # stays quiet, not just that it hasn't fired *yet*.
+            await asyncio.sleep(0.2)
+            assert route.call_count == 0
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    @pytest.mark.asyncio
+    @respx.mock
+    async def test_a_channel_with_no_new_audio_never_calls(self):
+        route = respx.post(TRANSCRIPTIONS_URL).mock(return_value=_sse_transcript_response("hi"))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_transcriptions(
+                0, browser, queue, TRANSCRIPTIONS_URL, "some-model", None, None, 0.05, 5
+            )
+        )
+        try:
+            await asyncio.sleep(0.2)
+            assert route.call_count == 0
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+class TestLiveCaptionWsTranscriptionsRelay:
+    """A full round trip through the real websocket endpoint with
+    live_caption_backend="transcriptions", given a respx-faked
+    /v1/audio/transcriptions."""
+
+    @respx.mock
+    def test_relays_captions_from_both_channels(self, admin_client, conn):
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_enabled', 'true', 'bool', 0, ?)",
+            (utcnow(),),
+        )
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_backend', 'transcriptions', 'str', 0, ?)",
+            (utcnow(),),
+        )
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_commit_interval_sec', '0.05', 'float', 0, ?)",
+            (utcnow(),),
+        )
+        # Set explicitly rather than relying on diarization_url's class
+        # default: a real deployment's .env overrides that default to a
+        # live service address, which would make this test a real network
+        # call instead of an offline respx-mocked one (see test_diarize.py
+        # for the same convention).
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('diarization_url', 'http://diarizer.test/v1/audio/diarization', 'str', 0, ?)",
+            (utcnow(),),
+        )
+        conn.commit()
+
+        # Derived from diarization_url above via transcriptions_url -- see
+        # services/diarize.transcriptions_url.
+        url = "http://diarizer.test/v1/audio/transcriptions"
+        respx.post(url).mock(return_value=_sse_transcript_response("hi there"))
+
+        with admin_client.websocket_connect("/api/live-caption/ws") as ws:
+            info = ws.receive_json()
+            assert info["type"] == "info"
+            assert info["backend"] == "transcriptions"
+
+            ws.send_bytes(b"\x00" + LOUD_PCM)  # channel 0 ("room")
+            ws.send_bytes(b"\x01" + LOUD_PCM)  # channel 1 ("me")
+
+            captions: dict[str, str] = {}
+            # 4 messages per channel (buffering, calling, idle, caption).
+            for _ in range(8):
+                msg = ws.receive_json()
+                if msg["type"] == "caption":
+                    captions[msg["channel"]] = msg["text"]
+
+        assert captions == {"room": "hi there", "me": "hi there"}
 
 

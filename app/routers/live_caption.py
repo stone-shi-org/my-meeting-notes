@@ -32,7 +32,7 @@ the other. With VAD off, a periodic commit measured ~50-150ms turnaround
 per commit even under continuous speech with zero pauses, which is what
 actually fixed the reported latency.
 
-This replaces an earlier design that periodically POSTed short windows of
+This replaced an earlier design that periodically POSTed short windows of
 audio to the stateless /v1/audio/transcriptions route. That design could
 never benefit from a model's own cache-aware streaming architecture no
 matter how it tuned the window/chunk size: every POST was a fresh,
@@ -40,11 +40,20 @@ disconnected call with no session id or persistent connection tying one call
 to the next, so a model's internal cache was reset on every single call
 regardless of chunk size. A persistent /v1/realtime session is the only way
 this backend actually exposes cross-chunk continuity, so that is what this
-now speaks (each commit still shares the one open connection/session per
-channel, unlike the old per-chunk design's fresh connection every time), and
-there is no more cache-aware-vs-not special case: it never delivered a real
-benefit once the old calls were confirmed stateless, so it has been removed
-rather than kept around as a second, effectively-dead code path.
+speaks by default (each commit still shares the one open connection/session
+per channel, unlike the old per-chunk design's fresh connection every time).
+
+That old per-chunk design is back, though, as a third, explicitly opted-into
+backend -- channel_worker_transcriptions, dispatched when
+live_caption_backend="transcriptions" -- for a deployment with no realtime
+pipeline model and no live-stt gRPC service to point at instead. It still
+has no cache-aware-vs-not special case (that conclusion above didn't change:
+every call is a fresh, disconnected POST no matter the chunk size, so a
+model's cache gets no benefit here regardless), and quality/latency are both
+worse than the other two backends -- but it needs nothing beyond the
+diarization service's own /v1/audio/transcriptions route (see
+services/diarize.transcriptions_url), so it is the one backend that asks
+nothing new of the operator.
 
 Confirmed against this deployment: only one model
 (live_caption_model's default, "lfm2.5-audio-1.5b-realtime") is registered
@@ -73,33 +82,50 @@ mid-commit (not observed against this deployment, but relayed if a future
 model/version produces them). Both are purely cosmetic/best-effort, same as
 before.
 
-No process-wide concurrency cap on open sessions (the old design's
-_ASR_CONCURRENCY is gone): that limit existed to serialize many short-lived
-*calls* against a backend observed to hang under concurrent load, which
-doesn't map cleanly onto a small number of long-lived *connections* held
-open for a whole recording. Concurrent /v1/realtime sessions haven't been
-load-tested on this deployment -- if that turns out to be a problem, a cap
-on total open sessions (not calls) would need to be reintroduced.
+No process-wide concurrency cap on open /v1/realtime sessions or live-stt
+gRPC streams (the old design's _ASR_CONCURRENCY, in that form, is gone):
+that limit existed to serialize many short-lived *calls* against a backend
+observed to hang under concurrent load, which doesn't map cleanly onto a
+small number of long-lived *connections* held open for a whole recording.
+Concurrent /v1/realtime sessions haven't been load-tested on this
+deployment -- if that turns out to be a problem, a cap on total open
+sessions (not calls) would need to be reintroduced.
+
+channel_worker_transcriptions is back to exactly the short-lived-calls shape
+that limit was built for, so it keeps its own process-wide
+_TRANSCRIPTIONS_CONCURRENCY guarding it -- unrelated to (and not shared
+with) the other two backends' connection counts.
 """
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
 import contextlib
+import io
 import json
+import wave
 from dataclasses import dataclass
 from urllib.parse import urlencode
 
+import httpx
 import websockets
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
+from httpx_sse import SSEError, aconnect_sse
 from websockets.exceptions import ConnectionClosed
 
 from app.config import effective, get_settings
 from app.db import get_conn
 from app.logging_config import get_logger
 from app.services import users as users_svc
-from app.services.diarize import is_live_stt_model, realtime_url
+from app.services.diarize import (
+    _headers,
+    is_live_stt_model,
+    realtime_url,
+    strip_language_tag,
+    transcriptions_url,
+)
 
 
 log = get_logger("live_caption")
@@ -107,6 +133,26 @@ log = get_logger("live_caption")
 router = APIRouter(prefix="/api/live-caption", tags=["live-caption"])
 
 CHANNEL_NAMES = {0: "room", 1: "me"}
+
+SAMPLE_RATE = 16000
+BYTES_PER_SAMPLE = 2  # int16 mono
+
+# Below this fraction of int16 full scale (32768), a chunk is treated as
+# silence and never sent to channel_worker_transcriptions's ASR call at all
+# -- same threshold and reasoning the old per-chunk route had: ~2% of full
+# scale is comfortably above a quiet mic's own noise floor and comfortably
+# below even a soft speaking voice's peak, so a channel nobody is talking on
+# doesn't pay for a round trip every commit_interval_sec for the whole
+# recording just to have the model report back "no speech."
+SILENCE_PEAK_THRESHOLD = 0.02
+
+# Process-wide, not per-connection: many short-lived
+# channel_worker_transcriptions calls hitting a backend that has been
+# observed to hang entirely (not just slow down) under concurrent load --
+# see this module's docstring. Doesn't apply to channel_worker/
+# channel_worker_livestt, which hold a small number of long-lived
+# connections open instead of making repeated short calls.
+_TRANSCRIPTIONS_CONCURRENCY = asyncio.Semaphore(1)
 
 
 class _RealtimeSessionError(Exception):
@@ -543,6 +589,165 @@ async def channel_worker_livestt(
         await _send_status(websocket, name, "idle")
 
 
+def _peak_amplitude(pcm: bytes) -> float:
+    """Peak absolute sample value over a chunk, 0..1 (int16 full scale is
+    32768). Peak, not RMS -- same choice as the recorder's own level meter
+    (see useRecorder.ts's nextLevel): RMS reads near-silent between
+    syllables at this granularity, peak does not.
+
+    Assumes little-endian samples, true for every real deployment target
+    (the browser's Int16Array and every platform this actually runs on) and
+    not worth defending against for a threshold heuristic, not a decode.
+    """
+    # A torn trailing byte (an odd-length buffer) is dropped rather than
+    # raising -- this is a cheap gate, not a decoder; one missing sample
+    # changes nothing.
+    usable = len(pcm) - (len(pcm) % 2)
+    if usable <= 0:
+        return 0.0
+    samples = array.array("h")
+    samples.frombytes(pcm[:usable])
+    return max(abs(min(samples)), abs(max(samples))) / 32768
+
+
+def _wav_bytes(pcm: bytes) -> bytes:
+    """Wrap raw PCM16 mono in a WAV container -- /v1/audio/transcriptions
+    takes a file upload, unlike /v1/realtime and live-stt's raw frames."""
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(BYTES_PER_SAMPLE)
+        wav_file.setframerate(SAMPLE_RATE)
+        wav_file.writeframes(pcm)
+    return buf.getvalue()
+
+
+async def _transcribe_window(
+    client: httpx.AsyncClient,
+    url: str,
+    model: str,
+    api_key: str | None,
+    pcm: bytes,
+    language: str | None,
+) -> str:
+    """One channel_worker_transcriptions call. Returns the committed text,
+    or '' on any failure -- a dropped caption is invisible to the user;
+    raising would kill the whole channel over one bad chunk.
+
+    Same SSE wire shape the old per-chunk route used: ``stream=true`` and a
+    ``transcript.text.done`` event carrying the final text, terminated by a
+    literal ``"[DONE]"`` data line.
+    """
+    files = {"file": ("chunk.wav", _wav_bytes(pcm), "audio/wav")}
+    data = {"model": model, "stream": "true"}
+    if language:
+        data["language"] = language
+    try:
+        async with aconnect_sse(
+            client, "POST", url, data=data, files=files, headers=_headers(api_key)
+        ) as event_source:
+            if event_source.response.status_code >= 400:
+                log.warning(
+                    "live caption transcriptions chunk rejected: %s",
+                    event_source.response.status_code,
+                )
+                return ""
+            text = ""
+            async for sse in event_source.aiter_sse():
+                if sse.data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(sse.data)
+                except ValueError:
+                    continue
+                if chunk.get("type") == "transcript.text.done":
+                    text = chunk.get("text") or ""
+            return strip_language_tag(text)
+    except (httpx.HTTPError, SSEError) as exc:
+        log.warning(
+            "live caption transcriptions call failed: %s: %s", type(exc).__name__, exc
+        )
+        return ""
+
+
+async def channel_worker_transcriptions(
+    channel: int,
+    websocket: WebSocket,
+    queue: asyncio.Queue,
+    url: str,
+    model: str,
+    api_key: str | None,
+    language: str | None,
+    commit_interval_sec: float,
+    timeout_sec: float,
+) -> None:
+    """One channel's periodic /v1/audio/transcriptions relay -- the
+    stateless rolling-window design this app used before /v1/realtime (see
+    this module's docstring for why that switch happened, and why this is
+    now a third, explicitly opted-into backend rather than the default).
+
+    Unlike the old per-chunk route (a shared _ChannelBuffer the websocket
+    receive loop wrote into directly, under a lock), audio here arrives off
+    this channel's own ``queue`` -- nothing else reads it, so a plain
+    ``bytearray`` does the same job as the old lock without needing one,
+    the same reasoning channel_worker's own ``pending_audio`` flag relies
+    on above.
+
+    One chunking rule for every model, no cache-aware-vs-not special case
+    (see this module's docstring for why): accumulate whatever arrives for
+    commit_interval_sec, POST it as one call, then start the next chunk
+    empty -- non-overlapping, so nothing is ever transcribed twice. A chunk
+    under SILENCE_PEAK_THRESHOLD is dropped without a call at all.
+    """
+    name = CHANNEL_NAMES[channel]
+    buf = bytearray()
+    pending_audio = False
+
+    async def accumulate() -> None:
+        nonlocal pending_audio
+        while True:
+            chunk = await queue.get()
+            buf.extend(chunk)
+            if not pending_audio:
+                pending_audio = True
+                await _send_status(websocket, name, "buffering")
+
+    async def periodic_call(client: httpx.AsyncClient) -> None:
+        nonlocal pending_audio
+        while True:
+            await asyncio.sleep(commit_interval_sec)
+            if not buf:
+                continue
+            pcm = bytes(buf)
+            buf.clear()
+            pending_audio = False
+            if _peak_amplitude(pcm) < SILENCE_PEAK_THRESHOLD:
+                await _send_status(websocket, name, "idle")
+                continue
+            await _send_status(websocket, name, "calling")
+            async with _TRANSCRIPTIONS_CONCURRENCY:
+                text = await _transcribe_window(client, url, model, api_key, pcm, language)
+            if text:
+                try:
+                    await websocket.send_json({"type": "caption", "channel": name, "text": text})
+                except Exception:
+                    return
+            await _send_status(websocket, name, "idle")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout_sec) as client:
+            await asyncio.gather(accumulate(), periodic_call(client))
+    except Exception as exc:
+        log.warning(
+            "live caption transcriptions session for %s failed: %s: %s",
+            name,
+            type(exc).__name__,
+            exc,
+        )
+    finally:
+        await _send_status(websocket, name, "idle")
+
+
 @router.websocket("/ws")
 async def live_caption_ws(websocket: WebSocket) -> None:
     user = await _authenticate(websocket)
@@ -575,12 +780,26 @@ async def live_caption_ws(websocket: WebSocket) -> None:
     raw_language = websocket.query_params.get("language")
     language = raw_language if raw_language is not None else default_language
 
+    # is_live_stt_model(model) always wins to the gRPC backend regardless of
+    # the live_caption_backend setting -- a safety net for a model that is
+    # obviously live-stt-shaped even if the setting says otherwise. Once that
+    # heuristic is out of the way, the setting picks between the other two:
+    # "transcriptions" for the reinstated stateless per-chunk POST backend
+    # (see channel_worker_transcriptions), everything else (the default,
+    # "realtime") for the persistent /v1/realtime session.
+    if backend == "live_stt" or is_live_stt_model(model):
+        resolved_backend = "live_stt"
+    elif backend == "transcriptions":
+        resolved_backend = "transcriptions"
+    else:
+        resolved_backend = "realtime"
+
     await websocket.accept()
-    await websocket.send_json({"type": "info", "model": model, "is_realtime": True})
+    await websocket.send_json({"type": "info", "model": model, "backend": resolved_backend})
 
     queues: dict[int, asyncio.Queue] = {0: asyncio.Queue(), 1: asyncio.Queue()}
 
-    if backend == "live_stt" or is_live_stt_model(model):
+    if resolved_backend == "live_stt":
         workers = [
             asyncio.create_task(
                 channel_worker_livestt(
@@ -591,6 +810,25 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     model,
                     language or None,
                     commit_interval_sec,
+                )
+            )
+            for ch in queues
+        ]
+
+    elif resolved_backend == "transcriptions":
+        url = transcriptions_url(diarization_url)
+        workers = [
+            asyncio.create_task(
+                channel_worker_transcriptions(
+                    ch,
+                    websocket,
+                    queues[ch],
+                    url,
+                    model,
+                    api_key or None,
+                    language or None,
+                    commit_interval_sec,
+                    open_timeout,
                 )
             )
             for ch in queues

@@ -1,5 +1,5 @@
 import { Zap } from 'lucide-react';
-import { useLiveCaption } from '@/hooks/useLiveCaption';
+import { LIVE_CAPTION_BACKEND_BADGE, useLiveCaption } from '@/hooks/useLiveCaption';
 import type { LiveStreams } from '@/hooks/useRecorder';
 import { cn } from '@/lib/cn';
 
@@ -24,7 +24,7 @@ export function LiveCaptionStrip({
   /** ISO-639-1 code, or '' for auto-detect -- see useLiveCaption. */
   language: string;
 }) {
-  const { captions, connected, isRealtime, partial } = useLiveCaption(streams, enabled, language);
+  const { captions, connected, backend, partial } = useLiveCaption(streams, enabled, language);
   // Channels with an in-progress preview worth a row of their own -- order
   // doesn't matter here (there are at most two), unlike the committed list
   // below which is append-only and already in arrival order.
@@ -35,13 +35,13 @@ export function LiveCaptionStrip({
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <p className="text-xs font-medium text-fg-subtle">Live captions</p>
-          {isRealtime && (
+          {backend && (
             <span
               className="inline-flex items-center gap-1 rounded bg-indigo-500/10 px-1.5 py-0.5 text-[10px] font-medium text-indigo-400 border border-indigo-500/20"
-              title="Streaming via a persistent /v1/realtime session"
+              title={LIVE_CAPTION_BACKEND_BADGE[backend].title}
             >
               <Zap className="size-2.5" />
-              Realtime
+              {LIVE_CAPTION_BACKEND_BADGE[backend].label}
             </span>
           )}
         </div>

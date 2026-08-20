@@ -95,6 +95,9 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # this is what actually bounds "how long until words show up" now.
     # Tuned low: a manual commit measured ~50-150ms turnaround against this
     # deployment, cheap enough that a snappier cadence costs little.
+    # channel_worker_transcriptions (live_caption_backend="transcriptions")
+    # reuses the same setting as its chunk length -- there is no separate
+    # window/chunk setting any more, see that function's docstring.
     "live_caption_commit_interval_sec": ("float", False),
     # How long one channel's /v1/realtime connection is allowed to take to
     # open and complete its session.update handshake before that channel
@@ -127,7 +130,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # Host:port for the standalone live-stt gRPC service (e.g. "localhost:4030").
     # Used when live_caption_model is set to a live-stt model (e.g. "realtime_eou_120m-v1").
     "live_stt_url": ("str", False),
-    # Backend type for live captions: "live_stt" (gRPC) or "realtime" (WebSocket).
+    # Backend type for live captions: "live_stt" (gRPC), "realtime"
+    # (persistent /v1/realtime WebSocket session, the default), or
+    # "transcriptions" (periodic POST to the stateless /v1/audio/transcriptions
+    # route -- see live_caption.py's module docstring for why this is the
+    # last resort of the three, not the default).
     "live_caption_backend": ("str", False),
 
 
