@@ -66,16 +66,21 @@ function nextLevel(node: AnalyserNode, previous: number): number {
  * AudioContext renders against the audio hardware's clock, and on a machine
  * with no usable output device that clock runs *behind* wall clock -- measured
  * at 2.5s per 3s on a box with no sound card. Anything recorded through the
- * graph is silently time-compressed by the same factor. So the analyser hangs
- * off every source as a tap, and the recorder is handed the raw track unless
- * the user asked to mix their microphone into a tab/system capture, which
- * genuinely needs a mixer -- in which case both sources are summed into one
- * track, same as any other recording; there is no separate "room" vs. "me"
- * channel to keep apart any more.
+ * graph is silently time-compressed by the same factor. So an analyser hangs
+ * off each source as a tap -- one per channel when mixing, so the mic and the
+ * room each get their own meter instead of one bar reporting whichever is
+ * louder -- and the recorder is handed the raw track unless the user asked to
+ * mix their microphone into a capture, which genuinely needs a mixer. Mixing
+ * keeps mic and room on separate stereo channels purely for capture/playback
+ * quality; the diarizer never sees that distinction; it downmixes to plain
+ * mono like any other recording and always runs the same full model
+ * diarization, never a channel-identity shortcut.
  *
  * **The level meter is not decoration.** The commonest failure here is a
  * capture that is silent because the user missed Chrome's "share tab audio"
- * checkbox, and without a meter they find that out after the meeting.
+ * checkbox, and without a meter they find that out after the meeting. With
+ * two channels on separate meters, "the room is silent but I'm not" is
+ * visible mid-recording instead of looking like one merely quiet capture.
  *
  * **A display capture keeps its video track alive.** We record only the audio,
  * but stopping the video track ends the share, and Chrome then ends the audio
@@ -111,6 +116,15 @@ export function useRecorder() {
   const [error, setError] = useState<string | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [level, setLevel] = useState(0);
+  // Only meaningful while `mixing` is true: the tab/system ("room") side of a
+  // channel-separated recording. `level` above doubles as the mic/"me" level
+  // in that case, and as the single combined level otherwise.
+  const [levelRoom, setLevelRoom] = useState(0);
+  // Whether the in-progress recording has mic and room on separate stereo
+  // channels. Tracked as state (not just read off the ref) because the
+  // panel needs it live, to decide between one meter and two while still
+  // recording.
+  const [mixing, setMixing] = useState(false);
   const [clip, setClip] = useState<Clip | null>(null);
   const [liveStreams, setLiveStreams] = useState<LiveStreams>({ room: null, me: null });
 
@@ -120,7 +134,12 @@ export function useRecorder() {
   const chunks = useRef<BlobPart[]>([]);
   const streams = useRef<MediaStream[]>([]);
   const audioCtx = useRef<AudioContext | null>(null);
+  // The mic/"me" analyser when mixing, or the sole analyser otherwise.
   const analyser = useRef<AnalyserNode | null>(null);
+  // Only set while mixing: the tab/system ("room") analyser, kept separate
+  // from `analyser` above so the two channels report independent levels
+  // instead of one meter for whichever is louder at that instant.
+  const analyserRoom = useRef<AnalyserNode | null>(null);
   const raf = useRef<number | null>(null);
   const ticker = useRef<ReturnType<typeof setInterval> | null>(null);
   // Elapsed is derived from timestamps rather than counted, so a throttled
@@ -191,10 +210,14 @@ export function useRecorder() {
 
     analyser.current?.disconnect();
     analyser.current = null;
+    analyserRoom.current?.disconnect();
+    analyserRoom.current = null;
     void audioCtx.current?.close().catch(() => {});
     audioCtx.current = null;
     recorder.current = null;
     setLevel(0);
+    setLevelRoom(0);
+    setMixing(false);
     // The tracks just stopped above are the same streams useLiveCaption taps;
     // clearing this is what tells it to close its socket and tear down its
     // own AudioContexts rather than tapping dead tracks.
@@ -217,6 +240,12 @@ export function useRecorder() {
     const node = analyser.current;
     if (!node) return;
     setLevel((previous) => nextLevel(node, previous));
+
+    // Only present while mixing -- see analyserRoom's doc comment. Read
+    // fresh every frame rather than captured once, since it can go from
+    // null to set (and back) mid-recording as mixing starts/ends.
+    const roomNode = analyserRoom.current;
+    if (roomNode) setLevelRoom((previous) => nextLevel(roomNode, previous));
 
     raf.current = requestAnimationFrame(meter);
   }, []);
@@ -282,6 +311,11 @@ export function useRecorder() {
       streams.current = [stream];
       audioCtx.current = ctx;
       analyser.current = node;
+      // A plain mic recording never mixes, so there is never a room channel
+      // here, but say so explicitly rather than relying on it already being
+      // false from the last teardown().
+      analyserRoom.current = null;
+      setMixing(false);
       recorder.current = media;
       setLiveStreams({ room: null, me: stream });
       media.start(TIMESLICE_MS);
@@ -379,28 +413,59 @@ export function useRecorder() {
 
         const ctx = new AudioContext();
         await ctx.resume();
-        // One combined meter, and -- only when there is a mic to blend in --
-        // one destination both sources are summed into. This is the plain
-        // mix every other source uses; there is no separate channel for "the
-        // room" vs. "me" any more, so the diarizer sorts voices out of the
-        // single resulting track the same way it does for any other upload.
-        const node = ctx.createAnalyser();
-        node.fftSize = 1024;
-        const destination = mixing ? ctx.createMediaStreamDestination() : null;
-        for (const stream of captured) {
-          if (stream.getAudioTracks().length === 0) continue;
-          const input = ctx.createMediaStreamSource(stream);
-          input.connect(node);
-          if (destination) input.connect(destination);
+        const destination = ctx.createMediaStreamDestination();
+
+        if (mixing) {
+          // Two speakers, kept apart: channel 0 is whatever this capture
+          // picks up ("the room"), channel 1 is the local mic. A merger
+          // instead of connecting both straight to `destination` -- which
+          // would sum them into one signal on every channel -- keeps the
+          // two sources spatially separate for review/playback. This is
+          // purely a capture-quality decision now, independent of
+          // diarization: whatever comes out of this graph gets downmixed to
+          // plain mono like any other recording before it ever reaches the
+          // diarizer (see convert_to_wav16k_mono), which always runs the
+          // full model diarization, never a channel-identity shortcut.
+          // Two analysers, one per source, for the same separation reason:
+          // a merged meter would report whichever side is louder at that
+          // instant and hide a genuinely silent one behind a genuinely loud
+          // one.
+          const merger = ctx.createChannelMerger(2);
+          const [display, mic] = captured;
+          const nodeRoom = ctx.createAnalyser();
+          nodeRoom.fftSize = 1024;
+          const roomInput = ctx.createMediaStreamSource(display);
+          roomInput.connect(nodeRoom);
+          roomInput.connect(merger, 0, 0);
+          const nodeMe = ctx.createAnalyser();
+          nodeMe.fftSize = 1024;
+          const meInput = ctx.createMediaStreamSource(mic);
+          meInput.connect(nodeMe);
+          meInput.connect(merger, 0, 1);
+          merger.connect(destination);
+          analyser.current = nodeMe;
+          analyserRoom.current = nodeRoom;
+          setLiveStreams({ room: display, me: mic });
+          setMixing(true);
+        } else {
+          const node = ctx.createAnalyser();
+          node.fftSize = 1024;
+          for (const stream of captured) {
+            if (stream.getAudioTracks().length === 0) continue;
+            const input = ctx.createMediaStreamSource(stream);
+            input.connect(node);
+          }
+          analyser.current = node;
+          analyserRoom.current = null;
+          setLiveStreams({ room: captured[0] ?? null, me: null });
+          setMixing(false);
         }
-        analyser.current = node;
-        setLiveStreams({ room: captured[0] ?? null, me: withMic ? (captured[1] ?? null) : null });
 
         // Audio-only, always: a display capture's stream carries the video
         // track too, and handing MediaRecorder a video track under an
         // audio/* mimeType is a NotSupportedError.
         const media = new MediaRecorder(
-          destination ? destination.stream : new MediaStream(tracks),
+          mixing ? destination.stream : new MediaStream(tracks),
           { mimeType },
         );
         chunks.current = [];
@@ -562,6 +627,8 @@ export function useRecorder() {
     elapsedMs,
     elapsed: fmtElapsedMs(elapsedMs),
     level,
+    levelRoom,
+    mixing,
     clip,
     liveStreams,
     start,
