@@ -599,7 +599,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             secureWarningBox.style.display = 'block';
         }
 
-        // Dynamic Channels State
+        // Dynamic Channels State. `separateTab`/`loop` are bookkeeping for a
+        // channel whose actual <audio> element lives in another tab (see
+        // toggleSeparateTab) -- this page never touches that element
+        // directly, only relays commands to it over BroadcastChannel, so its
+        // current loop/device/track state has to be remembered here too in
+        // order to replay it at a freshly (re)opened tab.
         let channels = [
             {
                 id: 1,
@@ -607,7 +612,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tagClass: "channel-tag-1",
                 trackTitle: "No Audio Assigned",
                 trackPath: "Assign a room recording file below...",
-                deviceId: "default"
+                deviceId: "default",
+                separateTab: false,
+                loop: false
             },
             {
                 id: 2,
@@ -615,9 +622,24 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tagClass: "channel-tag-2",
                 trackTitle: "No Audio Assigned",
                 trackPath: "Assign your talk recording file below...",
-                deviceId: "default"
+                deviceId: "default",
+                separateTab: false,
+                loop: false
             }
         ];
+
+        // Cross-tab control: every channel-player tab (CHANNEL_HTML_TEMPLATE)
+        // and this master page share one BroadcastChannel. See that
+        // template's module-level doc comment in audio_server.py for why
+        // separate tabs exist at all -- this is just the plumbing that keeps
+        // "one master, N tabs" feeling like one page.
+        const simControl = new BroadcastChannel('meeting-sim-control');
+        // Tracks window handles opened via openChannelTab, purely so a
+        // repeat click can .focus() an already-open tab instead of asking
+        // the browser to spawn a duplicate -- window.open() with the same
+        // target name already does this on its own, but keeping the handle
+        // lets us skip even asking when we already have a live reference.
+        const channelWindows = {};
 
         const pathInput = document.getElementById('current-path-input');
         const btnGo = document.getElementById('btn-go');
@@ -687,6 +709,130 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 selectEl.value = currentVal;
             });
         }
+
+        // Builds the URL a separate-tab channel opens: the same index route
+        // this page is already on (so a reverse-proxy path prefix like
+        // /simulator/ carries through automatically), with ?channel=&name=
+        // for CHANNEL_HTML_TEMPLATE's script to read via URLSearchParams.
+        // Query params, not a distinct path -- there's nothing server-side
+        // that needs to know the channel id, only the client script.
+        function getChannelTabUrl(ch) {
+            let basePath = window.location.pathname;
+            if (!basePath.endsWith('/')) basePath += '/';
+            const url = new URL(basePath, window.location.origin);
+            url.searchParams.set('channel', ch.id);
+            url.searchParams.set('name', ch.name);
+            return url.toString();
+        }
+
+        function openChannelTab(ch) {
+            // A stable per-channel window name is what makes a second click
+            // focus the existing tab instead of opening a duplicate -- this
+            // is a browser-level guarantee (same name + still open = same
+            // browsing context), the channelWindows handle below is just an
+            // optimization on top of it.
+            const win = window.open(getChannelTabUrl(ch), `meeting-sim-channel-${ch.id}`);
+            if (win) {
+                channelWindows[ch.id] = win;
+                win.focus();
+            }
+            return win;
+        }
+
+        // Pushes this channel's full current state at whichever tab is
+        // listening. Called both when the master actively changes something
+        // (a new file assigned, the tab was just opened) and in response to
+        // that tab's own 'hello' handshake -- BroadcastChannel delivers to
+        // whoever happens to be subscribed *right now*, with no queue or
+        // replay, so a tab that opens (or reopens) after the fact needs
+        // this resent or it just sits there blank.
+        function sendLoad(ch) {
+            if (!ch.trackPath || !ch.trackPath.startsWith('/')) return; // still the placeholder text
+            simControl.postMessage({
+                kind: 'load', channelId: ch.id, path: ch.trackPath, name: ch.trackTitle,
+                deviceId: ch.deviceId, loop: !!ch.loop,
+            });
+        }
+
+        function sendPlay(chId) { simControl.postMessage({ kind: 'play', channelId: chId }); }
+        function sendPause(chId) { simControl.postMessage({ kind: 'pause', channelId: chId }); }
+        function sendRestart(chId) { simControl.postMessage({ kind: 'restart', channelId: chId }); }
+
+        function toggleSeparateTab(chId, isChecked) {
+            const ch = channels.find(c => c.id === chId);
+            if (!ch) return;
+            ch.separateTab = isChecked;
+            renderChannels();
+            if (isChecked) {
+                openChannelTab(ch);
+                // The freshly opened tab's own 'hello' handshake covers the
+                // steady-state case, but the very first open can race its
+                // BroadcastChannel subscription being ready -- this is a
+                // belt-and-braces resend, not the only path that fires.
+                setTimeout(() => sendLoad(ch), 300);
+            } else if (ch.trackPath && ch.trackPath.startsWith('/')) {
+                // renderChannels() just built a brand new, src-less <audio>
+                // for the local-player card it switched back to -- without
+                // this, the title/path still show the previously-assigned
+                // track (ch.trackTitle/trackPath never changed) but it
+                // silently won't play until re-picked from the file table.
+                const audioEl = document.getElementById(`ch-audio-${chId}`);
+                if (audioEl) {
+                    audioEl.src = getApiUrl('api/stream', { path: ch.trackPath });
+                    audioEl.loop = !!ch.loop;
+                    if (ch.deviceId && typeof audioEl.setSinkId === 'function') {
+                        audioEl.setSinkId(ch.deviceId).catch(console.error);
+                    }
+                }
+            }
+            // Deliberately does not close the tab on uncheck -- the user may
+            // still want it (e.g. to compare against the merged-back local
+            // playback), and closing a tab out from under someone without
+            // asking is its own kind of surprising data loss.
+        }
+
+        // Relays from a channel-player tab: it owns no DOM of its own here,
+        // so its status line, level meter and remembered device selection
+        // all arrive as messages rather than being read off a local <audio>
+        // element the way a non-separate channel's do.
+        simControl.onmessage = (ev) => {
+            const msg = ev.data;
+            if (!msg || typeof msg.channelId !== 'number') return;
+            const ch = channels.find(c => c.id === msg.channelId);
+            if (!ch) return;
+
+            switch (msg.kind) {
+                case 'hello':
+                    if (ch.trackPath) sendLoad(ch);
+                    break;
+                case 'status': {
+                    const statusEl = document.getElementById(`ch-status-${ch.id}`);
+                    if (statusEl) {
+                        statusEl.textContent = msg.text || '';
+                        statusEl.style.color = msg.color || '';
+                    }
+                    break;
+                }
+                case 'level': {
+                    const fillEl = document.getElementById(`ch-level-fill-${ch.id}`);
+                    const trackEl = document.getElementById(`ch-level-track-${ch.id}`);
+                    if (fillEl) {
+                        fillEl.style.width = `${msg.pct}%`;
+                        fillEl.style.backgroundColor =
+                            msg.pct > 85 ? '#ef4444' : msg.pct > 60 ? '#f59e0b' : 'var(--accent-green)';
+                    }
+                    if (trackEl) trackEl.setAttribute('aria-valuenow', String(msg.pct));
+                    break;
+                }
+                case 'deviceChanged':
+                    // Bookkeeping only, so a later sendLoad (reopen, hello
+                    // resend) tells the tab to reselect whatever it was last
+                    // set to -- the master itself never calls setSinkId for
+                    // a separate-tab channel.
+                    ch.deviceId = msg.deviceId;
+                    break;
+            }
+        };
 
         // Per-channel level meters: a silent WebAudio tap on a *copy* of
         // each <audio> element's decoded output (captureStream()), never
@@ -794,11 +940,74 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 card.className = "channel-card active-channel";
                 card.id = `channel-card-${ch.id}`;
 
+                // Shared by both card shapes below: this is what actually
+                // fixes the tab-capture-mixes-everything bug (see
+                // CHANNEL_HTML_TEMPLATE's doc comment) -- moving a channel's
+                // real <audio> element out of this page and into its own tab.
+                const separateTabToggle = `
+                    <label class="checkbox-label" style="margin-bottom: 0.25rem;">
+                        <input type="checkbox" id="ch-septab-${ch.id}" ${ch.separateTab ? 'checked' : ''}
+                               onchange="toggleSeparateTab(${ch.id}, this.checked)">
+                        <span>Open in a separate tab (share only that tab to keep channels apart)</span>
+                    </label>
+                `;
+
+                if (ch.separateTab) {
+                    // No local <audio>/device-select here on purpose -- both
+                    // live in the other tab now (see openChannelTab). This
+                    // card is a remote control + readout, driven entirely by
+                    // simControl.onmessage's 'status'/'level' relays.
+                    card.innerHTML = `
+                        <div class="channel-header">
+                            <div class="channel-tag ${ch.tagClass}">${ch.name}</div>
+                            ${channels.length > 1 ? `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem; font-size:0.75rem;" onclick="removeChannel(${ch.id})">✖ Remove</button>` : ''}
+                        </div>
+
+                        ${separateTabToggle}
+
+                        <div class="track-info-box">
+                            <div class="track-name" id="ch-title-${ch.id}">${ch.trackTitle}</div>
+                            <div class="track-path-sub" id="ch-path-${ch.id}">${ch.trackPath}</div>
+                        </div>
+
+                        <div class="audio-wrapper">
+                            <div class="channel-controls-row" style="justify-content: flex-start; gap: 0.5rem;">
+                                <button class="btn btn-secondary" onclick="openChannelTab(channels.find(c => c.id === ${ch.id}))">🗔 Open/Focus Tab</button>
+                                <button class="btn btn-secondary" onclick="sendPlay(${ch.id})">▶</button>
+                                <button class="btn btn-secondary" onclick="sendPause(${ch.id})">⏸</button>
+                                <button class="btn btn-secondary" onclick="sendRestart(${ch.id})">⏮</button>
+                            </div>
+                            <div class="level-meter-row">
+                                <span>🔈 Level</span>
+                                <div class="level-meter-track" id="ch-level-track-${ch.id}" role="meter"
+                                     aria-label="${ch.name} output level" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                                    <div class="level-meter-fill" id="ch-level-fill-${ch.id}"></div>
+                                </div>
+                            </div>
+                            <div class="channel-controls-row">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" id="ch-loop-${ch.id}" ${ch.loop ? 'checked' : ''}
+                                           onchange="toggleChannelLoop(${ch.id}, this.checked)">
+                                    <span>Loop Track</span>
+                                </label>
+                                <span id="ch-status-${ch.id}">Not opened yet</span>
+                            </div>
+                            <p style="font-size: 0.75rem; color: var(--text-muted);">
+                                Output device is picked from inside that tab, not here.
+                            </p>
+                        </div>
+                    `;
+                    channelsContainer.appendChild(card);
+                    return;
+                }
+
                 card.innerHTML = `
                     <div class="channel-header">
                         <div class="channel-tag ${ch.tagClass}">${ch.name}</div>
                         ${channels.length > 1 ? `<button class="btn btn-secondary" style="padding:0.2rem 0.5rem; font-size:0.75rem;" onclick="removeChannel(${ch.id})">✖ Remove</button>` : ''}
                     </div>
+
+                    ${separateTabToggle}
 
                     <div class="device-selector-group">
                         <label for="ch-device-select-${ch.id}">🔊 macOS Output Sound Device:</label>
@@ -823,7 +1032,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                         </div>
                         <div class="channel-controls-row">
                             <label class="checkbox-label">
-                                <input type="checkbox" id="ch-loop-${ch.id}" onchange="toggleChannelLoop(${ch.id}, this.checked)">
+                                <input type="checkbox" id="ch-loop-${ch.id}" ${ch.loop ? 'checked' : ''} onchange="toggleChannelLoop(${ch.id}, this.checked)">
                                 <span>Loop Track</span>
                             </label>
                             <span id="ch-status-${ch.id}">Ready</span>
@@ -870,8 +1079,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         async function changeChannelDevice(chId, deviceId) {
+            // Not reachable for a separate-tab channel -- its card renders
+            // no device dropdown at all (see renderChannels), the tab
+            // itself owns that choice. Guarded anyway rather than assumed.
             const ch = channels.find(c => c.id === chId);
-            if (ch) ch.deviceId = deviceId;
+            if (!ch || ch.separateTab) return;
+            ch.deviceId = deviceId;
 
             const audioEl = document.getElementById(`ch-audio-${chId}`);
             if (audioEl && typeof audioEl.setSinkId === 'function') {
@@ -887,6 +1100,12 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         function toggleChannelLoop(chId, isChecked) {
+            const ch = channels.find(c => c.id === chId);
+            if (ch) ch.loop = isChecked; // remembered either way, for a separate tab's next sendLoad
+            if (ch && ch.separateTab) {
+                simControl.postMessage({ kind: 'setLoop', channelId: chId, loop: isChecked });
+                return;
+            }
             const audioEl = document.getElementById(`ch-audio-${chId}`);
             if (audioEl) audioEl.loop = isChecked;
         }
@@ -900,11 +1119,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
             const titleEl = document.getElementById(`ch-title-${chId}`);
             const pathEl = document.getElementById(`ch-path-${chId}`);
-            const audioEl = document.getElementById(`ch-audio-${chId}`);
 
             if (titleEl) titleEl.textContent = fileName;
             if (pathEl) pathEl.textContent = filePath;
 
+            if (ch.separateTab) {
+                sendLoad(ch);
+                return;
+            }
+
+            const audioEl = document.getElementById(`ch-audio-${chId}`);
             if (audioEl) {
                 const streamUrl = getApiUrl('api/stream', { path: filePath });
                 audioEl.src = streamUrl;
@@ -931,7 +1155,9 @@ HTML_TEMPLATE = """<!DOCTYPE html>
                 tagClass: tagClass,
                 trackTitle: "No Audio Assigned",
                 trackPath: "Select audio file from table...",
-                deviceId: "default"
+                deviceId: "default",
+                separateTab: false,
+                loop: false
             });
 
             renderChannels();
@@ -983,18 +1209,19 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         }
 
         btnMasterPlay.onclick = () => {
-            channels.forEach(ch => startChannelPlayback(ch));
+            channels.forEach(ch => ch.separateTab ? sendPlay(ch.id) : startChannelPlayback(ch));
         };
 
         btnMasterPause.onclick = () => {
             channels.forEach(ch => {
+                if (ch.separateTab) { sendPause(ch.id); return; }
                 const audioEl = document.getElementById(`ch-audio-${ch.id}`);
                 if (audioEl) audioEl.pause();
             });
         };
 
         btnMasterRestart.onclick = () => {
-            channels.forEach(ch => startChannelPlayback(ch, { restart: true }));
+            channels.forEach(ch => ch.separateTab ? sendRestart(ch.id) : startChannelPlayback(ch, { restart: true }));
         };
 
         // Directory Navigation
@@ -1155,6 +1382,322 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
+# Single-channel player, opened in its own real browser tab by the master
+# page's "Open in a separate tab" checkbox (see toggleSeparateTab in
+# HTML_TEMPLATE).
+#
+# Why this exists: getDisplayMedia's tab-audio capture taps a tab's *whole*
+# combined render output as one signal -- confirmed against the Screen
+# Capture spec's suppressLocalAudioPlayback text ("that audio MUST still be
+# captured by any ongoing audio-capturing capture-sessions"), which only
+# makes sense if capture happens upstream of/parallel to setSinkId's
+# per-element output routing. There is no per-sink scoping anywhere in the
+# capture pipeline. So two <audio> elements in the same tab routed to two
+# different macOS devices -- exactly what the master page's per-channel
+# device dropdown does -- still both land in a single tab-share capture,
+# defeating the entire point of the simulator: sharing "Channel 1's tab"
+# for the my-meeting-notes app's browser-tab source would still pick up
+# whatever Channel 2 is playing in that same tab, regardless of which
+# physical device Channel 2 was routed to. Giving each channel its own tab
+# fixes this the only way the browser actually allows: there is nothing
+# else in that tab to bleed in.
+#
+# No server-side templating here (contrast with HTML_TEMPLATE's
+# __INITIAL_PATH__ substitution): channel id/name come from this page's own
+# query string via URLSearchParams, read client-side, so this template is a
+# static string and there's no per-request string-formatting/escaping to
+# get wrong.
+CHANNEL_HTML_TEMPLATE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title id="page-title">🎙️ Meeting Sim Channel</title>
+    <style>
+        :root {
+            --bg-dark: #0f172a;
+            --panel-bg: #1e293b;
+            --panel-border: #334155;
+            --accent-blue: #38bdf8;
+            --accent-indigo: #6366f1;
+            --accent-green: #10b981;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background-color: var(--bg-dark);
+            color: var(--text-main);
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 2rem 1rem;
+        }
+        .card {
+            background: linear-gradient(145deg, #1e293b 0%, #0f172a 100%);
+            border: 1px solid var(--panel-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            width: 100%;
+            max-width: 480px;
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+        }
+        h1 { font-size: 1.1rem; color: var(--accent-blue); word-break: break-word; }
+        .hint { font-size: 0.8rem; color: var(--text-muted); line-height: 1.5; }
+        select, audio { width: 100%; }
+        select {
+            background: #0f172a;
+            border: 1px solid var(--panel-border);
+            color: var(--text-main);
+            padding: 0.6rem 1rem;
+            border-radius: 8px;
+            font-size: 0.9rem;
+        }
+        label { font-size: 0.75rem; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+        .track-path { font-size: 0.75rem; color: var(--text-muted); word-break: break-all; }
+        .level-meter-row { display: flex; align-items: center; gap: 0.5rem; font-size: 0.75rem; color: var(--text-muted); }
+        .level-meter-track { flex: 1; height: 10px; background: rgba(15, 23, 42, 0.7); border: 1px solid var(--panel-border); border-radius: 999px; overflow: hidden; }
+        .level-meter-fill { height: 100%; width: 0%; background: var(--accent-green); border-radius: 999px; transition: width 80ms linear, background-color 80ms linear; }
+        #status { font-size: 0.85rem; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <div>
+            <h1 id="channel-title">Meeting Sim Channel</h1>
+            <div class="track-path" id="track-path">Waiting for the master tab to assign a track...</div>
+        </div>
+
+        <div>
+            <label for="device-select">🔊 macOS Output Sound Device (this tab only)</label>
+            <select id="device-select" style="margin-top: 0.4rem;">
+                <option value="default">Default macOS Output</option>
+            </select>
+        </div>
+
+        <audio id="audio" controls preload="auto"></audio>
+
+        <div class="level-meter-row">
+            <span>🔈 Level</span>
+            <div class="level-meter-track" id="level-track" role="meter" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+                <div class="level-meter-fill" id="level-fill"></div>
+            </div>
+        </div>
+
+        <div id="status">Waiting for the master tab...</div>
+
+        <p class="hint">
+            This tab plays exactly one channel, on purpose: sharing <em>this</em> tab's audio in the
+            recording app captures only what's playing here, regardless of which output device is
+            selected above. It's driven from the master tab's channel card (play/pause/restart, which
+            file, loop) -- closing and reopening this tab via the master's "Open/Focus Tab" button
+            resyncs it automatically. The native controls below still work locally if you need them.
+        </p>
+    </div>
+
+    <script>
+        const params = new URLSearchParams(location.search);
+        const channelId = Number(params.get('channel'));
+        const channelName = params.get('name') || `Channel ${channelId}`;
+        document.title = `🎙️ ${channelName} — Meeting Sim`;
+        document.getElementById('page-title').textContent = channelName;
+        document.getElementById('channel-title').textContent = channelName;
+
+        const audioEl = document.getElementById('audio');
+        const statusEl = document.getElementById('status');
+        const trackPathEl = document.getElementById('track-path');
+        const deviceSelect = document.getElementById('device-select');
+
+        // Same relative-path logic as the master page's getApiUrl, so this
+        // still works behind a reverse proxy that mounts the whole app under
+        // a path prefix (e.g. /simulator/) -- this page's own pathname is
+        // that same prefix, since it's the master's index route with a
+        // ?channel= query string, not a distinct path.
+        function getApiUrl(endpoint, extraParams = {}) {
+            let basePath = window.location.pathname;
+            if (!basePath.endsWith('/')) basePath += '/';
+            const url = new URL(basePath + endpoint, window.location.origin);
+            Object.keys(extraParams).forEach((key) => url.searchParams.append(key, extraParams[key]));
+            return url.toString();
+        }
+
+        const bc = new BroadcastChannel('meeting-sim-control');
+
+        function setStatus(text, color) {
+            statusEl.textContent = text;
+            statusEl.style.color = color || '';
+            bc.postMessage({ kind: 'status', channelId, text, color: color || '' });
+        }
+
+        async function enumerateDevices() {
+            if (!navigator.mediaDevices || typeof navigator.mediaDevices.enumerateDevices !== 'function') return;
+            try {
+                const devices = await navigator.mediaDevices.enumerateDevices();
+                const outputs = devices.filter((d) => d.kind === 'audiooutput');
+                const currentVal = deviceSelect.value;
+                deviceSelect.innerHTML = '<option value="default">Default macOS Output</option>';
+                outputs.forEach((d) => {
+                    if (d.deviceId === 'default') return;
+                    const opt = document.createElement('option');
+                    opt.value = d.deviceId;
+                    opt.textContent = d.label || `Device (${d.deviceId.substring(0, 8)}...)`;
+                    deviceSelect.appendChild(opt);
+                });
+                deviceSelect.value = currentVal || 'default';
+            } catch (err) {
+                console.error('Failed to enumerate devices:', err);
+            }
+        }
+
+        deviceSelect.onchange = async () => {
+            if (typeof audioEl.setSinkId !== 'function') {
+                alert('setSinkId is not supported in this browser/context (needs HTTPS or localhost).');
+                return;
+            }
+            try {
+                await audioEl.setSinkId(deviceSelect.value);
+                // Bookkeeping only -- the master never calls setSinkId for a
+                // separate-tab channel itself, it just remembers this so a
+                // closed-and-reopened tab (or a fresh 'load' resend) can be
+                // told which device to reselect.
+                bc.postMessage({ kind: 'deviceChanged', channelId, deviceId: deviceSelect.value });
+            } catch (err) {
+                alert(`Failed to route audio to selected device: ${err.message}`);
+            }
+        };
+
+        function applyLoad(msg) {
+            const streamUrl = getApiUrl('api/stream', { path: msg.path });
+            // Comparing the full resolved URL, not msg.path, since that's
+            // what audioEl.src actually holds -- a same-path 'hello' resend
+            // would otherwise restart playback from a dead stop every time.
+            if (audioEl.src !== streamUrl) {
+                audioEl.src = streamUrl;
+            }
+            audioEl.loop = !!msg.loop;
+            trackPathEl.textContent = msg.name ? `${msg.name} — ${msg.path}` : msg.path;
+            if (msg.deviceId) {
+                deviceSelect.value = msg.deviceId;
+                if (typeof audioEl.setSinkId === 'function') {
+                    audioEl.setSinkId(msg.deviceId).catch((err) => console.error('setSinkId failed:', err));
+                }
+            }
+            setStatus('Loaded — ready');
+        }
+
+        async function startPlayback({ restart } = {}) {
+            if (!audioEl.src) { setStatus('No track assigned yet', '#ef4444'); return; }
+            try {
+                if (restart) audioEl.currentTime = 0;
+                await audioEl.play();
+                setStatus('▶ Playing');
+            } catch (err) {
+                setStatus(`⚠ Failed to start: ${err.message || err}`, '#ef4444');
+            }
+        }
+
+        bc.onmessage = (ev) => {
+            const msg = ev.data;
+            if (!msg || msg.channelId !== channelId) return;
+            switch (msg.kind) {
+                case 'load': applyLoad(msg); break;
+                case 'play': startPlayback(); break;
+                case 'pause': audioEl.pause(); break;
+                case 'restart': startPlayback({ restart: true }); break;
+                case 'setLoop': audioEl.loop = !!msg.loop; break;
+            }
+        };
+
+        audioEl.addEventListener('pause', () => setStatus('⏸ Paused'));
+        audioEl.addEventListener('error', () => {
+            const code = audioEl.error ? audioEl.error.code : 0;
+            const messages = {
+                1: 'Load aborted', 2: 'Network error', 3: 'Decode error (unsupported/corrupt audio)',
+                4: 'Format not supported by this browser',
+            };
+            setStatus(`⚠ ${messages[code] || 'Failed to load'}`, '#ef4444');
+        });
+
+        // Same tap-a-copy-not-the-real-signal-path level meter as the master
+        // page's startLevelMeter -- see that function's doc comment for why
+        // it's captureStream() into a disconnected AnalyserNode rather than
+        // a MediaElementAudioSourceNode straight off audioEl (which would
+        // hijack playback through this AudioContext's own destination
+        // device, undoing setSinkId).
+        let meter = null;
+        function startLevelMeter() {
+            if (audioEl.dataset.meterAttached === 'true') return;
+            if (typeof audioEl.captureStream !== 'function') return;
+            let stream;
+            try {
+                stream = audioEl.captureStream();
+            } catch (err) {
+                return;
+            }
+            if (stream.getAudioTracks().length === 0) return;
+
+            const ctx = new (window.AudioContext || window.webkitAudioContext)();
+            void ctx.resume();
+            const source = ctx.createMediaStreamSource(stream);
+            const analyser = ctx.createAnalyser();
+            analyser.fftSize = 1024;
+            source.connect(analyser);
+            audioEl.dataset.meterAttached = 'true';
+            meter = { ctx, source, analyser };
+
+            const fillEl = document.getElementById('level-fill');
+            const trackEl = document.getElementById('level-track');
+            const samples = new Uint8Array(analyser.fftSize);
+            let level = 0;
+            let lastPosted = -1;
+
+            function tick() {
+                if (!meter) return;
+                analyser.getByteTimeDomainData(samples);
+                let peak = 0;
+                for (let i = 0; i < samples.length; i++) {
+                    const dev = Math.abs(samples[i] - 128);
+                    if (dev > peak) peak = dev;
+                }
+                const now = Math.min(1, peak / 128);
+                level = now > level ? now : level * 0.85;
+                const pct = Math.round(level * 100);
+
+                fillEl.style.width = `${pct}%`;
+                fillEl.style.backgroundColor = pct > 85 ? '#ef4444' : pct > 60 ? '#f59e0b' : 'var(--accent-green)';
+                trackEl.setAttribute('aria-valuenow', String(pct));
+                // Only relay to the master when the rounded value actually
+                // moves -- during silence that's a few messages a second
+                // instead of 60, and BroadcastChannel has no coalescing of
+                // its own.
+                if (pct !== lastPosted) {
+                    lastPosted = pct;
+                    bc.postMessage({ kind: 'level', channelId, pct });
+                }
+                requestAnimationFrame(tick);
+            }
+            tick();
+
+            stream.getAudioTracks()[0].addEventListener('ended', () => { meter = null; });
+        }
+        audioEl.addEventListener('play', startLevelMeter);
+
+        // Announce we're alive so the master resends whatever this channel
+        // should be showing/playing -- BroadcastChannel has no "replay
+        // missed messages" concept, so a tab opened (or reopened) after the
+        // master already sent 'load'/'setLoop' would otherwise sit blank
+        // until the user re-picks a file from the master's file table.
+        bc.postMessage({ kind: 'hello', channelId });
+        enumerateDevices();
+    </script>
+</body>
+</html>
+"""
+
 class ThreadedAudioServer(socketserver.ThreadingMixIn, HTTPServer):
     """Handles each connection on its own thread.
 
@@ -1185,13 +1728,29 @@ class AudioServerHandler(BaseHTTPRequestHandler):
         query = urllib.parse.parse_qs(parsed.query)
 
         if path in ("", "/", "/index.html") or path.endswith("/"):
-            self.handle_index()
+            # A ?channel= query string on the same index route serves the
+            # single-channel player instead of the master page -- see
+            # CHANNEL_HTML_TEMPLATE's module-level doc comment for why this
+            # needs to be its own tab rather than another element on the
+            # master page.
+            if "channel" in query:
+                self.handle_channel_page()
+            else:
+                self.handle_index()
         elif path == "/api/list" or path.endswith("/api/list"):
             self.handle_api_list(query)
         elif path == "/api/stream" or path.endswith("/api/stream"):
             self.handle_api_stream(query)
         else:
             self.send_error(404, f"Endpoint not found: {path}")
+
+    def handle_channel_page(self):
+        self.send_response(200)
+        self.send_header('Content-Type', 'text/html; charset=utf-8')
+        encoded = CHANNEL_HTML_TEMPLATE.encode('utf-8')
+        self.send_header('Content-Length', str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
 
     def handle_index(self):
         self.send_response(200)
