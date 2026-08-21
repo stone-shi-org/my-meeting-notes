@@ -29,6 +29,15 @@ export function LiveCaptionStrip({
   // doesn't matter here (there are at most two), unlike the committed list
   // below which is append-only and already in arrival order.
   const partialChannels = (['me', 'room'] as const).filter((ch) => partial[ch]);
+  // Set when this capture only ever has one audio source (a plain mic, or a
+  // tab/system share with no mic mixed in) -- see useRecorder's
+  // liveStreams/mixing. A lone mic can just as easily be sitting on a table
+  // picking up a whole room, so `'me'` here drops the "You" label rather
+  // than claim an attribution the capture has no way to back up.
+  const soleChannel: 'me' | 'room' | null =
+    streams.me && !streams.room ? 'me' : streams.room && !streams.me ? 'room' : null;
+  const labelFor = (channel: 'me' | 'room') =>
+    soleChannel === 'me' && channel === 'me' ? 'Mic' : CHANNEL_LABEL[channel];
 
   return (
     <div className="space-y-2 rounded-lg border border-border bg-surface-2/50 p-3">
@@ -64,7 +73,7 @@ export function LiveCaptionStrip({
         <ul className="max-h-40 space-y-1 overflow-y-auto text-sm">
           {captions.map((c, i) => (
             <li key={`${c.at}-${c.channel}-${i}`} className="text-fg-muted">
-              <span className="font-medium text-fg">{CHANNEL_LABEL[c.channel]}:</span> {c.text}
+              <span className="font-medium text-fg">{labelFor(c.channel)}:</span> {c.text}
             </li>
           ))}
           {/* In-progress text for a call that hasn't committed yet -- see
@@ -74,7 +83,7 @@ export function LiveCaptionStrip({
               replaced in place as new deltas arrive, not appended. */}
           {partialChannels.map((ch) => (
             <li key={`partial-${ch}`} className="italic text-fg-faint">
-              <span className="font-medium">{CHANNEL_LABEL[ch]}:</span> {partial[ch]}…
+              <span className="font-medium">{labelFor(ch)}:</span> {partial[ch]}…
             </li>
           ))}
         </ul>

@@ -219,6 +219,20 @@ export function RecorderPanel({
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
 
+  // A plain mic recording, or a tab/system share with no mic mixed in, has
+  // exactly one audio source -- see useRecorder's liveStreams/mixing doc
+  // comments. null while genuinely mixing two apart (a real "you" vs "room"
+  // split), or before anything has started. Threaded into LiveTranscriptPanel
+  // so it can drop the "You" framing a lone mic (which may just be sitting on
+  // a table picking up a whole room) has no way to back up.
+  const soleChannel: 'me' | 'room' | null = recorder.mixing
+    ? null
+    : recorder.liveStreams.me
+      ? 'me'
+      : recorder.liveStreams.room
+        ? 'room'
+        : null;
+
   // Owned here rather than inside LiveTranscriptPanel/InsightsPanel so both
   // can read the same captions instead of each opening their own websocket
   // (and paying for the periodic real transcription call behind it) for
@@ -353,7 +367,9 @@ export function RecorderPanel({
       <p className="sr-only" role="status">
         {recorder.phase === 'recording' ? `Recording, ${recorder.elapsed}` : `Paused at ${recorder.elapsed}`}
         {captionsLive &&
-          ` — live transcript: ${ACTIVITY_LABEL[captionsActivity.me]} (you), ${ACTIVITY_LABEL[captionsActivity.room]} (room)`}
+          (soleChannel
+            ? ` — live transcript: ${ACTIVITY_LABEL[captionsActivity[soleChannel]]}`
+            : ` — live transcript: ${ACTIVITY_LABEL[captionsActivity.me]} (you), ${ACTIVITY_LABEL[captionsActivity.room]} (room)`)}
       </p>
 
       {recorder.error && (
@@ -672,6 +688,7 @@ export function RecorderPanel({
           enabled={captionsLive}
           backend={captionsBackend}
           partial={captionsPartial}
+          soleChannel={soleChannel}
         />
         {rightExtra}
       </div>

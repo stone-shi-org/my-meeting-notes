@@ -96,6 +96,7 @@ export function LiveTranscriptPanel({
   enabled,
   backend,
   partial,
+  soleChannel,
 }: {
   captions: Caption[];
   connected: boolean;
@@ -106,8 +107,20 @@ export function LiveTranscriptPanel({
    * through (none currently, but nothing here requires it) still compile;
    * an absent value just means no preview bubble is shown. */
   partial?: Record<'me' | 'room', string>;
+  /** Set when the capture only ever has one audio source -- a plain mic
+   * recording (`'me'`), or a tab/system share with no mic mixed in
+   * (`'room'`) -- see useRecorder's `liveStreams`/`mixing`. `null` while two
+   * sources are genuinely being kept apart (a real "you" vs "room" split) or
+   * before a recording has started. A lone phone mic sitting on a table can
+   * just as easily be picking up a whole room, so `'me'` here suppresses the
+   * "You" framing below rather than claim an attribution the capture has no
+   * way to back up. */
+  soleChannel?: 'me' | 'room' | null;
 }) {
   const [labels, setLabels] = useState<Record<'me' | 'room', string>>(DEFAULT_LABELS);
+  const soleMicOnly = soleChannel === 'me';
+  const defaultLabelFor = (channel: 'me' | 'room') =>
+    soleMicOnly && channel === 'me' ? 'Mic' : DEFAULT_LABELS[channel];
   const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
   const scrollRef = useRef<HTMLDivElement>(null);
   const contentRef = useRef<HTMLDivElement>(null);
@@ -140,7 +153,7 @@ export function LiveTranscriptPanel({
     return () => observer.disconnect();
   }, [autoScroll]);
 
-  const labelFor = (channel: 'me' | 'room') => labels[channel].trim() || DEFAULT_LABELS[channel];
+  const labelFor = (channel: 'me' | 'room') => labels[channel].trim() || defaultLabelFor(channel);
 
   const avatarFor = (channel: 'me' | 'room') => (
     <span
@@ -196,14 +209,16 @@ export function LiveTranscriptPanel({
       </div>
       <p className="mt-1 text-xs text-fg-subtle">
         A rough draft only — the real, speaker-labelled transcript is still built after you stop.
+        {soleChannel &&
+          ' One audio source right now, so this preview can’t split speakers apart either.'}
       </p>
 
       <div className="mt-4 rounded-lg border border-border bg-surface-2/50 p-3">
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
-          Speakers
+          {soleChannel ? 'Label' : 'Speakers'}
         </h3>
         <ul className="space-y-2">
-          {(['me', 'room'] as const).map((channel) => (
+          {(soleChannel ? [soleChannel] : (['me', 'room'] as const)).map((channel) => (
             <li
               key={channel}
               className="flex items-center gap-2"
@@ -222,13 +237,13 @@ export function LiveTranscriptPanel({
               <Input
                 className="h-8 flex-1 border-transparent bg-transparent px-2 hover:border-border-strong focus:border-border-strong"
                 value={labels[channel]}
-                placeholder={DEFAULT_LABELS[channel]}
-                aria-label={`Name for ${DEFAULT_LABELS[channel]}`}
+                placeholder={defaultLabelFor(channel)}
+                aria-label={`Name for ${defaultLabelFor(channel)}`}
                 onChange={(e) =>
                   setLabels((prev) => ({ ...prev, [channel]: e.target.value }))
                 }
               />
-              {channel === 'me' && (
+              {channel === 'me' && !soleMicOnly && (
                 <Badge variant="primary" size="sm">
                   You
                 </Badge>
@@ -237,8 +252,9 @@ export function LiveTranscriptPanel({
           ))}
         </ul>
         <p className="mt-2 text-xs text-fg-subtle">
-          Renaming only changes the labels above and in the transcript below — nothing is saved,
-          and it has no effect on the real transcript built after you stop.
+          Renaming only changes the label{soleChannel ? '' : 's'} above and in the transcript
+          below — nothing is saved, and it has no effect on the real transcript built after you
+          stop.
         </p>
       </div>
 
@@ -263,7 +279,7 @@ export function LiveTranscriptPanel({
           ) : (
             <ul className="space-y-3 text-sm">
               {groups.map((g, gi) => {
-                const isMe = g.channel === 'me';
+                const isMe = g.channel === 'me' && !soleMicOnly;
                 return (
                   <li
                     key={`${g.parts[0].at}-${g.channel}-${gi}`}
@@ -305,7 +321,7 @@ export function LiveTranscriptPanel({
                   before the server's own VAD decides the utterance is
                   over and a `caption` message commits. */}
               {partialChannels.map((ch) => {
-                const isMe = ch === 'me';
+                const isMe = ch === 'me' && !soleMicOnly;
                 return (
                   <li
                     key={`partial-${ch}`}
