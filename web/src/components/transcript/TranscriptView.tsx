@@ -1,5 +1,5 @@
 import { Link2, Pencil } from 'lucide-react';
-import { memo, useEffect, useRef, useState } from 'react';
+import { memo, useEffect, useMemo, useRef, useState } from 'react';
 import { Badge } from '@/components/ui/primitives';
 import { cn } from '@/lib/cn';
 import { initials, speakerVars } from '@/lib/speakerColors';
@@ -7,6 +7,56 @@ import { fmtClock } from '@/lib/time';
 import { usePlayer } from '@/player/PlayerProvider';
 import { useIsActive, usePlayerStore } from '@/player/playerStore';
 import type { Segment } from '@/types/api';
+
+interface ChunkDivider {
+  /** 1-based, for display -- the chunk index underneath is 0-based. */
+  part: number;
+  start: number;
+}
+
+/** Where to draw a "Part N starts here" divider among an (already
+ * time-ordered, possibly search-filtered) list of segments.
+ *
+ * Keyed by index into `segments` rather than by segment id: a divider marks
+ * a position in the rendered list, not a property of any one segment.
+ * `chunkBoundaries[0]` is always the recording's own start (0), which needs
+ * no divider -- only crossings *into* a later part do.
+ */
+export function computeChunkDividers(
+  segments: Segment[],
+  chunkBoundaries: number[],
+): Map<number, ChunkDivider> {
+  const dividers = new Map<number, ChunkDivider>();
+  if (chunkBoundaries.length < 2) return dividers;
+
+  let boundaryIdx = 1;
+  for (let i = 0; i < segments.length; i++) {
+    while (
+      boundaryIdx < chunkBoundaries.length &&
+      segments[i].start >= chunkBoundaries[boundaryIdx]
+    ) {
+      dividers.set(i, { part: boundaryIdx + 1, start: chunkBoundaries[boundaryIdx] });
+      boundaryIdx++;
+    }
+  }
+  return dividers;
+}
+
+function ChunkDividerRow({ divider, onSeek }: { divider: ChunkDivider; onSeek: (t: number) => void }) {
+  return (
+    <li className="flex items-center gap-2 bg-surface-2/60 px-4 py-1.5" aria-hidden={false}>
+      <span className="h-px flex-1 bg-border" aria-hidden />
+      <button
+        onClick={() => onSeek(divider.start)}
+        className="shrink-0 whitespace-nowrap text-xs font-medium text-fg-subtle hover:text-primary"
+        title="This recording was long enough to be diarized in pieces -- speakers may need renaming or merging again from here"
+      >
+        Part {divider.part} starts here · {fmtClock(divider.start)}
+      </button>
+      <span className="h-px flex-1 bg-border" aria-hidden />
+    </li>
+  );
+}
 
 export function SpeakerChip({
   speakerId,
@@ -153,16 +203,27 @@ export function TranscriptView({
   segments,
   meetingId,
   onRename,
+  chunkBoundaries = [],
 }: {
   segments: Segment[];
   meetingId: number;
   onRename: (speakerId: string) => void;
+  /** Start offsets of each piece, when this meeting was long enough to be
+   * diarized in chunks (see pipeline._diarize_in_chunks). Draws a "Part N
+   * starts here" divider at each crossing. */
+  chunkBoundaries?: number[];
 }) {
   const [query, setQuery] = useState('');
+  const { seek } = usePlayer();
 
   const filtered = query
     ? segments.filter((s) => s.text.toLowerCase().includes(query.toLowerCase()))
     : segments;
+
+  const dividers = useMemo(
+    () => computeChunkDividers(filtered, chunkBoundaries),
+    [filtered, chunkBoundaries],
+  );
 
   return (
     <div>
@@ -182,11 +243,12 @@ export function TranscriptView({
       </div>
 
       <ol role="list">
-        {filtered.map((segment) => {
+        {filtered.flatMap((segment, i) => {
           // Index into the *unfiltered* list: the player's active index refers
           // to real positions, not filtered ones.
           const realIndex = segments.indexOf(segment);
-          return (
+          const divider = dividers.get(i);
+          const row = (
             <SegmentRow
               key={`${segment.id}-${segment.start}`}
               segment={segment}
@@ -195,6 +257,9 @@ export function TranscriptView({
               onRename={onRename}
             />
           );
+          return divider
+            ? [<ChunkDividerRow key={`divider-${divider.part}`} divider={divider} onSeek={seek} />, row]
+            : [row];
         })}
       </ol>
     </div>

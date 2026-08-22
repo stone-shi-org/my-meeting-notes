@@ -27,6 +27,7 @@ import { AddRecordingCard } from '@/components/record/AddRecordingCard';
 import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
 import { usePlayerStore } from '@/player/playerStore';
 import { api } from '@/lib/api';
+import { parseChunkedId, partLabel } from '@/lib/chunkedSpeakers';
 import { cn } from '@/lib/cn';
 import { renderMarkdown } from '@/lib/markdown';
 import { initials, speakerVars } from '@/lib/speakerColors';
@@ -152,6 +153,14 @@ function SpeakerLegend({
 
   return (
     <div className="space-y-2">
+      {transcript.chunk_boundaries.length > 0 && (
+        <p className="rounded border border-border bg-surface-2 p-2 text-xs text-fg-muted">
+          This recording was long enough to be diarized in {transcript.chunk_boundaries.length}{' '}
+          parts — the same person can show up as a different speaker in each one ("Part 1", "Part
+          2", …, badged below). Compare voices or content and merge the ones that match.
+        </p>
+      )}
+
       {canonical.length > 0 && (
         <div className="flex items-center justify-end gap-1">
           <Button
@@ -213,6 +222,23 @@ function SpeakerLegend({
               {speaker.is_me && (
                 <Badge variant="primary" size="sm">
                   You
+                </Badge>
+              )}
+
+              {/* Survives renaming, unlike the placeholder above -- the id
+                  (and its "cN:" chunk prefix) never changes, only the name
+                  does. This speaker and one with the same Part number
+                  elsewhere are NOT implied to be related; this and a
+                  *different* Part number are the ones worth comparing, since
+                  each chunk got fresh speaker numbering with no memory of
+                  the one before it. */}
+              {partLabel(speaker.id) && (
+                <Badge
+                  variant="neutral"
+                  size="sm"
+                  title="This recording was diarized in pieces. The same person can appear under a different speaker in each part -- compare voices/content and merge if so."
+                >
+                  {partLabel(speaker.id)}
                 </Badge>
               )}
 
@@ -295,10 +321,16 @@ function SpeakerLegend({
           );
         })}
 
-        {mergedAway.map((speaker) => (
+        {mergedAway.map((speaker) => {
+          // "c1:SPEAKER_01" read naturally as "Part 2 · SPEAKER_01" -- the
+          // raw id is still what merge_into/unmerge act on, this is display
+          // only.
+          const chunked = parseChunkedId(speaker.id);
+          const shown = chunked ? `Part ${chunked.chunkIndex + 1} · ${chunked.rawId}` : speaker.id;
+          return (
           <li key={speaker.id} className="flex items-center gap-2 text-sm text-fg-subtle">
             <span className="min-w-0 flex-1 truncate">
-              {speaker.id} → merged into {nameForCanonical(speaker.merged_into!)}
+              {shown} → merged into {nameForCanonical(speaker.merged_into!)}
             </span>
             <Button
               size="xs"
@@ -308,7 +340,8 @@ function SpeakerLegend({
               Unmerge
             </Button>
           </li>
-        ))}
+          );
+        })}
 
         <li className="pt-1 text-xs text-fg-subtle">
           Renaming, hiding and merging only change how the transcript is displayed. The
@@ -870,6 +903,7 @@ export function TranscriptPage() {
                   <TranscriptView
                     segments={visibleSegments}
                     meetingId={m.id}
+                    chunkBoundaries={transcript.data.chunk_boundaries}
                     onRename={() =>
                       speakersRef.current?.scrollIntoView({
                         behavior: 'smooth',

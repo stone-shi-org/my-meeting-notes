@@ -407,6 +407,20 @@ diarization is genuinely lost (the service has no job handle) and does re-run; e
 Progress is polled via `GET /api/jobs/{id}/events?after_id=` — works through every proxy. SSE at
 `/stream` is an opt-in upgrade with automatic client-side fallback.
 
+**A recording past `diarize_chunk_threshold_sec` (50 min by default) is diarized in pieces, not one
+request.** vibevoice-cpp-asr has an output-token budget, not a duration one — confirmed on meeting 24,
+a real ~59 minute recording that came back as a single degenerate segment holding a truncated JSON
+dump of its own attempted transcript instead of real turns (`diarize.py`'s
+`looks_like_embedded_turns_dump` now catches that shape and fails the job loudly rather than silently
+storing it). `pipeline._diarize_in_chunks` splits the wav with `audio.split_into_chunks`, diarizes each
+piece, and `_stitch_chunk_payloads` merges the results into one payload shaped like a normal
+diarization response. Each chunk gets fresh `SPEAKER_nn` numbering from the model with no memory of the
+chunk before it, so segment/speaker ids are namespaced by chunk (`c1:SPEAKER_00`) rather than risking a
+silent merge of two different people — reconciling them afterward is the same "merge speakers" move
+already used for a same-chunk over-split. Fake mode (`MMN_DIARIZE_FAKE`) is checked before the duration
+threshold and never chunks: it replaces the whole request-to-a-model step, so there's no real budget to
+overrun, and every existing fake-diarization test keeps exercising the single-call path unchanged.
+
 ## Conventions
 
 - Timestamps: ISO-8601 UTC `TEXT` via `db.utcnow()`. Never `datetime.now()` bare.

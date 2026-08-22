@@ -243,6 +243,10 @@ export interface Transcript {
   num_speakers: number | null;
   speakers: Speaker[];
   segments: Segment[];
+  /** Each chunk's start offset (seconds) on the full recording, present only
+   * when this transcript came from a long recording diarized in pieces
+   * (see pipeline._diarize_in_chunks). Empty otherwise. */
+  chunk_boundaries: number[];
 }
 
 export interface ActionItem {

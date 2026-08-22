@@ -207,13 +207,25 @@ async def diarize_file(
     *,
     model: str,
     duration_sec: float | None = None,
+    progress_window: tuple[float, float] = (0.0, 1.0),
 ) -> tuple[dict, int]:
-    """Run diarization off the event loop while reporting synthetic progress."""
+    """Run diarization off the event loop while reporting synthetic progress.
+
+    ``progress_window`` lets a caller diarizing several chunks in sequence
+    (see pipeline._diarize_in_chunks) map this one call's own progress onto a
+    slice of the stage's overall progress -- e.g. (0.25, 0.5) for chunk 1 of
+    4 -- instead of every chunk restarting the bar from 0, which would go
+    backwards the moment chunk 2 starts (JobContext.stage_progress sets an
+    absolute value; nothing stops it from moving down as well as up, and
+    test_jobs.py's progress tests assert it never does).
+    """
     settings = get_settings()
     with get_conn(ctx.db_path) as conn:
         url = effective(conn, "diarization_url")
         api_key = effective(conn, "diarization_api_key")
         timeout = effective(conn, "diarization_timeout_sec")
+
+    window_start, window_span = progress_window[0], progress_window[1] - progress_window[0]
 
     expected = None
     if duration_sec:
@@ -238,7 +250,8 @@ async def diarize_file(
             elapsed = time.monotonic() - started
             ctx.heartbeat()
             if expected:
-                ctx.stage_progress(min(elapsed / expected, PROGRESS_CEILING))
+                frac = min(elapsed / expected, PROGRESS_CEILING)
+                ctx.stage_progress(window_start + frac * window_span)
 
     ticker = asyncio.create_task(heartbeat())
     try:

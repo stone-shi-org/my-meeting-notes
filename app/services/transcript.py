@@ -193,6 +193,13 @@ def build_transcript(
         "num_speakers": payload.get("num_speakers"),
         "speakers": speakers,
         "segments": segments,
+        # Present (and non-empty) only when pipeline._diarize_in_chunks split
+        # this recording before diarizing it -- each entry is one chunk's
+        # start offset on the full-recording clock, in order. The frontend
+        # uses it to draw a "Part 2 starts here" divider; nothing here
+        # resolves it against speaker_map, since a chunk boundary is a fact
+        # about the audio, not about who a speaker turned out to be.
+        "chunk_boundaries": payload.get("chunk_boundaries") or [],
     }
 
 

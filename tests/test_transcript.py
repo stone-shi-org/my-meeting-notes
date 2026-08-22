@@ -125,6 +125,15 @@ class TestBuildTranscript:
         assert out["segments"] == []
         assert out["speakers"] == []
 
+    def test_ordinary_payload_has_no_chunk_boundaries(self, sample_diarization):
+        out = ts.build_transcript(sample_diarization, {})
+        assert out["chunk_boundaries"] == []
+
+    def test_a_chunked_payload_passes_its_boundaries_through_verbatim(self, sample_diarization):
+        chunked = {**sample_diarization, "chunk_boundaries": [0.0, 1500.0, 3000.0]}
+        out = ts.build_transcript(chunked, {})
+        assert out["chunk_boundaries"] == [0.0, 1500.0, 3000.0]
+
 
 class TestRendering:
     @pytest.fixture

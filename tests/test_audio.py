@@ -209,3 +209,61 @@ class TestRealFfmpeg:
         # Truncation to ~single_duration is the regression this guards against.
         assert combined_duration > single_duration * 1.9
 
+
+# --------------------------------------------------------------------------- #
+# Splitting a long recording into diarizable pieces
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+class TestSplitIntoChunks:
+    @pytest.fixture
+    def five_second_wav(self, tmp_path) -> Path:
+        """Synthesized rather than checked in -- a silent, exactly-timed wav
+        is all `-f segment` needs to prove out, and generating it here means
+        the chunk size can be varied per test instead of being pinned to
+        whatever fixture happened to be lying around."""
+        path = tmp_path / "five_seconds.wav"
+        subprocess.run(
+            [
+                "ffmpeg", "-nostdin", "-y",
+                "-f", "lavfi", "-i", "anullsrc=r=16000:cl=mono",
+                "-t", "5", "-c:a", "pcm_s16le",
+                str(path),
+            ],
+            capture_output=True, check=True,
+        )
+        return path
+
+    def test_splits_into_the_expected_number_of_pieces(self, five_second_wav, tmp_path):
+        out_dir = tmp_path / "chunks"
+        chunks = audio_svc.split_into_chunks(five_second_wav, out_dir, chunk_seconds=2)
+        # 2s + 2s + 1s.
+        assert len(chunks) == 3
+        assert all(c.exists() and c.stat().st_size > 0 for c in chunks)
+
+    def test_chunks_are_sample_accurate_wavs(self, five_second_wav, tmp_path):
+        out_dir = tmp_path / "chunks"
+        chunks = audio_svc.split_into_chunks(five_second_wav, out_dir, chunk_seconds=2)
+        durations = [audio_svc.probe(c).duration_sec for c in chunks]
+        assert durations[0] == pytest.approx(2.0, abs=0.05)
+        assert durations[1] == pytest.approx(2.0, abs=0.05)
+        assert durations[2] == pytest.approx(1.0, abs=0.05)
+        # -c copy: no re-encoding, so the format survives untouched.
+        for c in chunks:
+            info = audio_svc.probe(c)
+            assert info.codec_name == "pcm_s16le"
+            assert info.sample_rate == 16000
+
+    def test_a_chunk_size_larger_than_the_file_yields_one_chunk(self, five_second_wav, tmp_path):
+        out_dir = tmp_path / "chunks"
+        chunks = audio_svc.split_into_chunks(five_second_wav, out_dir, chunk_seconds=60)
+        assert len(chunks) == 1
+
+    def test_no_audio_stream_raises_a_named_error(self, tmp_path):
+        junk = tmp_path / "junk.wav"
+        junk.write_bytes(b"not audio")
+        with pytest.raises(AudioError):
+            audio_svc.split_into_chunks(junk, tmp_path / "chunks", chunk_seconds=2)
+

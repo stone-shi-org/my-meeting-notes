@@ -185,6 +185,17 @@ class Settings(BaseSettings):
     # Wall-clock seconds of processing per second of audio; used to synthesise a
     # progress bar for a service that reports none. Calibrated from a 22.5 min sample.
     diarize_seconds_per_audio_second: float = 0.3
+    # A recording longer than this is diarized in pieces instead of one request
+    # (see pipeline._diarize_in_chunks). vibevoice-cpp-asr has an internal
+    # output budget, not a duration budget -- confirmed on a real ~59 min
+    # recording (meeting 24) that came back as one degenerate segment holding
+    # a truncated JSON dump instead of real turns, while a ~57 min recording
+    # with less to say in it diarized fine. A talkative recording can hit the
+    # limit sooner than a quiet one of the same length, so this stays a
+    # deliberate margin below the observed ~57/~59 min boundary rather than
+    # right up against it.
+    diarize_chunk_threshold_sec: float = 3000.0  # 50 min
+    diarize_chunk_size_sec: float = 1500.0  # 25 min
 
     # --- llm ----------------------------------------------------------------
     llm_base_url: str = "https://llm.internal.example/v1"

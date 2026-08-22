@@ -178,3 +178,54 @@ def convert_to_wav16k_mono(src: Path, dest: Path) -> Path:
 
 def is_allowed_extension(filename: str) -> bool:
     return Path(filename).suffix.lower() in ALLOWED_EXTENSIONS
+
+
+def build_chunk_command(src: Path, out_dir: Path, chunk_seconds: int) -> list[str]:
+    """Cut into fixed-length pieces via ffmpeg's segment muxer. ``-c copy`` on
+    an already-16kHz-mono-PCM wav is a sample-accurate cut, not a re-encode --
+    fast, and lossless at the boundary. Kept separate so it's testable."""
+    pattern = str(out_dir / "chunk_%04d.wav")
+    return [
+        _require_binary("ffmpeg"),
+        "-nostdin",
+        "-y",
+        "-i", str(src),
+        "-f", "segment",
+        "-segment_time", str(chunk_seconds),
+        "-reset_timestamps", "1",
+        "-c", "copy",
+        pattern,
+    ]
+
+
+def split_into_chunks(src: Path, out_dir: Path, chunk_seconds: int) -> list[Path]:
+    """Split a long recording into pieces small enough to stay under a
+    diarization backend's own output budget (see diarize.py's
+    looks_like_embedded_turns_dump). Blocking -- call via asyncio.to_thread.
+
+    The chunk count isn't predicted up front and checked against what ffmpeg
+    actually produced -- a real file's duration can differ by a hair from
+    whatever was probed and stored earlier, which would make an exact
+    prediction an occasional false failure for no real problem. Instead this
+    just globs whatever the segment muxer wrote and insists there's at least
+    one, non-empty.
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cmd = build_chunk_command(src, out_dir, chunk_seconds)
+
+    log.info("splitting %s into %ds chunks", src.name, chunk_seconds)
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=FFMPEG_TIMEOUT
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise AudioError(f"ffmpeg timed out splitting {src.name}") from exc
+
+    if result.returncode != 0:
+        tail = result.stderr.strip().splitlines()[-5:]
+        raise AudioError("ffmpeg failed to split audio: " + " | ".join(tail))
+
+    chunks = sorted(out_dir.glob("chunk_*.wav"))
+    if not chunks or any(c.stat().st_size == 0 for c in chunks):
+        raise AudioError("ffmpeg produced no usable chunks")
+    return chunks

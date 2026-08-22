@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 from app.config import effective, get_settings
@@ -134,6 +136,14 @@ async def _diarize_stage(
     with the same model, so a caller that skipped the request entirely
     because a previous attempt "got this far" would silently produce nothing
     -- see the `rediarize` route, which always passes force=True.
+
+    A recording longer than ``diarize_chunk_threshold_sec`` goes through
+    ``_diarize_in_chunks`` instead of one ``diarize_file`` call -- see that
+    function and diarize.py's ``looks_like_embedded_turns_dump`` for why: the
+    model has an output-token budget, not a duration budget, and meeting 24
+    (a real ~59 minute recording) overran it. Fake mode is checked first and
+    never chunks, since it replaces the whole request-to-a-model step and
+    there's no real budget to overrun.
     """
     settings = get_settings()
 
@@ -170,8 +180,21 @@ async def _diarize_stage(
 
     try:
         if settings.diarize_fake:
+            # Fake mode replaces the whole request-to-a-model step, so it
+            # never needs chunking -- there's no real output budget to
+            # overrun. Keeping this branch first, ahead of the duration
+            # check, is what keeps every existing fake-diarization test
+            # exercising exactly the single-call path it always has.
             payload = await _fake_diarize(ctx, duration)
             request_ms = 0
+        elif duration and duration > settings.diarize_chunk_threshold_sec:
+            payload, request_ms = await _diarize_in_chunks(
+                ctx,
+                Path(audio_path),
+                model=chosen_model,
+                duration_sec=duration,
+                chunk_seconds=settings.diarize_chunk_size_sec,
+            )
         else:
             from app.services.diarize import diarize_file
 
@@ -203,6 +226,122 @@ async def _diarize_stage(
     ctx.complete_stage("diarizing")
     await asyncio.to_thread(telegram_svc.notify_transcript_ready, ctx.db_path, meeting_id=meeting_id)
     return diar_id
+
+
+def _stitch_chunk_payloads(payloads_with_offsets: list[tuple[dict, float]]) -> dict:
+    """Combine N chunk-local diarization payloads -- each covering
+    [offset, offset + that chunk's own duration) on its own zero-based clock
+    -- into one payload shaped exactly like a normal (unchunked) diarization
+    response, so everything downstream (persistence, rendering, the
+    speaker-merge UI) needs no chunk-awareness at all.
+
+    Each chunk got its own fresh SPEAKER_nn numbering from the model, with no
+    memory of the chunk before it -- a person who was SPEAKER_00 in chunk 0
+    can come back as SPEAKER_01 in chunk 1, and there is no reliable way to
+    tell from here. Segment and speaker ids are namespaced by chunk index
+    ("c0:SPEAKER_00") to keep that honest rather than silently treating two
+    different people as one (or one person as two) across a boundary --
+    reconciling them afterward is the same "merge speakers" move already
+    used for a same-chunk over-split, just possibly needed once more.
+    """
+    merged_segments: list[dict] = []
+    merged_speakers: list[dict] = []
+    seen_speaker_ids: set[str] = set()
+    next_id = 0
+
+    for i, (payload, offset) in enumerate(payloads_with_offsets):
+        prefix = f"c{i}:"
+        for seg in payload.get("segments") or []:
+            new_seg = dict(seg)
+            new_seg["id"] = next_id
+            next_id += 1
+            new_seg["speaker"] = f"{prefix}{seg.get('speaker')}"
+            new_seg["start"] = (seg.get("start") or 0) + offset
+            new_seg["end"] = (seg.get("end") or 0) + offset
+            merged_segments.append(new_seg)
+        for sp in payload.get("speakers") or []:
+            new_sp = dict(sp)
+            new_sp["id"] = f"{prefix}{sp.get('id')}"
+            if new_sp["id"] not in seen_speaker_ids:
+                seen_speaker_ids.add(new_sp["id"])
+                merged_speakers.append(new_sp)
+
+    return {
+        "task": "diarize",
+        "num_speakers": len(merged_speakers),
+        "segments": merged_segments,
+        "speakers": merged_speakers,
+        # "chunked"/"chunk_count" are breadcrumbs for whoever next looks at a
+        # raw_json blob and wonders why the speaker ids look like
+        # "c1:SPEAKER_00" -- not read by anything downstream.
+        # "chunk_boundaries" IS read downstream (transcript.build_transcript
+        # passes it through so the SPA can draw a "Part 2 starts here"
+        # divider): each chunk's start offset on the full-recording clock.
+        # Deliberately time-based rather than derived from segment/speaker
+        # ids at render time -- merging a chunk's speaker into another
+        # chunk's changes what that segment's *speaker* id looks like, but
+        # never how it should be drawn on the timeline.
+        "chunked": True,
+        "chunk_count": len(payloads_with_offsets),
+        "chunk_boundaries": [offset for _, offset in payloads_with_offsets],
+    }
+
+
+async def _diarize_in_chunks(
+    ctx: JobContext,
+    path: Path,
+    *,
+    model: str,
+    duration_sec: float,
+    chunk_seconds: float,
+) -> tuple[dict, int]:
+    """Diarize a recording long enough to risk overrunning the model's own
+    output budget (see diarize.py's looks_like_embedded_turns_dump -- and
+    meeting 24, a real ~59 minute recording that failed exactly that way) by
+    splitting it into pieces, diarizing each independently, and stitching the
+    results back into one payload. See _diarize_stage for the duration
+    threshold that decides whether this runs at all.
+    """
+    from app.services.diarize import diarize_file
+
+    chunk_dir = Path(tempfile.mkdtemp(prefix="mmn-diar-chunks-"))
+    try:
+        chunk_paths = await asyncio.to_thread(
+            audio_svc.split_into_chunks, path, chunk_dir, int(chunk_seconds)
+        )
+        total = len(chunk_paths)
+        ctx.event(
+            f"This recording is long enough to risk the diarizer's own output "
+            f"limit, so it's being sent in {total} pieces of ~{chunk_seconds / 60:.0f} "
+            "min each instead of one request.",
+            stage="diarizing",
+        )
+
+        payloads_with_offsets: list[tuple[dict, float]] = []
+        total_request_ms = 0
+        offset = 0.0
+        for i, chunk_path in enumerate(chunk_paths):
+            ctx.check_cancelled()
+            info = await asyncio.to_thread(audio_svc.probe, chunk_path)
+            chunk_duration = info.duration_sec or chunk_seconds
+            ctx.event(f"Diarizing part {i + 1} of {total}", stage="diarizing")
+
+            payload, request_ms = await diarize_file(
+                ctx,
+                chunk_path,
+                model=model,
+                duration_sec=chunk_duration,
+                progress_window=(i / total, (i + 1) / total),
+            )
+            payloads_with_offsets.append((payload, offset))
+            total_request_ms += request_ms
+            offset += chunk_duration
+
+        return _stitch_chunk_payloads(payloads_with_offsets), total_request_ms
+    finally:
+        # These are scratch copies of already-stored audio, not anything the
+        # meeting itself keeps -- clean up even if a chunk failed partway.
+        shutil.rmtree(chunk_dir, ignore_errors=True)
 
 
 async def _fake_diarize(ctx: JobContext, duration: float | None) -> dict:
