@@ -7,6 +7,7 @@ import {
   FileText,
   Merge,
   RefreshCw,
+  RotateCcw,
   Square,
   Sparkles,
   User,
@@ -30,6 +31,7 @@ import { cn } from '@/lib/cn';
 import { renderMarkdown } from '@/lib/markdown';
 import { initials, speakerVars } from '@/lib/speakerColors';
 import { useGenerateSummary } from '@/hooks/useGenerateSummary';
+import { useRediarize } from '@/hooks/useRediarize';
 import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript } from '@/types/api';
 
 const TRANSCRIPT_PREF_KEY = 'mmn.showTranscript';
@@ -555,6 +557,72 @@ function DeepLinkSeek() {
   return null;
 }
 
+/**
+ * Re-run diarization on the meeting's existing recording -- for when the
+ * transcript text itself came out wrong (a name misheard, a stretch of
+ * cross-talk garbled), which renaming a speaker or regenerating the summary
+ * can't fix because both work from the same stored transcript.
+ *
+ * Sends the *original* audio through the diarizer again from scratch, so it
+ * costs the same minutes-long wait as the first run. Existing speaker names
+ * survive as long as the new run assigns the same SPEAKER_nn ids, but that
+ * is not guaranteed -- a re-run can split or merge speakers differently --
+ * so the confirmation says so rather than promising names carry over.
+ *
+ * Split into a button and a status line rather than one component: the
+ * button lives in the header's action row, but that row is not flex-wrap,
+ * so a progress/failure banner rendered alongside it would just get clipped
+ * instead of wrapping onto its own line. The status line renders as a
+ * sibling of the whole header, in a row that *is* flex-wrap.
+ */
+function RedoTranscriptButton({ rediarize }: { rediarize: ReturnType<typeof useRediarize> }) {
+  return (
+    <Button
+      variant="ghost"
+      onClick={() => {
+        const ok = window.confirm(
+          'Redo this transcript? The recording will be sent through diarization ' +
+            'again from scratch. This can take several minutes, and speaker names ' +
+            'may need re-checking afterward -- a new run can split or merge speakers ' +
+            'differently than before. The current transcript stays visible until the ' +
+            'new one is ready.',
+        );
+        if (ok) rediarize.mutate();
+      }}
+      loading={rediarize.isPending || rediarize.running}
+      disabled={rediarize.running}
+    >
+      <RotateCcw />
+      Redo transcript
+    </Button>
+  );
+}
+
+function RedoTranscriptStatus({ rediarize }: { rediarize: ReturnType<typeof useRediarize> }) {
+  if (rediarize.running && rediarize.data) {
+    return (
+      <p className="w-full text-xs text-fg-muted">
+        Redoing the transcript — this can take several minutes. The page will update on its own
+        when it finishes.{' '}
+        <Link to={`/jobs/${rediarize.data.job_id}`} className="text-primary hover:underline">
+          Follow progress
+        </Link>
+      </p>
+    );
+  }
+
+  if (rediarize.failure) {
+    return (
+      <p className="w-full text-xs text-danger-ink">
+        That run {rediarize.failure.status}.{' '}
+        {rediarize.failure.error ?? 'The previous transcript is unchanged.'}
+      </p>
+    );
+  }
+
+  return null;
+}
+
 export function TranscriptPage() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const speakersRef = useRef<HTMLDivElement>(null);
@@ -590,6 +658,12 @@ export function TranscriptPage() {
     enabled: !!meetingId,
     retry: (_, error) => !(error instanceof ApiError && error.status === 404),
   });
+
+  // Called unconditionally, alongside the other hooks above, rather than
+  // after the `!m.has_transcript` branch below -- a meeting can gain a
+  // transcript while this page is open, and calling a hook only on some
+  // renders of the same mounted component breaks React's rules of hooks.
+  const rediarize = useRediarize(Number(meetingId));
 
   // Hiding is display-only (exports and AI chat call the API directly, not
   // this array), so both the transcript pane and the player -- which tracks
@@ -679,6 +753,8 @@ export function TranscriptPage() {
               {showTranscript ? 'Hide transcript' : 'Show transcript'}
             </Button>
 
+            <RedoTranscriptButton rediarize={rediarize} />
+
             <Select
               className="w-auto"
               aria-label="Export transcript"
@@ -724,6 +800,8 @@ export function TranscriptPage() {
               </Button>
             )}
           </div>
+
+          <RedoTranscriptStatus rediarize={rediarize} />
         </div>
 
         {/* Summary, actions and speakers are what people come here for, so

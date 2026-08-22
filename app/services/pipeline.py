@@ -118,11 +118,22 @@ async def _convert_stage(ctx: JobContext, meeting_id: int, info: audio_svc.Audio
     ctx.complete_stage()
 
 
-async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = None) -> int | None:
+async def _diarize_stage(
+    ctx: JobContext, meeting_id: int, model: str | None = None, *, force: bool = False
+) -> int | None:
     """Send the wav to the diarization service and store the raw response.
 
     Real implementation lands in the diarization phase; the fake path exists so
     the minutes-long progress UX is testable in seconds.
+
+    ``force`` bypasses the checkpoint below. The `ingest` job needs the
+    checkpoint -- it's what lets `recover()` resume a job that already paid
+    for diarization without re-spending GPU minutes on a restart. The
+    standalone `diarize` job (the "redo transcript" button) is the opposite
+    case: it exists *only* to re-run diarization on the same audio, usually
+    with the same model, so a caller that skipped the request entirely
+    because a previous attempt "got this far" would silently produce nothing
+    -- see the `rediarize` route, which always passes force=True.
     """
     settings = get_settings()
 
@@ -134,12 +145,14 @@ async def _diarize_stage(ctx: JobContext, meeting_id: int, model: str | None = N
         provider_url = effective(conn, "diarization_url")
 
         # Checkpoint: an existing diarization for this model means a previous
-        # attempt got this far.
-        existing = conn.execute(
-            "SELECT id FROM diarizations WHERE meeting_id = ? AND model = ? "
-            "ORDER BY created_at DESC LIMIT 1",
-            (meeting_id, chosen_model),
-        ).fetchone()
+        # attempt got this far. Skipped entirely when force=True.
+        existing = None
+        if not force:
+            existing = conn.execute(
+                "SELECT id FROM diarizations WHERE meeting_id = ? AND model = ? "
+                "ORDER BY created_at DESC LIMIT 1",
+                (meeting_id, chosen_model),
+            ).fetchone()
 
     if existing:
         ctx.skip("diarizing", "Transcript already exists for this model")
@@ -345,9 +358,15 @@ async def _run_ingest(ctx: JobContext, meeting_id: int) -> dict:
 
 @register_job("diarize")
 async def run_diarize(ctx: JobContext) -> dict:
-    """Re-run diarization only, e.g. with a different model."""
+    """Re-run diarization only -- with a different model, or forced to redo
+    with the same one (the "redo transcript" button)."""
     meeting_id = int(ctx.payload["meeting_id"])
-    diar_id = await _diarize_stage(ctx, meeting_id, ctx.payload.get("model"))
+    diar_id = await _diarize_stage(
+        ctx,
+        meeting_id,
+        ctx.payload.get("model"),
+        force=bool(ctx.payload.get("force", False)),
+    )
 
     ctx.stage("done", "Finished")
     with get_conn(ctx.db_path) as conn:

@@ -303,6 +303,15 @@ def update_speakers(
 async def rediarize(
     meeting_id: int,
     model: str | None = None,
+    force: bool = Query(
+        True,
+        description=(
+            "Re-send the audio even if a diarization for this model already "
+            "exists. This route exists to redo a transcript, so the default "
+            "is True -- False is only for a caller that wants the ingest-style "
+            "checkpoint (skip if a previous attempt already got this far)."
+        ),
+    ),
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
@@ -316,7 +325,7 @@ async def rediarize(
         user_id=user.id,
         meeting_id=meeting_id,
         thread_id=row["thread_id"],
-        payload={"meeting_id": meeting_id, "model": model},
+        payload={"meeting_id": meeting_id, "model": model, "force": force},
     )
     conn.commit()
     await queue_mod.get_queue().enqueue(job_id)

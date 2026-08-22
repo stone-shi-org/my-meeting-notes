@@ -530,3 +530,49 @@ def test_rediarize_needs_audio(user_client):
         "/api/meetings", json={"new_thread_title": "T", "title": "Silent"}
     ).json()
     assert user_client.post(f"/api/meetings/{m['id']}/rediarize").status_code == 400
+
+
+def _diarization_count(db_path, meeting_id) -> int:
+    with get_conn(db_path) as c:
+        return c.execute(
+            "SELECT COUNT(*) FROM diarizations WHERE meeting_id = ?", (meeting_id,)
+        ).fetchone()[0]
+
+
+def _wait_for_job(user_client, job_id: str) -> dict:
+    deadline = time.time() + 20
+    while time.time() < deadline:
+        job = user_client.get(f"/api/jobs/{job_id}").json()
+        if job["status"] in {"succeeded", "failed"}:
+            return job
+        time.sleep(0.1)
+    raise AssertionError(f"job {job_id} did not finish in time")
+
+
+def test_rediarize_defaults_to_forcing_a_new_run(user_client, meeting, db_path):
+    """The whole point of this button is "redo it" -- without force=True the
+    ingest-style checkpoint sees a diarization already exists for the default
+    model and skips the request entirely, silently returning the same old
+    transcript (the bug this route shipped with)."""
+    meeting_id = meeting["meeting_id"]
+    assert _diarization_count(db_path, meeting_id) == 1
+
+    resp = user_client.post(f"/api/meetings/{meeting_id}/rediarize")
+    assert resp.status_code == 202
+    job = _wait_for_job(user_client, resp.json()["job_id"])
+    assert job["status"] == "succeeded", job.get("error")
+
+    assert _diarization_count(db_path, meeting_id) == 2
+
+
+def test_rediarize_force_false_respects_the_checkpoint(user_client, meeting, db_path):
+    """The opt-out: a caller that explicitly wants the resumability behaviour
+    (skip if a previous attempt already got this far) instead of a redo."""
+    meeting_id = meeting["meeting_id"]
+
+    resp = user_client.post(f"/api/meetings/{meeting_id}/rediarize?force=false")
+    assert resp.status_code == 202
+    job = _wait_for_job(user_client, resp.json()["job_id"])
+    assert job["status"] == "succeeded", job.get("error")
+
+    assert _diarization_count(db_path, meeting_id) == 1

@@ -52,6 +52,23 @@ def strip_language_tag(text: str) -> str:
     return _LANGUAGE_TAG_RE.sub("", text or "").strip()
 
 
+# vibevoice-cpp-asr, on a recording long enough to exceed whatever output
+# budget it re-transcribes against, gives up on real per-turn diarization
+# and instead dumps its own structured self-transcript --
+# `[{"Start":0,"End":1.0,"Speaker":0,"Content":"..."}, ...]`, frequently
+# truncated mid-object -- as the *text* of one top-level segment spanning
+# start=0/end=0. num_speakers still comes back plausible and that one
+# segment's text is non-empty, so neither check above catches it: it
+# silently became a "transcript" that was one line of raw, truncated JSON.
+# Confirmed on a ~59-minute recording. Real spoken text never opens with a
+# JSON array of its own Start/Speaker/Content turns, which keeps this narrow.
+_EMBEDDED_TURNS_RE = re.compile(r'^\[\s*\{\s*"start"\s*:', re.IGNORECASE)
+
+
+def looks_like_embedded_turns_dump(text: str) -> bool:
+    return bool(_EMBEDDED_TURNS_RE.match((text or "").lstrip()))
+
+
 def build_form(model: str) -> dict[str, str]:
     return {
         "model": model,
@@ -166,6 +183,19 @@ def diarize_sync(
         raise DiarizationError(
             "Diarization returned segments with no text. The service ignored "
             "include_text=true or the model does not support transcription."
+        )
+
+    dumped = next(
+        (s for s in payload["segments"] if looks_like_embedded_turns_dump(s.get("text"))),
+        None,
+    )
+    if dumped is not None:
+        raise DiarizationError(
+            "Diarization collapsed into a single segment holding its own "
+            "embedded (and possibly truncated) turn-by-turn JSON instead of "
+            "real segments -- a known failure mode on recordings long enough "
+            "to exceed the model's own output budget. Try a shorter recording "
+            f"or a different diarization model. segment id={dumped.get('id')!r}."
         )
 
     return payload, elapsed_ms

@@ -165,6 +165,64 @@ class TestFailures:
         result, _ = _call(wav)
         assert len(result["segments"]) == 79
 
+    @respx.mock
+    def test_embedded_turns_dump_names_the_actual_cause(self, wav):
+        """Reproduces what meeting 24 (a ~59 minute recording) actually got
+        back from vibevoice-cpp-asr: one degenerate segment whose "text" is
+        the model's own truncated JSON dump of per-turn speech, instead of
+        real top-level segments. That segment has non-empty text and
+        num_speakers is plausible, so without this check it passed every
+        existing validation and silently became the "transcript"."""
+        respx.post(URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "task": "diarize",
+                    "num_speakers": 1,
+                    "segments": [
+                        {
+                            "id": 0,
+                            "speaker": "SPEAKER_00",
+                            "label": "0",
+                            "start": 0,
+                            "end": 0,
+                            # Truncated mid-object, same as the real payload.
+                            "text": (
+                                '[{"Start":0,"End":1.0,"Speaker":0,"Content":"[Silence]"},'
+                                '{"Start":1.0,"End":123.0,"Speaker":1,"Content":"Hello.'
+                            ),
+                        }
+                    ],
+                    "speakers": [
+                        {"id": "SPEAKER_00", "label": "0", "total_speech_duration": 0,
+                         "segment_count": 1}
+                    ],
+                },
+            )
+        )
+        with pytest.raises(DiarizationError, match="embedded"):
+            _call(wav)
+
+    def test_looks_like_embedded_turns_dump_ignores_real_speech(self):
+        # A meeting about JSON syntax shouldn't trip this just for saying
+        # the words -- only a segment that *opens* with the dump's exact
+        # shape counts.
+        assert not diarize_svc.looks_like_embedded_turns_dump(
+            "So the payload looks like [{\"Start\": 1} and then we parse it."
+        )
+        assert not diarize_svc.looks_like_embedded_turns_dump("Hello, how are you?")
+        assert not diarize_svc.looks_like_embedded_turns_dump("")
+        assert not diarize_svc.looks_like_embedded_turns_dump(None)
+
+    def test_looks_like_embedded_turns_dump_matches_the_real_shape(self):
+        assert diarize_svc.looks_like_embedded_turns_dump(
+            '[{"Start":0,"End":1.0,"Speaker":0,"Content":"[Silence]"}'
+        )
+        # Case-insensitive on the key, and tolerant of leading whitespace.
+        assert diarize_svc.looks_like_embedded_turns_dump(
+            '  [{"start": 0, "end": 1.0}'
+        )
+
 
 class TestListModels:
     @respx.mock
