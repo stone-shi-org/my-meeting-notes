@@ -27,6 +27,19 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "diarization_model": ("str", False),
     "diarization_api_key": ("str", True),
     "diarization_timeout_sec": ("int", False),
+    # A recording past this length is diarized in pieces instead of one
+    # request -- see pipeline._diarize_in_chunks. Unused entirely while
+    # diarize_only is on (see below).
+    "diarize_chunk_threshold_sec": ("float", False),
+    "diarize_chunk_size_sec": ("float", False),
+    # See Settings.diarize_only's comment. transcribe_* mirrors
+    # diarization_url/_model/_api_key/_timeout_sec exactly, for the separate
+    # service that supplies text when the diarization service above doesn't.
+    "diarize_only": ("bool", False),
+    "transcribe_url": ("str", False),
+    "transcribe_model": ("str", False),
+    "transcribe_api_key": ("str", True),
+    "transcribe_timeout_sec": ("int", False),
     "llm_base_url": ("str", False),
     "llm_api_key": ("str", True),
     "llm_model": ("str", False),
@@ -196,6 +209,18 @@ class Settings(BaseSettings):
     # right up against it.
     diarize_chunk_threshold_sec: float = 3000.0  # 50 min
     diarize_chunk_size_sec: float = 1500.0  # 25 min
+    # "Diarization only": the configured diarization service above only ever
+    # produces speaker turns with empty text (e.g. pyannote-based backends),
+    # so a separate transcription service below supplies the words, aligned
+    # to those turns by timestamp overlap in
+    # pipeline._combine_diarization_and_transcript. Bypasses chunking
+    # entirely -- confirmed on meeting 24's full ~59 min recording, this path
+    # handled it in one request each, no chunk budget to overrun.
+    diarize_only: bool = False
+    transcribe_url: str = ""
+    transcribe_model: str = ""
+    transcribe_api_key: str = ""
+    transcribe_timeout_sec: int = 1800
 
     # --- llm ----------------------------------------------------------------
     llm_base_url: str = "https://llm.internal.example/v1"

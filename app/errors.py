@@ -79,6 +79,22 @@ class DiarizationUnreachableError(DiarizationError):
     code = "DIARIZATION_UNREACHABLE"
 
 
+class TranscribeError(AppError):
+    """A separate class from DiarizationError, not a reuse of it: with
+    "Diarization only" on, a transcription-service failure is a different
+    problem from a diarization-service failure, and the two have separate
+    Settings panels with separate Test buttons -- collapsing them into one
+    code would misdirect whoever's debugging which service is actually down.
+    """
+
+    status_code = 502
+    code = "transcribe_error"
+
+
+class TranscribeUnreachableError(TranscribeError):
+    code = "TRANSCRIBE_UNREACHABLE"
+
+
 class LLMError(AppError):
     status_code = 502
     code = "llm_error"

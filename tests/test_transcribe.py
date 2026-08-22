@@ -1,0 +1,163 @@
+"""The transcription-only HTTP client ("Diarization only" mode).
+
+Mirrors test_diarize.py's structure -- same request/response mechanics
+against a different endpoint and response shape, and a separate error
+class so a failure here doesn't get misreported as a diarization problem.
+"""
+
+from __future__ import annotations
+
+import json
+
+import httpx
+import pytest
+import respx
+
+from app.errors import TranscribeError, TranscribeUnreachableError
+from app.services import transcribe as transcribe_svc
+from tests.conftest import FIXTURES
+
+URL = "http://transcriber.test/v1/audio/transcriptions"
+
+WHISPER_SAMPLE = {
+    "task": "transcribe",
+    "language": "english",
+    "duration": 5.0,
+    "text": " Hello there. How are you?",
+    "segments": [
+        {"id": 0, "start": 0.0, "end": 2.5, "text": " Hello there."},
+        {"id": 1, "start": 2.5, "end": 5.0, "text": " How are you?"},
+    ],
+}
+
+
+@pytest.fixture
+def wav(tmp_path):
+    path = tmp_path / "audio16k.wav"
+    path.write_bytes((FIXTURES / "tiny16k.wav").read_bytes())
+    return path
+
+
+def _call(wav, **kw):
+    return transcribe_svc.transcribe_sync(
+        wav,
+        url=kw.get("url", URL),
+        model=kw.get("model", "whisper-large-turbo-q8_0"),
+        api_key=kw.get("api_key"),
+        timeout=kw.get("timeout", 30),
+    )
+
+
+class TestRequestShape:
+    def test_form_has_no_include_text(self):
+        # Unlike diarize.py's build_form: a plain transcription endpoint was
+        # never asked to skip producing text, so the flag is meaningless here.
+        form = transcribe_svc.build_form("whisper-large-turbo-q8_0")
+        assert form == {"model": "whisper-large-turbo-q8_0", "response_format": "verbose_json"}
+
+    @respx.mock
+    def test_the_posted_body_contains_those_fields(self, wav):
+        route = respx.post(URL).mock(return_value=httpx.Response(200, json=WHISPER_SAMPLE))
+        _call(wav)
+
+        body = route.calls[0].request.content.decode("utf-8", errors="replace")
+        assert 'name="model"' in body
+        assert "whisper-large-turbo-q8_0" in body
+        assert 'name="response_format"' in body
+        assert "verbose_json" in body
+        assert 'name="include_text"' not in body
+        assert 'name="file"' in body
+
+    @respx.mock
+    def test_no_auth_header_when_no_key_is_configured(self, wav):
+        route = respx.post(URL).mock(return_value=httpx.Response(200, json=WHISPER_SAMPLE))
+        _call(wav, api_key=None)
+        assert "authorization" not in route.calls[0].request.headers
+
+    @respx.mock
+    def test_bearer_header_when_a_key_is_configured(self, wav):
+        route = respx.post(URL).mock(return_value=httpx.Response(200, json=WHISPER_SAMPLE))
+        _call(wav, api_key="sk-abc")
+        assert route.calls[0].request.headers["authorization"] == "Bearer sk-abc"
+
+
+class TestSuccess:
+    @respx.mock
+    def test_parses_the_real_response_shape(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json=WHISPER_SAMPLE))
+        payload, elapsed_ms = _call(wav)
+
+        assert payload == WHISPER_SAMPLE
+        assert len(payload["segments"]) == 2
+        assert elapsed_ms >= 0
+
+    @respx.mock
+    def test_returns_the_payload_unmodified(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json=WHISPER_SAMPLE))
+        payload, _ = _call(wav)
+        assert json.dumps(payload, sort_keys=True) == json.dumps(WHISPER_SAMPLE, sort_keys=True)
+
+    @respx.mock
+    def test_empty_segments_is_not_an_error(self, wav):
+        """Unlike diarize_sync: a silent clip legitimately transcribes to
+        nothing, and there is no include_text-style flag to have been
+        dropped, so there is nothing to distinguish that from."""
+        respx.post(URL).mock(
+            return_value=httpx.Response(200, json={"segments": [], "text": "", "duration": 1.0})
+        )
+        payload, _ = _call(wav)
+        assert payload["segments"] == []
+
+
+class TestFailures:
+    @respx.mock
+    def test_connection_refused_is_a_config_error(self, wav):
+        respx.post(URL).mock(side_effect=httpx.ConnectError("refused"))
+        with pytest.raises(TranscribeUnreachableError) as exc:
+            _call(wav)
+        assert exc.value.code == "TRANSCRIBE_UNREACHABLE"
+
+    @respx.mock
+    def test_timeout_suggests_the_knob_to_turn(self, wav):
+        respx.post(URL).mock(side_effect=httpx.ReadTimeout("too slow"))
+        with pytest.raises(TranscribeError, match="MMN_TRANSCRIBE_TIMEOUT_SEC"):
+            _call(wav)
+
+    @respx.mock
+    def test_http_500_surfaces_the_body(self, wav):
+        respx.post(URL).mock(
+            return_value=httpx.Response(500, json={"error": {"message": "model not loaded"}})
+        )
+        with pytest.raises(TranscribeError, match="model not loaded"):
+            _call(wav)
+
+    @respx.mock
+    def test_non_json_response(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, text="<html>oops</html>"))
+        with pytest.raises(TranscribeError, match="non-JSON"):
+            _call(wav)
+
+    @respx.mock
+    def test_unexpected_shape(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json={"unexpected": True}))
+        with pytest.raises(TranscribeError, match="Unexpected"):
+            _call(wav)
+
+
+class TestListModels:
+    @respx.mock
+    def test_lists_models_from_the_service_root(self):
+        respx.get("http://transcriber.test/v1/models").mock(
+            return_value=httpx.Response(
+                200,
+                json={"data": [{"id": "whisper-large-turbo-q8_0"}, {"id": "vibevoice-cpp-asr"}]},
+            )
+        )
+        models = transcribe_svc.list_models(URL)
+        assert [m["id"] for m in models] == ["whisper-large-turbo-q8_0", "vibevoice-cpp-asr"]
+
+    @respx.mock
+    def test_failure_is_wrapped(self):
+        respx.get("http://transcriber.test/v1/models").mock(side_effect=httpx.ConnectError("nope"))
+        with pytest.raises(TranscribeError):
+            transcribe_svc.list_models(URL)

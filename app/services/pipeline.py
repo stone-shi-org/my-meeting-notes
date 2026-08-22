@@ -144,6 +144,9 @@ async def _diarize_stage(
     (a real ~59 minute recording) overran it. Fake mode is checked first and
     never chunks, since it replaces the whole request-to-a-model step and
     there's no real budget to overrun.
+
+    ``diarize_only`` (a Settings toggle, checked ahead of the chunk-duration
+    branch) bypasses chunking entirely too: see ``_diarize_and_transcribe``.
     """
     settings = get_settings()
 
@@ -153,6 +156,22 @@ async def _diarize_stage(
         duration = row["audio_duration_sec"]
         chosen_model = model or effective(conn, "diarization_model")
         provider_url = effective(conn, "diarization_url")
+        diarize_only = effective(conn, "diarize_only")
+        transcribe_model = effective(conn, "transcribe_model")
+        # Runtime-overridable (see config.RUNTIME_KEYS), so read via
+        # effective() here rather than settings.diarize_chunk_*_sec below --
+        # those are only the env-backed fallback effective() itself falls
+        # back to when nothing is saved in app_settings.
+        chunk_threshold = effective(conn, "diarize_chunk_threshold_sec")
+        chunk_size = effective(conn, "diarize_chunk_size_sec")
+
+        # The label this run is stored and checkpointed under. Combining two
+        # services' output is a materially different result from either
+        # alone, so it gets its own label rather than colliding with (or
+        # never matching) a plain run of the diarization model by itself --
+        # switching "Diarization only" on/off must not make a stale
+        # same-model diarization from before the switch look reusable.
+        model_label = f"{chosen_model}+{transcribe_model}" if diarize_only else chosen_model
 
         # Checkpoint: an existing diarization for this model means a previous
         # attempt got this far. Skipped entirely when force=True.
@@ -161,7 +180,7 @@ async def _diarize_stage(
             existing = conn.execute(
                 "SELECT id FROM diarizations WHERE meeting_id = ? AND model = ? "
                 "ORDER BY created_at DESC LIMIT 1",
-                (meeting_id, chosen_model),
+                (meeting_id, model_label),
             ).fetchone()
 
     if existing:
@@ -182,18 +201,26 @@ async def _diarize_stage(
         if settings.diarize_fake:
             # Fake mode replaces the whole request-to-a-model step, so it
             # never needs chunking -- there's no real output budget to
-            # overrun. Keeping this branch first, ahead of the duration
-            # check, is what keeps every existing fake-diarization test
-            # exercising exactly the single-call path it always has.
+            # overrun. Keeping this branch first, ahead of every other check,
+            # is what keeps every existing fake-diarization test exercising
+            # exactly the single-call path it always has.
             payload = await _fake_diarize(ctx, duration)
             request_ms = 0
-        elif duration and duration > settings.diarize_chunk_threshold_sec:
+        elif diarize_only:
+            payload, request_ms = await _diarize_and_transcribe(
+                ctx,
+                Path(audio_path),
+                diar_model=chosen_model,
+                transcribe_model=transcribe_model,
+                duration_sec=duration,
+            )
+        elif duration and duration > chunk_threshold:
             payload, request_ms = await _diarize_in_chunks(
                 ctx,
                 Path(audio_path),
                 model=chosen_model,
                 duration_sec=duration,
-                chunk_seconds=settings.diarize_chunk_size_sec,
+                chunk_seconds=chunk_size,
             )
         else:
             from app.services.diarize import diarize_file
@@ -211,7 +238,7 @@ async def _diarize_stage(
             meeting_id,
             payload,
             provider_url,
-            chosen_model,
+            model_label,
             request_ms,
         )
     except JobCancelled:
@@ -342,6 +369,103 @@ async def _diarize_in_chunks(
         # These are scratch copies of already-stored audio, not anything the
         # meeting itself keeps -- clean up even if a chunk failed partway.
         shutil.rmtree(chunk_dir, ignore_errors=True)
+
+
+def _combine_diarization_and_transcript(diar_payload: dict, asr_payload: dict) -> dict:
+    """Merge a diarization-only payload (real speaker turns, no words -- see
+    diarize.diarize_sync's ``expect_text=False``) with a transcription-only
+    payload (real words, no speakers -- transcribe.transcribe_sync) into one
+    payload shaped like a normal diarization response, by assigning each
+    transcribed segment to whichever speaker turn overlaps it most.
+
+    This is deliberately coarse -- segment-level overlap, not word-level --
+    because that's the timestamp resolution both services actually offer;
+    a transcribed segment that straddles a real speaker change will be
+    attributed to whichever side of it is longer, same as any other
+    diarization turn that happens to be a little too coarse.
+
+    A transcribed segment with *no* overlapping speaker turn at all is
+    dropped rather than kept unattributed. Confirmed on meeting 24: 48 of
+    862 whisper-large-turbo-q8_0 segments fell in this bucket, and the ones
+    inspected were hallucinated text ("Thank you." x4) during two minutes of
+    real pre-meeting silence that pyannote correctly saw as nothing --
+    exactly the shape "no diarization backs this at all" is a good, cheap
+    proxy for. A real utterance that just happens to fall in a genuine gap
+    between two turns is the false-positive cost of that heuristic; there is
+    currently no cheaper way to tell the two apart.
+    """
+    turns = diar_payload.get("segments") or []
+
+    def overlap(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+        return max(0.0, min(a_end, b_end) - max(a_start, b_start))
+
+    def speaker_for(start: float, end: float) -> str | None:
+        best_speaker, best_overlap = None, 0.0
+        for turn in turns:
+            ov = overlap(start, end, turn.get("start") or 0, turn.get("end") or 0)
+            if ov > best_overlap:
+                best_overlap, best_speaker = ov, turn.get("speaker")
+        return best_speaker
+
+    segments = []
+    next_id = 0
+    for seg in asr_payload.get("segments") or []:
+        text = (seg.get("text") or "").strip()
+        if not text:
+            continue
+        start, end = seg.get("start") or 0, seg.get("end") or 0
+        speaker = speaker_for(start, end)
+        if speaker is None:
+            continue
+        segments.append(
+            {"id": next_id, "speaker": speaker, "start": start, "end": end, "text": text}
+        )
+        next_id += 1
+
+    speakers = diar_payload.get("speakers") or []
+    return {
+        "task": "diarize",
+        "num_speakers": len(speakers),
+        "segments": segments,
+        "speakers": speakers,
+        "duration": diar_payload.get("duration") or asr_payload.get("duration"),
+        # A breadcrumb for whoever next looks at a raw_json blob, same idea
+        # as _stitch_chunk_payloads's "chunked" -- not read by anything else.
+        "diarize_only_source": True,
+    }
+
+
+async def _diarize_and_transcribe(
+    ctx: JobContext,
+    path: Path,
+    *,
+    diar_model: str,
+    transcribe_model: str,
+    duration_sec: float | None,
+) -> tuple[dict, int]:
+    """"Diarization only" mode -- get speaker turns from the diarization
+    service (no text expected) and words from a separate transcription
+    service, then combine them. Bypasses chunking entirely -- confirmed on
+    meeting 24's full ~59 minute recording, both services handled it in one
+    request each, in under three minutes combined, versus the ~11 minutes
+    the chunked vibevoice-only path took on the same recording.
+    """
+    from app.services.diarize import diarize_file
+    from app.services.transcribe import transcribe_file
+
+    ctx.event("Diarizing (speaker turns only, no transcription expected)", stage="diarizing")
+    diar_payload, diar_ms = await diarize_file(
+        ctx, path, model=diar_model, duration_sec=duration_sec,
+        expect_text=False, progress_window=(0.0, 0.5),
+    )
+
+    ctx.event("Transcribing", stage="diarizing")
+    asr_payload, asr_ms = await transcribe_file(
+        ctx, path, model=transcribe_model, duration_sec=duration_sec,
+        progress_window=(0.5, 1.0),
+    )
+
+    return _combine_diarization_and_transcript(diar_payload, asr_payload), diar_ms + asr_ms
 
 
 async def _fake_diarize(ctx: JobContext, duration: float | None) -> dict:

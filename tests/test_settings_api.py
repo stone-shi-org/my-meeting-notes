@@ -17,8 +17,44 @@ def test_settings_list_every_runtime_key(user_client):
     for key in (
         "llm_base_url", "llm_model", "diarization_url", "match_max_candidates",
         "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
+        "diarize_only", "transcribe_url", "transcribe_model", "transcribe_api_key",
+        "transcribe_timeout_sec", "diarize_chunk_threshold_sec", "diarize_chunk_size_sec",
     ):
         assert key in body
+
+
+def test_diarize_only_round_trips_as_a_bool(admin_client):
+    admin_client.put("/api/settings", json={"values": {"diarize_only": True}})
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["diarize_only"]["value"] is True
+    assert body["diarize_only"]["type"] == "bool"
+
+
+def test_chunk_settings_round_trip_as_floats(admin_client):
+    admin_client.put(
+        "/api/settings",
+        json={"values": {"diarize_chunk_threshold_sec": 1800.0, "diarize_chunk_size_sec": 900.0}},
+    )
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["diarize_chunk_threshold_sec"]["value"] == 1800.0
+    assert body["diarize_chunk_size_sec"]["value"] == 900.0
+
+
+def test_transcribe_api_key_is_masked_like_every_other_secret(admin_client, isolated_settings):
+    admin_client.put("/api/settings", json={"values": {"transcribe_api_key": "sk-transcribe-real"}})
+
+    shown = admin_client.get("/api/settings").json()["settings"]["transcribe_api_key"]
+    assert shown["is_secret"] is True
+    assert shown["value"].startswith("••••")
+    assert "sk-transcribe-real" not in shown["value"]
+
+    # And the masked round-trip convention holds for it too.
+    admin_client.put("/api/settings", json={"values": {"transcribe_api_key": shown["value"]}})
+    with get_conn(isolated_settings.db_path) as conn:
+        stored = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'transcribe_api_key'"
+        ).fetchone()[0]
+    assert stored == "sk-transcribe-real"
 
 
 def test_secrets_are_masked_on_read(user_client):

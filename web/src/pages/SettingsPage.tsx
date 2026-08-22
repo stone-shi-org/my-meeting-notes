@@ -135,6 +135,13 @@ function SettingsForm({
     options?: { value: string; label: string }[];
     badge?: (value: string) => { label: string; variant: 'info' | 'success' | 'warning' | 'neutral' | 'primary' | 'danger' } | null;
     visible?: (draft: Record<string, string>, entries: Record<string, { value?: unknown }>) => boolean;
+    /** Greys the field out without hiding it -- for a setting that's saved
+     * but unused given another field's current value (e.g. the chunk
+     * settings while "Diarization only" is on), where hiding it would lose
+     * the fact that a value is still sitting there, just not read right now. */
+    disabled?: boolean;
+    /** Replaces `hint` while `disabled` is true, explaining why. */
+    disabledHint?: string;
   }[];
   modelsPath?: string;
   modelKey?: string;
@@ -198,7 +205,7 @@ function SettingsForm({
       <p className="mt-1 text-sm text-fg-subtle">{description}</p>
 
       <div className="mt-5 space-y-4">
-        {keys.map(({ key, label, hint, type, step, options, badge, visible }) => {
+        {keys.map(({ key, label, hint, type, step, options, badge, visible, disabled: keyDisabled, disabledHint }) => {
           const entry = entries[key];
           if (!entry) return null;
           if (visible && !visible(draft, entries)) return null;
@@ -206,6 +213,7 @@ function SettingsForm({
           const value = draft[key] ?? (entry.value ?? '');
           const isModelField = key === modelKey;
           const badgeObj = badge ? badge(String(value)) : null;
+          const fieldDisabled = !isAdmin || !!keyDisabled;
 
           return (
             <div key={key}>
@@ -223,7 +231,7 @@ function SettingsForm({
                   id={key}
                   className="mt-1.5"
                   value={String(value)}
-                  disabled={!isAdmin}
+                  disabled={fieldDisabled}
                   onChange={(e) => {
                     setDraft((d) => ({ ...d, [key]: e.target.value }));
                     setTestResult(null);
@@ -242,7 +250,7 @@ function SettingsForm({
                   id={key}
                   className="mt-1.5"
                   value={String(value) === 'true' ? 'true' : 'false'}
-                  disabled={!isAdmin}
+                  disabled={fieldDisabled}
                   onChange={(e) => setDraft((d) => ({ ...d, [key]: e.target.value }))}
                 >
                   <option value="true">On</option>
@@ -260,7 +268,7 @@ function SettingsForm({
                     type={entry.is_secret ? 'password' : (type ?? 'text')}
                     step={step}
                     value={String(value)}
-                    disabled={!isAdmin}
+                    disabled={fieldDisabled}
                     placeholder={entry.is_secret ? 'unchanged' : undefined}
                     list={isModelField && modelOptions.length ? `${key}-options` : undefined}
                     autoComplete={isModelField ? 'off' : undefined}
@@ -279,7 +287,11 @@ function SettingsForm({
                 </>
               )}
 
-              {hint && <p className="mt-1 text-xs text-fg-subtle">{hint}</p>}
+              {keyDisabled && disabledHint ? (
+                <p className="mt-1 text-xs text-fg-faint">{disabledHint}</p>
+              ) : (
+                hint && <p className="mt-1 text-xs text-fg-subtle">{hint}</p>
+              )}
 
               {isModelField && modelOptions.length > 0 && (
                 <p className="mt-1 text-xs text-fg-subtle">
@@ -574,35 +586,150 @@ export function LlmSettingsPage() {
   );
 }
 
-export function DiarizationSettingsPage() {
+/**
+ * "Diarization only" gates two other sections on this page (the Transcription
+ * form below, and whether the chunk settings do anything), so unlike every
+ * other field here it saves immediately on click instead of sitting in a
+ * draft -- half-toggling it without saving would leave the visible fields
+ * not matching what's actually configured. A real checkbox, not the
+ * Select-as-bool convention the rest of the page uses, for the same reason:
+ * it needs to read as taking effect immediately, because it does.
+ */
+function DiarizeOnlyToggle() {
+  const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
+  const settings = useSettings();
+  const entry = settings.data?.settings.diarize_only;
+  const checked = String(entry?.value) === 'true';
+
+  const toggle = useMutation({
+    mutationFn: (next: boolean) => api.put('/settings', { values: { diarize_only: next } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  });
+
+  if (settings.isLoading) return <Skeleton className="h-20 w-full" />;
+
   return (
-    <SettingsForm
-      title="Diarization"
-      description="The speech-to-text service that splits a recording into speakers and turns."
-      modelsPath="/diarization/models"
-      modelKey="diarization_model"
-      testPath="/diarization/test"
-      testKeyMap={{
-        diarization_url: 'url',
-        diarization_api_key: 'api_key',
-        diarization_model: 'model',
-      }}
-      keys={[
-        {
-          key: 'diarization_url',
-          label: 'Endpoint URL',
-          hint: 'Full path, e.g. http://host:4012/v1/audio/diarization',
-        },
-        { key: 'diarization_api_key', label: 'API key', hint: 'Leave blank if not required' },
-        { key: 'diarization_model', label: 'Model' },
-        {
-          key: 'diarization_timeout_sec',
-          label: 'Timeout (seconds)',
-          type: 'number',
-          hint: 'A 20-minute recording can take several minutes.',
-        },
-      ]}
-    />
+    <Card className="p-5">
+      <label className="flex items-start gap-3">
+        <input
+          type="checkbox"
+          className="mt-1 size-4 shrink-0 accent-primary"
+          checked={checked}
+          disabled={!isAdmin || toggle.isPending}
+          onChange={(e) => toggle.mutate(e.target.checked)}
+        />
+        <span>
+          <span className="font-medium text-fg">Diarization only</span>
+          <p className="mt-0.5 text-sm text-fg-subtle">
+            Check this if the diarization service below only splits speaker turns and never
+            fills in the words -- confirmed on pyannote/speaker-diarization-community-1, which
+            returns an empty transcript on every turn by design. A separate transcription
+            service then supplies the text, matched to each turn by timestamp overlap. This
+            path handles a recording of any length in one request, so the chunk settings
+            below go unused while it's on.
+          </p>
+        </span>
+      </label>
+    </Card>
+  );
+}
+
+export function DiarizationSettingsPage() {
+  const settings = useSettings();
+  const diarizeOnly = String(settings.data?.settings.diarize_only?.value) === 'true';
+
+  return (
+    <div className="space-y-4">
+      <DiarizeOnlyToggle />
+
+      <SettingsForm
+        title="Diarization"
+        description={
+          diarizeOnly
+            ? 'With "Diarization only" on above, this service only needs to produce speaker turns -- the words come from Transcription below.'
+            : 'The speech-to-text service that splits a recording into speakers and turns.'
+        }
+        modelsPath="/diarization/models"
+        modelKey="diarization_model"
+        testPath="/diarization/test"
+        testKeyMap={{
+          diarization_url: 'url',
+          diarization_api_key: 'api_key',
+          diarization_model: 'model',
+        }}
+        keys={[
+          {
+            key: 'diarization_url',
+            label: 'Endpoint URL',
+            hint: 'Full path, e.g. http://host:4012/v1/audio/diarization',
+          },
+          { key: 'diarization_api_key', label: 'API key', hint: 'Leave blank if not required' },
+          { key: 'diarization_model', label: 'Model' },
+          {
+            key: 'diarization_timeout_sec',
+            label: 'Timeout (seconds)',
+            type: 'number',
+            hint: 'A 20-minute recording can take several minutes.',
+          },
+          {
+            key: 'diarize_chunk_threshold_sec',
+            label: 'Chunk if longer than (seconds)',
+            type: 'number',
+            hint:
+              'A recording past this length is split and diarized in pieces so one request ' +
+              'never risks the model\'s own output budget (see meeting 24: a real ~59 minute ' +
+              'recording that overran it). 3000 = 50 minutes.',
+            disabled: diarizeOnly,
+            disabledHint:
+              'Unused while "Diarization only" is on -- that path handles any length in one request.',
+          },
+          {
+            key: 'diarize_chunk_size_sec',
+            label: 'Chunk size (seconds)',
+            type: 'number',
+            hint: 'How long each piece is once chunking kicks in. 1500 = 25 minutes.',
+            disabled: diarizeOnly,
+            disabledHint: 'Unused while "Diarization only" is on.',
+          },
+        ]}
+      />
+
+      {diarizeOnly && (
+        <SettingsForm
+          title="Transcription"
+          description={
+            'Supplies the words the diarization service above doesn\'t. Combined with its ' +
+            'speaker turns by timestamp overlap; a stretch with no matching turn at all -- the ' +
+            'signature of a model hallucinating during silence, confirmed on whisper-large-' +
+            'turbo-q8_0 -- is dropped rather than shown unattributed.'
+          }
+          modelsPath="/transcribe/models"
+          modelKey="transcribe_model"
+          testPath="/transcribe/test"
+          testKeyMap={{
+            transcribe_url: 'url',
+            transcribe_api_key: 'api_key',
+            transcribe_model: 'model',
+          }}
+          keys={[
+            {
+              key: 'transcribe_url',
+              label: 'Endpoint URL',
+              hint: 'Full path, e.g. http://host:4012/v1/audio/transcriptions',
+            },
+            { key: 'transcribe_api_key', label: 'API key', hint: 'Leave blank if not required' },
+            { key: 'transcribe_model', label: 'Model' },
+            {
+              key: 'transcribe_timeout_sec',
+              label: 'Timeout (seconds)',
+              type: 'number',
+              hint: 'A 20-minute recording can take several minutes.',
+            },
+          ]}
+        />
+      )}
+    </div>
   );
 }
 

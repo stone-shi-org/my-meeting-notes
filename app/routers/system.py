@@ -180,3 +180,31 @@ def diarization_models(
         models = [*models, live_stt_option]
 
     return {"models": models, "error": None, "base_url": url}
+
+
+@router.get("/transcribe/models")
+def transcribe_models(
+    refresh: bool = False,
+    _: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """The "Diarization only" mode's separate transcription service. Same
+    shape as /diarization/models, minus the live-stt synthetic entry -- this
+    dropdown backs only the Transcription panel, never Live Captions."""
+    from app.config import effective
+    from app.services import transcribe as transcribe_svc
+
+    url = effective(conn, "transcribe_url")
+    api_key = effective(conn, "transcribe_api_key")
+
+    if refresh:
+        _MODEL_CACHE.pop("transcribe", None)
+
+    try:
+        models = _cached(
+            "transcribe", lambda: transcribe_svc.list_models(url, api_key or None)
+        )
+    except AppError as exc:
+        return {"models": [], "error": exc.message, "base_url": url}
+
+    return {"models": models, "error": None, "base_url": url}

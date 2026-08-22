@@ -21,6 +21,7 @@ from app.services import diarize as diarize_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 from app.services import telegram as telegram_svc
+from app.services import transcribe as transcribe_svc
 from app.services import web_search as web_search_svc
 
 router = APIRouter(prefix="/api", tags=["settings"])
@@ -56,6 +57,12 @@ class DiarizationTestRequest(BaseModel):
     model: str | None = Field(default=None, max_length=200)
     live_stt_url: str | None = Field(default=None, max_length=500)
     live_caption_backend: str | None = Field(default=None, max_length=50)
+
+
+class TranscribeTestRequest(BaseModel):
+    url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
 
 
 
@@ -214,6 +221,38 @@ def test_diarization(
 
     log.info(
         "admin %s tested diarization (%s): ok=%s %sms",
+        admin.username, model, result["ok"], result["latency_ms"],
+    )
+    return result
+
+
+@router.post("/transcribe/test")
+def test_transcribe(
+    payload: TranscribeTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """The "Diarization only" mode's separate transcription service. Same
+    shape as /diarization/test, minus the live-stt fields -- a plain
+    transcription endpoint has no gRPC variant to route to."""
+    url = effective(conn, "transcribe_url")
+    model = effective(conn, "transcribe_model")
+    api_key = effective(conn, "transcribe_api_key")
+
+    if payload is not None:
+        if payload.url:
+            url = payload.url
+        if payload.model:
+            model = payload.model
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            api_key = payload.api_key
+
+    result = transcribe_svc.test_connection(
+        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC
+    )
+
+    log.info(
+        "admin %s tested transcription (%s): ok=%s %sms",
         admin.username, model, result["ok"], result["latency_ms"],
     )
     return result

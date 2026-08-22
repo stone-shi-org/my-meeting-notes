@@ -8,10 +8,12 @@ import respx
 
 from app.services import diarize as diarize_svc
 from app.services import llm as llm_svc
+from app.services import transcribe as transcribe_svc
 from app.services import web_search as web_search_svc
 
 LLM_URL = "https://llm.test/v1/chat/completions"
 DIARIZE_MODELS_URL = "http://diarizer.test/v1/models"
+TRANSCRIBE_MODELS_URL = "http://transcriber.test/v1/models"
 WEB_SEARCH_URL = "https://search.test/v1/search"
 
 
@@ -22,6 +24,8 @@ def base_settings(monkeypatch):
     monkeypatch.setenv("MMN_LLM_API_KEY", "sk-configured")
     monkeypatch.setenv("MMN_DIARIZATION_URL", "http://diarizer.test/v1/audio/diarization")
     monkeypatch.setenv("MMN_DIARIZATION_MODEL", "vibevoice-cpp-asr")
+    monkeypatch.setenv("MMN_TRANSCRIBE_URL", "http://transcriber.test/v1/audio/transcriptions")
+    monkeypatch.setenv("MMN_TRANSCRIBE_MODEL", "whisper-large-turbo-q8_0")
     monkeypatch.setenv("MMN_WEB_SEARCH_BASE_URL", "https://search.test")
     monkeypatch.setenv("MMN_WEB_SEARCH_API_KEY", "sk-search-configured")
     from app.config import reset_settings_cache
@@ -260,6 +264,62 @@ class TestDiarizationTestConnection:
         assert not diarize_route.called
 
 
+class TestTranscribeTestConnection:
+    """Mirrors TestDiarizationTestConnection -- same GET /v1/models probe,
+    a different service and error class underneath."""
+
+    @respx.mock
+    def test_success_when_the_model_is_in_the_list(self):
+        respx.get(TRANSCRIBE_MODELS_URL).mock(
+            return_value=httpx.Response(
+                200, json={"data": [{"id": "whisper-large-turbo-q8_0"}, {"id": "other"}]}
+            )
+        )
+        result = transcribe_svc.test_connection(
+            "http://transcriber.test/v1/audio/transcriptions", "whisper-large-turbo-q8_0"
+        )
+        assert result["ok"] is True
+        assert result["model_found"] is True
+        assert result["models_count"] == 2
+        assert result["error"] is None
+
+    @respx.mock
+    def test_reachable_but_wrong_model_names_what_is_available(self):
+        respx.get(TRANSCRIBE_MODELS_URL).mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "other-model"}]})
+        )
+        result = transcribe_svc.test_connection(
+            "http://transcriber.test/v1/audio/transcriptions", "whisper-large-turbo-q8_0"
+        )
+        assert result["ok"] is False
+        assert result["model_found"] is False
+        assert "other-model" in result["error"]
+
+    @respx.mock
+    def test_unreachable_service_is_reported_not_raised(self):
+        respx.get(TRANSCRIBE_MODELS_URL).mock(side_effect=httpx.ConnectError("refused"))
+        result = transcribe_svc.test_connection(
+            "http://transcriber.test/v1/audio/transcriptions", "whisper-large-turbo-q8_0"
+        )
+        assert result["ok"] is False
+        assert result["models_count"] == 0
+
+    @respx.mock
+    def test_does_not_run_a_real_transcription(self):
+        """Only /v1/models is hit -- a real transcription takes minutes."""
+        models_route = respx.get(TRANSCRIBE_MODELS_URL).mock(
+            return_value=httpx.Response(200, json={"data": [{"id": "whisper-large-turbo-q8_0"}]})
+        )
+        transcribe_route = respx.post("http://transcriber.test/v1/audio/transcriptions").mock(
+            return_value=httpx.Response(200, json={"segments": []})
+        )
+        transcribe_svc.test_connection(
+            "http://transcriber.test/v1/audio/transcriptions", "whisper-large-turbo-q8_0"
+        )
+        assert models_route.called
+        assert not transcribe_route.called
+
+
 class TestWebSearchTestConnection:
     def config(self, **kw):
         return web_search_svc.WebSearchConfig(
@@ -366,6 +426,45 @@ def test_diarization_test_endpoint_can_try_unsaved_edits(admin_client):
 
 def test_diarization_test_endpoint_is_admin_only(user_client):
     assert user_client.post("/api/diarization/test").status_code == 403
+
+
+@respx.mock
+def test_transcribe_test_endpoint_uses_the_saved_config(admin_client):
+    respx.get(TRANSCRIBE_MODELS_URL).mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "whisper-large-turbo-q8_0"}]})
+    )
+    resp = admin_client.post("/api/transcribe/test")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+@respx.mock
+def test_transcribe_test_endpoint_can_try_unsaved_edits(admin_client):
+    route = respx.get("http://other-transcriber.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+    )
+    resp = admin_client.post(
+        "/api/transcribe/test",
+        json={"url": "http://other-transcriber.test/v1/audio/transcriptions", "model": "custom-model"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert route.called
+
+
+@respx.mock
+def test_transcribe_test_endpoint_ignores_a_masked_api_key_echo(admin_client):
+    admin_client.put("/api/settings", json={"values": {"transcribe_api_key": "sk-transcribe-real"}})
+    route = respx.get(TRANSCRIBE_MODELS_URL).mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "whisper-large-turbo-q8_0"}]})
+    )
+    admin_client.post("/api/transcribe/test", json={"api_key": "••••1234"})
+
+    assert route.calls[0].request.headers["authorization"] == "Bearer sk-transcribe-real"
+
+
+def test_transcribe_test_endpoint_is_admin_only(user_client):
+    assert user_client.post("/api/transcribe/test").status_code == 403
 
 
 @respx.mock

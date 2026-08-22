@@ -421,6 +421,25 @@ already used for a same-chunk over-split. Fake mode (`MMN_DIARIZE_FAKE`) is chec
 threshold and never chunks: it replaces the whole request-to-a-model step, so there's no real budget to
 overrun, and every existing fake-diarization test keeps exercising the single-call path unchanged.
 
+**"Diarization only" (`diarize_only`) bypasses chunking entirely, ahead of the duration check above.**
+For a diarization backend that only ever produces speaker turns with empty text by design — confirmed
+on `pyannote/speaker-diarization-community-1` — chunking is pointless: tested against meeting 24's
+full ~59 minute recording, both it and a separate transcription service (its own URL/model/api key,
+`transcribe_url`/`_model`/`_api_key`/`_timeout_sec`, mirroring the diarization settings exactly) handled
+the whole file in one request each, in under three minutes combined. `diarize.diarize_sync`'s
+`expect_text=False` skips the two checks that assume a combined ASR+diarization backend
+(`include_text` missing / an embedded-turns-dump) — on a backend that was never asked for text, "every
+segment is empty" is the correct shape, not a failure symptom. `pipeline._combine_diarization_and_transcript`
+aligns the two by timestamp overlap (segment-level, not word-level — that's the resolution both services
+actually offer) and **drops any transcribed segment with zero overlap with a real speaker turn**: on
+meeting 24, 48 of 862 whisper-large-turbo-q8_0 segments had none, and the ones inspected were
+hallucinated text ("Thank you." ×4) during two minutes of real pre-meeting silence pyannote correctly
+saw as nothing. The combined result is stored under a model label of `"{diar_model}+{transcribe_model}"`
+so flipping the toggle on/off never lets a stale run from the other mode look reusable at the
+checkpoint. `diarize_chunk_threshold_sec`/`diarize_chunk_size_sec` are runtime-editable from Settings
+now (previously env-only) — read via `effective()`, not `settings.diarize_chunk_*_sec`, inside
+`_diarize_stage`, or a DB override would be silently ignored.
+
 ## Conventions
 
 - Timestamps: ISO-8601 UTC `TEXT` via `db.utcnow()`. Never `datetime.now()` bare.

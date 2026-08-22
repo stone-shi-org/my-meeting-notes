@@ -130,8 +130,20 @@ def diarize_sync(
     model: str,
     api_key: str | None,
     timeout: int,
+    expect_text: bool = True,
 ) -> tuple[dict, int]:
-    """Blocking POST. Returns ``(payload, elapsed_ms)``."""
+    """Blocking POST. Returns ``(payload, elapsed_ms)``.
+
+    ``expect_text=False`` is "Diarization only" mode: a pyannote-style
+    backend that only ever produces speaker turns, with an empty "text" on
+    every one of them *by design* -- confirmed on
+    pyannote/speaker-diarization-community-1. The two checks below exist to
+    catch a combined ASR+diarization backend silently failing to produce
+    text; on a backend that was never asked to produce any, "every segment
+    has no text" is the expected, correct shape, not a failure symptom, so
+    both checks are skipped entirely rather than made to somehow tell the
+    two apart.
+    """
     started = time.monotonic()
     try:
         with path.open("rb") as fh:
@@ -178,25 +190,26 @@ def diarize_sync(
     if not payload["segments"]:
         raise DiarizationError("Diarization returned no segments — is the audio silent?")
 
-    # The distinguishing symptom of a missing include_text: turns with no words.
-    if all(not (s.get("text") or "").strip() for s in payload["segments"]):
-        raise DiarizationError(
-            "Diarization returned segments with no text. The service ignored "
-            "include_text=true or the model does not support transcription."
-        )
+    if expect_text:
+        # The distinguishing symptom of a missing include_text: turns with no words.
+        if all(not (s.get("text") or "").strip() for s in payload["segments"]):
+            raise DiarizationError(
+                "Diarization returned segments with no text. The service ignored "
+                "include_text=true or the model does not support transcription."
+            )
 
-    dumped = next(
-        (s for s in payload["segments"] if looks_like_embedded_turns_dump(s.get("text"))),
-        None,
-    )
-    if dumped is not None:
-        raise DiarizationError(
-            "Diarization collapsed into a single segment holding its own "
-            "embedded (and possibly truncated) turn-by-turn JSON instead of "
-            "real segments -- a known failure mode on recordings long enough "
-            "to exceed the model's own output budget. Try a shorter recording "
-            f"or a different diarization model. segment id={dumped.get('id')!r}."
+        dumped = next(
+            (s for s in payload["segments"] if looks_like_embedded_turns_dump(s.get("text"))),
+            None,
         )
+        if dumped is not None:
+            raise DiarizationError(
+                "Diarization collapsed into a single segment holding its own "
+                "embedded (and possibly truncated) turn-by-turn JSON instead of "
+                "real segments -- a known failure mode on recordings long enough "
+                "to exceed the model's own output budget. Try a shorter recording "
+                f"or a different diarization model. segment id={dumped.get('id')!r}."
+            )
 
     return payload, elapsed_ms
 
@@ -208,6 +221,7 @@ async def diarize_file(
     model: str,
     duration_sec: float | None = None,
     progress_window: tuple[float, float] = (0.0, 1.0),
+    expect_text: bool = True,
 ) -> tuple[dict, int]:
     """Run diarization off the event loop while reporting synthetic progress.
 
@@ -218,6 +232,8 @@ async def diarize_file(
     backwards the moment chunk 2 starts (JobContext.stage_progress sets an
     absolute value; nothing stops it from moving down as well as up, and
     test_jobs.py's progress tests assert it never does).
+
+    ``expect_text=False`` is "Diarization only" mode -- see diarize_sync.
     """
     settings = get_settings()
     with get_conn(ctx.db_path) as conn:
@@ -262,6 +278,7 @@ async def diarize_file(
             model=model,
             api_key=api_key or None,
             timeout=timeout,
+            expect_text=expect_text,
         )
     finally:
         stop.set()
