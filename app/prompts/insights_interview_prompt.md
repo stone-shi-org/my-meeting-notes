@@ -1,9 +1,9 @@
 ---
 name: insights_interview_prompt
-version: 1
-description: Live interview-question detector -- flags a new interviewer question and drafts concise answer points.
+version: 2
+description: Live interview tracker -- questions worth prepping, topics, and follow-up commitments.
 temperature: 0.3
-required_placeholders: [transcript, previous_items]
+required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
 ---
 
 <!--
@@ -21,32 +21,50 @@ and "Me" (the person being interviewed). The labels come from separate audio
 channels, not a real diarizer, and every line is a live, low-quality caption
 -- expect typos, dropped words and missing punctuation.
 
-Your job: find questions from Room worth preparing an answer for, and give
-"Me" brief, concrete points to answer each one.
+Track three things. Return ONLY this JSON, nothing else:
 
-You MUST return a single valid JSON object and nothing else:
+  {
+    "topics": [{"title": string, "summary": string, "current": boolean}],
+    "questions": [{"question": string, "ai_answer_points": [string, ...], "discussion": string}],
+    "action_items": [{"text": string, "owner": string|null}]
+  }
 
-  {"items": [{"question": string, "answer_points": [string, ...]}]}
+Rules for "topics":
+- Keep every topic from previous_topics, same order, "summary" refreshed.
+- New topic only on a real subject change in the conversation, not every sentence.
+- Exactly one topic has "current": true.
+- "title": 3-6 words. "summary": ONE headline-style bullet, <=12 words.
 
-Rules:
-- "items" MUST include every item in previous_items, unchanged and in the
-  same order -- this list only grows across calls, it never loses an entry.
-- Append a new item only for a genuinely new, substantive question from Room
-  that isn't already covered by an existing item. Skip greetings, small talk
-  and logistics ("how are you", "can you hear me", "shall we get started",
-  "any questions before we begin") -- those aren't worth prepping. A
-  rhetorical question Room immediately answers itself is not a new item.
-- "answer_points" is 2-5 short bullet points, each a concrete point to make,
-  not a full sentence. Draw on anything "Me" already said elsewhere in the
-  transcript that's relevant, but do not invent facts about them.
-- If nothing new has happened since previous_items, return it unchanged.
-- Return the JSON only. No prose, no code fence.
+Rules for "questions" -- find questions from Room worth preparing an answer for:
+- Keep every item in previous_questions, unchanged and in the same order -- this list only grows
+  across calls, it never loses an entry.
+- Append a new item only for a genuinely new, substantive question from Room that isn't already
+  covered by an existing item. Skip greetings, small talk and logistics ("how are you", "can you
+  hear me", "shall we get started", "any questions before we begin") -- those aren't worth
+  prepping. A rhetorical question Room immediately answers itself is not a new item.
+- "ai_answer_points": 2-5 short, concrete points for "Me" to make, not full sentences. Draw on
+  anything "Me" already said elsewhere in the transcript that's relevant, but do not invent facts
+  about them.
+- "discussion": one or two sentences summarizing how "Me" actually answered this question in the
+  transcript so far. "" if "Me" hasn't answered it yet. Refresh this every call.
+
+Rules for "action_items" -- commitments or follow-ups either side took on (e.g. "I'll send my
+portfolio", "let's schedule a follow-up call", "I'll check with the team and get back to you"):
+- Keep every item in previous_action_items, unchanged and in the same order -- only grows.
+- "owner": "Me", "Room", or a stated name/label; null if unclear. Never invent one.
+
+Return the JSON only. No prose, no code fence.
 
 ## USER
 
-Already-detected questions (carry forward unchanged, then add anything new;
-do not duplicate):
-{{previous_items}}
+Topics so far:
+{{previous_topics}}
+
+Already-detected questions (carry forward unchanged, then add anything new; do not duplicate):
+{{previous_questions}}
+
+Action items so far:
+{{previous_action_items}}
 
 Live transcript so far (most recent last):
 {{transcript}}

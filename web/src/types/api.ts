@@ -621,7 +621,6 @@ export interface TelegramLink {
 export interface InsightType {
   slug: string;
   name: string;
-  kind: 'topics' | 'questions';
 }
 
 export interface InsightTypeDetail extends InsightType {

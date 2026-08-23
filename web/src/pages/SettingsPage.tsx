@@ -1819,18 +1819,10 @@ export function PromptSettingsPage() {
 /* Meeting types (insight_types)                                              */
 /* -------------------------------------------------------------------------- */
 
-const KIND_OPTIONS: { value: InsightTypeDetail['kind']; label: string }[] = [
-  { value: 'topics', label: 'Topic list (like General Meeting)' },
-  { value: 'questions', label: 'Question & answer (like Interview)' },
-];
-
-// Mirrors app/services/insight_types.py's _REQUIRED_PLACEHOLDER_BY_KIND --
-// shown as a hint rather than fetched, since it's a fixed fact about the
-// kind, not something the server needs a round trip to say.
-const REQUIRED_PLACEHOLDER_BY_KIND: Record<InsightTypeDetail['kind'], string> = {
-  topics: 'previous_topics',
-  questions: 'previous_items',
-};
+// Mirrors app/services/insight_types.py's REQUIRED_PLACEHOLDERS -- shown as
+// a hint rather than fetched, since it's a fixed fact about every type now,
+// not something the server needs a round trip to say.
+const REQUIRED_PLACEHOLDERS = ['previous_topics', 'previous_questions', 'previous_action_items'];
 
 function insightTypesQueryKey() {
   return ['insight-types', 'admin'];
@@ -1840,20 +1832,19 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(type.name);
-  const [kind, setKind] = useState(type.kind);
   const [prompt, setPrompt] = useState(type.prompt);
 
   const invalidate = () => {
     void queryClient.invalidateQueries({ queryKey: insightTypesQueryKey() });
     // The recorder's own picker (see InsightsPanel.tsx) reads the public
-    // list under a different key -- a rename/kind change should show up
-    // there without waiting for that panel's own staleTime to lapse.
+    // list under a different key -- a rename should show up there without
+    // waiting for that panel's own staleTime to lapse.
     void queryClient.invalidateQueries({ queryKey: ['insight-types'] });
   };
 
   const save = useMutation({
     mutationFn: () =>
-      api.put<InsightTypeDetail>(`/settings/insight-types/${type.slug}`, { name, kind, prompt }),
+      api.put<InsightTypeDetail>(`/settings/insight-types/${type.slug}`, { name, prompt }),
     onSuccess: () => {
       invalidate();
       setEditing(false);
@@ -1871,7 +1862,6 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
         <div className="min-w-0">
           <div className="flex items-center gap-2">
             <p className="truncate font-medium">{type.name}</p>
-            <Badge size="sm">{type.kind === 'questions' ? 'Q&A' : 'Topics'}</Badge>
           </div>
           <p className="mt-0.5 truncate text-xs text-fg-subtle">slug: {type.slug}</p>
         </div>
@@ -1894,26 +1884,13 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
             />
           </div>
           <div>
-            <Label htmlFor={`it-${type.slug}-kind`}>Shape</Label>
-            <Select
-              id={`it-${type.slug}-kind`}
-              className="mt-1.5"
-              value={kind}
-              onChange={(e) => setKind(e.target.value as InsightTypeDetail['kind'])}
-            >
-              {KIND_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>
-                  {opt.label}
-                </option>
-              ))}
-            </Select>
-          </div>
-          <div>
             <Label htmlFor={`it-${type.slug}-prompt`}>Prompt</Label>
             <p className="mt-1 text-xs text-fg-subtle">
               Required placeholders:{' '}
               <code className="font-mono">{'{{transcript}}'}</code>{' '}
-              <code className="font-mono">{`{{${REQUIRED_PLACEHOLDER_BY_KIND[kind]}}}`}</code>
+              {REQUIRED_PLACEHOLDERS.map((p) => (
+                <code key={p} className="ml-1 font-mono">{`{{${p}}}`}</code>
+              ))}
             </p>
             <Textarea
               id={`it-${type.slug}-prompt`}
@@ -1936,7 +1913,6 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
               onClick={() => {
                 setEditing(false);
                 setName(type.name);
-                setKind(type.kind);
                 setPrompt(type.prompt);
               }}
             >
@@ -1963,67 +1939,52 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
   );
 }
 
-const NEW_TYPE_PROMPT_STUB: Record<InsightTypeDetail['kind'], string> = {
-  topics: [
-    '---',
-    'name: custom_insight_type',
-    'temperature: 0.2',
-    '---',
-    '',
-    '## SYSTEM',
-    '',
-    'You are watching a live, rough transcript. Return ONLY this JSON, nothing else:',
-    '',
-    '  {"topics": [{"title": string, "summary": string, "current": boolean}]}',
-    '',
-    '## USER',
-    '',
-    'Topics so far:',
-    '{{previous_topics}}',
-    '',
-    'Live transcript so far:',
-    '{{transcript}}',
-    '',
-  ].join('\n'),
-  questions: [
-    '---',
-    'name: custom_insight_type',
-    'temperature: 0.3',
-    '---',
-    '',
-    '## SYSTEM',
-    '',
-    'You are watching a live, rough transcript. Return ONLY this JSON, nothing else:',
-    '',
-    '  {"items": [{"question": string, "answer_points": [string, ...]}]}',
-    '',
-    '## USER',
-    '',
-    'Already-detected questions:',
-    '{{previous_items}}',
-    '',
-    'Live transcript so far:',
-    '{{transcript}}',
-    '',
-  ].join('\n'),
-};
+const NEW_TYPE_PROMPT_STUB = [
+  '---',
+  'name: custom_insight_type',
+  'temperature: 0.2',
+  '---',
+  '',
+  '## SYSTEM',
+  '',
+  'You are watching a live, rough transcript. Return ONLY this JSON, nothing else:',
+  '',
+  '  {',
+  '    "topics": [{"title": string, "summary": string, "current": boolean}],',
+  '    "questions": [{"question": string, "ai_answer_points": [string, ...], "discussion": string}],',
+  '    "action_items": [{"text": string, "owner": string|null}]',
+  '  }',
+  '',
+  '## USER',
+  '',
+  'Topics so far:',
+  '{{previous_topics}}',
+  '',
+  'Questions so far:',
+  '{{previous_questions}}',
+  '',
+  'Action items so far:',
+  '{{previous_action_items}}',
+  '',
+  'Live transcript so far:',
+  '{{transcript}}',
+  '',
+].join('\n');
 
 function AddInsightType() {
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
   const [name, setName] = useState('');
-  const [kind, setKind] = useState<InsightTypeDetail['kind']>('topics');
-  const [prompt, setPrompt] = useState(NEW_TYPE_PROMPT_STUB.topics);
+  const [prompt, setPrompt] = useState(NEW_TYPE_PROMPT_STUB);
 
   const close = () => {
     setOpen(false);
     setName('');
-    setKind('topics');
-    setPrompt(NEW_TYPE_PROMPT_STUB.topics);
+    setPrompt(NEW_TYPE_PROMPT_STUB);
   };
 
   const create = useMutation({
-    mutationFn: () => api.post<InsightTypeDetail>('/settings/insight-types', { name, kind, prompt }),
+    mutationFn: () => api.post<InsightTypeDetail>('/settings/insight-types', { name, prompt }),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: insightTypesQueryKey() });
       void queryClient.invalidateQueries({ queryKey: ['insight-types'] });
@@ -2054,34 +2015,12 @@ function AddInsightType() {
         />
       </div>
       <div>
-        <Label htmlFor="new-it-kind">Shape</Label>
-        <Select
-          id="new-it-kind"
-          className="mt-1.5"
-          value={kind}
-          onChange={(e) => {
-            const next = e.target.value as InsightTypeDetail['kind'];
-            setKind(next);
-            // Swap the stub too, but only while the prompt is still whatever
-            // the previous stub was -- once someone's actually written their
-            // own text, changing the shape must not clobber it.
-            setPrompt((prev) =>
-              prev === NEW_TYPE_PROMPT_STUB[kind] ? NEW_TYPE_PROMPT_STUB[next] : prev,
-            );
-          }}
-        >
-          {KIND_OPTIONS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
-        </Select>
-      </div>
-      <div>
         <Label htmlFor="new-it-prompt">Prompt</Label>
         <p className="mt-1 text-xs text-fg-subtle">
           Required placeholders: <code className="font-mono">{'{{transcript}}'}</code>{' '}
-          <code className="font-mono">{`{{${REQUIRED_PLACEHOLDER_BY_KIND[kind]}}}`}</code>
+          {REQUIRED_PLACEHOLDERS.map((p) => (
+            <code key={p} className="ml-1 font-mono">{`{{${p}}}`}</code>
+          ))}
         </p>
         <Textarea
           id="new-it-prompt"

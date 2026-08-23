@@ -1,10 +1,11 @@
 """Live insights over an in-progress recording's rolling transcript.
 
 Meeting types are rows in insight_types (see app/services/insight_types.py
-and db.py's SCHEMA), each with its own prompt and output ``kind`` -- a
-running topic list ('topics') or a question/answer list ('questions'). One
-call shape either way: hand back whatever the model returned last time plus
-the transcript so far, get back the same shape grown by whatever's new.
+and db.py's SCHEMA), each with its own prompt. Every type returns the same
+combined shape -- a running topic list, a question/answer list, and an
+action-item list, all three grown together in one call: hand back whatever
+the model returned last time plus the transcript so far, get back the same
+three lists grown by whatever's new.
 
 Deliberately stateless on the server, the same reasoning as live captions:
 there is often no meeting row yet (a recording exists before Stop; a meeting
@@ -30,7 +31,10 @@ from app.services import prompts as prompts_svc
 # context window and make calls slower the longer a session runs.
 MAX_TRANSCRIPT_CHARS = 12_000
 
-MAX_OUTPUT_TOKENS = 1500
+# Three growing lists now share this budget instead of one -- topics used to
+# be the whole reply; a long session's topics + questions (with discussion)
+# + action_items needs more room to avoid truncating mid-JSON.
+MAX_OUTPUT_TOKENS = 2500
 
 
 def analyze(
@@ -43,7 +47,6 @@ def analyze(
     # for an unknown one (404, not 400: same "doesn't exist" convention as
     # every other lookup-by-id in this app).
     type_row = insight_types_svc.get_type(conn, meeting_type)
-    kind = type_row["kind"]
 
     model = effective(conn, "insights_model")
     if not model:
@@ -59,32 +62,34 @@ def analyze(
     if prompt.temperature is not None:
         config.temperature = prompt.temperature
 
-    # Keep the tail: the most recent lines are what a new question or topic
-    # shift is judged against, and previous_items/previous_topics already
-    # carries forward everything durable from earlier in the session.
+    # Keep the tail: the most recent lines are what a new question, topic
+    # shift or action item is judged against, and the previous_* lists
+    # already carry forward everything durable from earlier in the session.
     trimmed = transcript[-MAX_TRANSCRIPT_CHARS:]
 
-    if kind == "questions":
-        previous_items = (previous or {}).get("items") or []
-        values = {
-            "transcript": trimmed,
-            "previous_items": json.dumps(previous_items, ensure_ascii=False),
-        }
-    else:
-        previous_topics = (previous or {}).get("topics") or []
-        values = {
-            "transcript": trimmed,
-            "previous_topics": json.dumps(previous_topics, ensure_ascii=False),
-        }
+    previous = previous or {}
+    previous_topics = previous.get("topics") or []
+    previous_questions = previous.get("questions") or []
+    previous_action_items = previous.get("action_items") or []
+    values = {
+        "transcript": trimmed,
+        "previous_topics": json.dumps(previous_topics, ensure_ascii=False),
+        "previous_questions": json.dumps(previous_questions, ensure_ascii=False),
+        "previous_action_items": json.dumps(previous_action_items, ensure_ascii=False),
+    }
 
     system, user = prompt.render(values)
     parsed, _usage, _raw = llm_svc.chat_json(
         config, system, user, max_tokens=MAX_OUTPUT_TOKENS
     )
 
-    if kind == "questions":
-        items = parsed.get("items")
-        return {"items": items if isinstance(items, list) else previous_items}
-
     topics = parsed.get("topics")
-    return {"topics": topics if isinstance(topics, list) else previous_topics}
+    questions = parsed.get("questions")
+    action_items = parsed.get("action_items")
+    return {
+        "topics": topics if isinstance(topics, list) else previous_topics,
+        "questions": questions if isinstance(questions, list) else previous_questions,
+        "action_items": (
+            action_items if isinstance(action_items, list) else previous_action_items
+        ),
+    }

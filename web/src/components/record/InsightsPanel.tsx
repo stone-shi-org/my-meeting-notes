@@ -1,12 +1,26 @@
 import { useQuery } from '@tanstack/react-query';
-import { ChevronDown, Loader2, MessageCircleQuestion, Radar } from 'lucide-react';
+import {
+  CheckSquare,
+  ChevronDown,
+  Loader2,
+  MessageCircleQuestion,
+  Radar,
+} from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Badge, Card, Select } from '@/components/ui/primitives';
 import type { Caption } from '@/hooks/useLiveCaption';
 import { DEFAULT_INSIGHTS_INTERVAL_SEC, useInsights } from '@/hooks/useInsights';
+import type { InsightActionItem } from '@/hooks/useInsights';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import type { InsightType, SettingEntry } from '@/types/api';
+
+// Only the most recent entries are worth surfacing live -- a long recording
+// would otherwise grow each section unbounded. The full list still round-
+// trips as previous_topics/previous_questions/previous_action_items (see
+// useInsights), so capping the *display* here never affects what the model
+// carries forward.
+const MAX_VISIBLE = 5;
 
 /**
  * One topic or question card, foldable -- same rotate-chevron disclosure
@@ -60,12 +74,47 @@ function FoldCard({
 }
 
 /**
+ * Heading + fixed-height scrollable list -- the same overflow-y-auto recipe
+ * LiveTranscriptPanel.tsx and TranscriptPage.tsx use for their own panels,
+ * sized down for a sub-section rather than the whole card. `count` is the
+ * full (un-capped) list length, shown next to the heading so "showing the
+ * last 5 of 12" is visible even though only 5 render.
+ */
+function InsightSection({
+  title,
+  count,
+  emptyText,
+  children,
+}: {
+  title: string;
+  count: number;
+  emptyText: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <div>
+      <h3 className="flex items-baseline gap-1.5 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+        {title}
+        {count > 0 && <span className="font-normal text-fg-faint">({count})</span>}
+      </h3>
+      {count === 0 ? (
+        <p className="mt-1.5 text-sm text-fg-faint">{emptyText}</p>
+      ) : (
+        <ul className="mt-1.5 max-h-56 space-y-2 overflow-y-auto pr-1">{children}</ul>
+      )}
+    </div>
+  );
+}
+
+/**
  * Sits under LiveTranscriptPanel in the wide recorder layout: periodic LLM
- * analysis of the same rolling transcript, in one of two shapes depending on
- * the selected meeting type's `kind` -- see useInsights and
- * app/services/insights.py. The type list itself is admin-extensible (see
- * app/services/insight_types.py and Settings -> Meeting types), not a fixed
- * pair, so it's fetched here rather than hardcoded into this dropdown.
+ * analysis of the same rolling transcript, always in three sections -- see
+ * useInsights and app/services/insights.py. The type list itself is
+ * admin-extensible (see app/services/insight_types.py and Settings ->
+ * Meeting types), not a fixed pair, so it's fetched here rather than
+ * hardcoded into this dropdown. Every type produces the same combined shape
+ * now (topics + questions + action_items); what differs between types is
+ * tone/framing (a plain meeting vs. an interview), not what sections show.
  *
  * Reads its own model/interval settings rather than taking them as props:
  * every other value this panel needs (captions, enabled) comes from the
@@ -75,11 +124,11 @@ function FoldCard({
  */
 export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enabled: boolean }) {
   const [meetingType, setMeetingType] = useState<string>('');
-  // Manual fold overrides, keyed by topic.title / item.question -- both
+  // Manual fold overrides, keyed by topic.title / question.question -- both
   // persist unchanged across polls (the prompts guarantee it), so a key
   // survives long enough for "the user folded this" to still mean something
-  // next tick. Reset whenever the type changes: a question list from the
-  // other prompt shares no identity with this one.
+  // next tick. Reset whenever the type changes: a list from the other
+  // prompt shares no identity with this one.
   const [foldOverrides, setFoldOverrides] = useState<Map<string, boolean>>(new Map());
 
   const types = useQuery({
@@ -100,9 +149,6 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
     setFoldOverrides(new Map());
   }, [meetingType]);
 
-  const selectedType = types.data?.find((t) => t.slug === meetingType);
-  const kind = selectedType?.kind ?? 'topics';
-
   const settings = useQuery({
     queryKey: ['settings'],
     queryFn: () => api.get<{ settings: Record<string, SettingEntry> }>('/settings'),
@@ -117,10 +163,9 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
   const intervalSec =
     Number(settings.data?.settings.insights_interval_sec?.value) || DEFAULT_INSIGHTS_INTERVAL_SEC;
 
-  const { items, topics, error, loading } = useInsights(
+  const { topics, questions, actionItems, error, loading } = useInsights(
     captions,
     meetingType,
-    kind,
     enabled && insightsConfigured && !!meetingType,
     intervalSec,
   );
@@ -133,18 +178,20 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
       return next;
     });
 
-  // "Newest" per shape: the one topic the conversation is on right now, or
+  // "Newest" per list: the one topic the conversation is on right now, or
   // the last-appended question -- everything else starts folded so a long
   // session's list doesn't bury what just happened under everything before
   // it. A manual toggle (foldOverrides) always wins over this default.
-  const itemRows = useMemo(
+  const visibleTopics = useMemo(() => topics.slice(-MAX_VISIBLE), [topics]);
+  const visibleQuestions = useMemo(
     () =>
-      items.map((item, i) => ({
-        item,
-        isNewest: i === items.length - 1,
+      questions.slice(-MAX_VISIBLE).map((question, i, arr) => ({
+        question,
+        isNewest: i === arr.length - 1,
       })),
-    [items],
+    [questions],
   );
+  const visibleActionItems = useMemo(() => actionItems.slice(-MAX_VISIBLE), [actionItems]);
 
   return (
     <Card className="space-y-3 p-5">
@@ -199,48 +246,14 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
         </p>
       )}
 
-      {enabled &&
-        insightsConfigured &&
-        (kind === 'questions' ? (
-          itemRows.length === 0 ? (
-            <p className="text-sm text-fg-faint">Listening for questions worth prepping…</p>
-          ) : (
-            <ul className="space-y-3">
-              {itemRows.map(({ item, isNewest }, i) => {
-                const key = item.question;
-                const collapsed = foldOverrides.get(key) ?? !isNewest;
-                return (
-                  <FoldCard
-                    key={i}
-                    collapsed={collapsed}
-                    onToggle={() => toggleFold(key, !isNewest)}
-                    summary={
-                      <p className="flex items-start gap-1.5 text-sm font-medium">
-                        <MessageCircleQuestion
-                          className="mt-0.5 size-3.5 shrink-0 text-primary"
-                          aria-hidden
-                        />
-                        {item.question}
-                      </p>
-                    }
-                  >
-                    {item.answer_points.length > 0 && (
-                      <ul className="list-inside list-disc space-y-0.5 text-sm text-fg-muted">
-                        {item.answer_points.map((point, j) => (
-                          <li key={j}>{point}</li>
-                        ))}
-                      </ul>
-                    )}
-                  </FoldCard>
-                );
-              })}
-            </ul>
-          )
-        ) : topics.length === 0 ? (
-          <p className="text-sm text-fg-faint">Waiting to identify the first topic…</p>
-        ) : (
-          <ul className="space-y-2">
-            {topics.map((topic, i) => {
+      {enabled && insightsConfigured && (
+        <div className="space-y-4">
+          <InsightSection
+            title="Topics"
+            count={topics.length}
+            emptyText="Waiting to identify the first topic…"
+          >
+            {visibleTopics.map((topic, i) => {
               const key = topic.title;
               const collapsed = foldOverrides.get(key) ?? !topic.current;
               return (
@@ -265,8 +278,78 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
                 </FoldCard>
               );
             })}
-          </ul>
-        ))}
+          </InsightSection>
+
+          <InsightSection
+            title="Questions"
+            count={questions.length}
+            emptyText="Listening for questions worth prepping…"
+          >
+            {visibleQuestions.map(({ question, isNewest }, i) => {
+              const key = question.question;
+              const collapsed = foldOverrides.get(key) ?? !isNewest;
+              return (
+                <FoldCard
+                  key={i}
+                  collapsed={collapsed}
+                  onToggle={() => toggleFold(key, !isNewest)}
+                  summary={
+                    <p className="flex items-start gap-1.5 text-sm font-medium">
+                      <MessageCircleQuestion
+                        className="mt-0.5 size-3.5 shrink-0 text-primary"
+                        aria-hidden
+                      />
+                      {question.question}
+                    </p>
+                  }
+                >
+                  <div className="space-y-1.5">
+                    {question.ai_answer_points.length > 0 && (
+                      <ul className="list-inside list-disc space-y-0.5 text-sm text-fg-muted">
+                        {question.ai_answer_points.map((point, j) => (
+                          <li key={j}>{point}</li>
+                        ))}
+                      </ul>
+                    )}
+                    {question.discussion && (
+                      <p className="text-sm text-fg-muted">
+                        <span className="font-medium text-fg-subtle">Discussed: </span>
+                        {question.discussion}
+                      </p>
+                    )}
+                  </div>
+                </FoldCard>
+              );
+            })}
+          </InsightSection>
+
+          <InsightSection
+            title="Action items"
+            count={actionItems.length}
+            emptyText="No commitments or follow-ups spotted yet…"
+          >
+            {visibleActionItems.map((item, i) => (
+              <ActionItemRow key={i} item={item} />
+            ))}
+          </InsightSection>
+        </div>
+      )}
     </Card>
+  );
+}
+
+/** Action items are one-liners, so unlike topics/questions they aren't
+ * foldable -- there's nothing to hide underneath. */
+function ActionItemRow({ item }: { item: InsightActionItem }) {
+  return (
+    <li className="flex items-start gap-1.5 rounded-md border border-border bg-surface-2/50 p-3 text-sm">
+      <CheckSquare className="mt-0.5 size-3.5 shrink-0 text-fg-faint" aria-hidden />
+      <span className="flex-1 text-fg-muted">{item.text}</span>
+      {item.owner && (
+        <Badge size="sm" className="shrink-0">
+          {item.owner}
+        </Badge>
+      )}
+    </li>
   );
 }

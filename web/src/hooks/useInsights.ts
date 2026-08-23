@@ -2,26 +2,31 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Caption } from './useLiveCaption';
 
-/** A meeting-type slug (see app/services/insight_types.py) -- no longer a
- * fixed union now that the list is admin-extensible from Settings ->
- * Meeting types. What shape the response takes is `kind`, passed alongside
- * it, not derived from the slug string. */
-export type InsightKind = 'topics' | 'questions';
-
-export interface InsightItem {
-  question: string;
-  answer_points: string[];
-}
-
 export interface InsightTopic {
   title: string;
   summary: string;
   current: boolean;
 }
 
+export interface InsightQuestion {
+  question: string;
+  ai_answer_points: string[];
+  /** LLM summary of what participants actually said in response to this
+   * question, so far in the transcript -- "" if not addressed yet. Distinct
+   * from ai_answer_points, which is the model's own suggestion, not a report
+   * of what was actually discussed. */
+  discussion: string;
+}
+
+export interface InsightActionItem {
+  text: string;
+  owner: string | null;
+}
+
 interface AnalyzeResponse {
-  items?: InsightItem[];
   topics?: InsightTopic[];
+  questions?: InsightQuestion[];
+  action_items?: InsightActionItem[];
 }
 
 export const DEFAULT_INSIGHTS_INTERVAL_SEC = 30;
@@ -46,18 +51,19 @@ function renderTranscript(captions: Caption[]): string {
  * Stateless on the server by design (see insights.py's docstring), so this
  * hook is what actually holds the running state -- whatever analyze()
  * returned last call is sent back as `previous` on the next one, and the
- * server grows it. Switching meeting_type starts that over: a question list
- * or a topic list from the other prompt doesn't mean anything here.
+ * server grows all three lists together. Switching meeting_type starts that
+ * over: a topic/question/action-item list from the other prompt doesn't
+ * mean anything here.
  */
 export function useInsights(
   captions: Caption[],
   meetingType: string,
-  kind: InsightKind,
   enabled: boolean,
   intervalSec: number = DEFAULT_INSIGHTS_INTERVAL_SEC,
 ) {
-  const [items, setItems] = useState<InsightItem[]>([]);
   const [topics, setTopics] = useState<InsightTopic[]>([]);
+  const [questions, setQuestions] = useState<InsightQuestion[]>([]);
+  const [actionItems, setActionItems] = useState<InsightActionItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -71,8 +77,9 @@ export function useInsights(
   const inFlight = useRef(false);
 
   useEffect(() => {
-    setItems([]);
     setTopics([]);
+    setQuestions([]);
+    setActionItems([]);
     setError(null);
     previousRef.current = null;
   }, [meetingType]);
@@ -100,8 +107,9 @@ export function useInsights(
         if (cancelled) return;
         previousRef.current = result;
         setError(null);
-        if (kind === 'questions') setItems(result.items ?? []);
-        else setTopics(result.topics ?? []);
+        setTopics(result.topics ?? []);
+        setQuestions(result.questions ?? []);
+        setActionItems(result.action_items ?? []);
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Insights call failed');
       } finally {
@@ -116,7 +124,7 @@ export function useInsights(
       cancelled = true;
       window.clearInterval(id);
     };
-  }, [enabled, meetingType, kind, intervalSec]);
+  }, [enabled, meetingType, intervalSec]);
 
-  return { items, topics, error, loading };
+  return { topics, questions, actionItems, error, loading };
 }

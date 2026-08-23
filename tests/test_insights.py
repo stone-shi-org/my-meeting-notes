@@ -40,13 +40,33 @@ def mock_reply(payload: dict):
 
 
 @respx.mock
-def test_interview_carries_forward_and_appends_a_new_item(user_client):
-    previous = {"items": [{"question": "What's your notice period?", "answer_points": ["Two weeks"]}]}
+def test_interview_carries_forward_and_appends_a_new_question(user_client):
+    previous = {
+        "questions": [
+            {
+                "question": "What's your notice period?",
+                "ai_answer_points": ["Two weeks"],
+                "discussion": "",
+            }
+        ],
+        "topics": [],
+        "action_items": [],
+    }
     reply = {
-        "items": [
-            {"question": "What's your notice period?", "answer_points": ["Two weeks"]},
-            {"question": "Why are you leaving your current role?", "answer_points": ["Growth", "Scope"]},
-        ]
+        "topics": [],
+        "questions": [
+            {
+                "question": "What's your notice period?",
+                "ai_answer_points": ["Two weeks"],
+                "discussion": "",
+            },
+            {
+                "question": "Why are you leaving your current role?",
+                "ai_answer_points": ["Growth", "Scope"],
+                "discussion": "Said they want more scope.",
+            },
+        ],
+        "action_items": [],
     }
     mock_reply(reply)
 
@@ -60,9 +80,10 @@ def test_interview_carries_forward_and_appends_a_new_item(user_client):
     )
     assert resp.status_code == 200, resp.text
     body = resp.json()
-    assert len(body["items"]) == 2
-    assert body["items"][0] == previous["items"][0]
-    assert body["items"][1]["question"] == "Why are you leaving your current role?"
+    assert len(body["questions"]) == 2
+    assert body["questions"][0] == previous["questions"][0]
+    assert body["questions"][1]["question"] == "Why are you leaving your current role?"
+    assert body["questions"][1]["discussion"] == "Said they want more scope."
 
 
 @respx.mock
@@ -71,7 +92,9 @@ def test_general_marks_exactly_the_new_topic_current(user_client):
         "topics": [
             {"title": "Q3 roadmap", "summary": "Reviewed and agreed.", "current": False},
             {"title": "Hiring plan", "summary": "Discussing headcount for platform team.", "current": True},
-        ]
+        ],
+        "questions": [],
+        "action_items": [],
     }
     mock_reply(reply)
 
@@ -80,7 +103,11 @@ def test_general_marks_exactly_the_new_topic_current(user_client):
         json={
             "meeting_type": "general",
             "transcript": "Room: Let's move to hiring. Me: We need two more engineers.",
-            "previous": {"topics": [{"title": "Q3 roadmap", "summary": "Reviewed.", "current": True}]},
+            "previous": {
+                "topics": [{"title": "Q3 roadmap", "summary": "Reviewed.", "current": True}],
+                "questions": [],
+                "action_items": [],
+            },
         },
     )
     assert resp.status_code == 200, resp.text
@@ -90,11 +117,39 @@ def test_general_marks_exactly_the_new_topic_current(user_client):
 
 
 @respx.mock
-def test_falls_back_to_previous_when_the_model_returns_a_malformed_shape(user_client):
-    # "items" missing entirely -- chat_json still returns *a* dict, just not
-    # the shape this endpoint expects back.
+def test_general_appends_a_new_action_item(user_client):
+    reply = {
+        "topics": [],
+        "questions": [],
+        "action_items": [{"text": "Send the deck to the client", "owner": "Me"}],
+    }
+    mock_reply(reply)
+
+    resp = user_client.post(
+        "/api/insights/analyze",
+        json={
+            "meeting_type": "general",
+            "transcript": "Me: I'll send the deck to the client tonight.",
+            "previous": {"topics": [], "questions": [], "action_items": []},
+        },
+    )
+    assert resp.status_code == 200, resp.text
+    action_items = resp.json()["action_items"]
+    assert action_items == [{"text": "Send the deck to the client", "owner": "Me"}]
+
+
+@respx.mock
+def test_falls_back_to_previous_per_key_when_the_model_returns_a_malformed_shape(user_client):
+    # None of the three expected keys present -- chat_json still returns *a*
+    # dict, just not the shape this endpoint expects back.
     mock_reply({"unexpected": True})
-    previous = {"items": [{"question": "Tell me about yourself.", "answer_points": ["Background"]}]}
+    previous = {
+        "topics": [{"title": "Q3 roadmap", "summary": "Reviewed.", "current": True}],
+        "questions": [
+            {"question": "Tell me about yourself.", "ai_answer_points": ["Background"], "discussion": ""}
+        ],
+        "action_items": [{"text": "Follow up next week", "owner": None}],
+    }
 
     resp = user_client.post(
         "/api/insights/analyze",

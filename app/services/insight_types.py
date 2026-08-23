@@ -1,16 +1,17 @@
-"""Meeting/insight types -- a name, an output shape, and a prompt, stored in
-the ``insight_types`` table (see db.py's SCHEMA and its two seeded rows).
+"""Meeting/insight types -- a name and a prompt, stored in the
+``insight_types`` table (see db.py's SCHEMA and its two seeded rows).
 
 Replaces what used to be a hardcoded 'interview'/'general' enum with two
 fixed prompt files: this list is admin-extensible at runtime from Settings
 -> Meeting types (see app/routers/insight_types.py), and every row -- built
 -in or added later -- carries its own prompt instead of pointing at a file.
 
-``kind`` decides what services/insights.analyze expects the model to return
-and carry forward across calls, and what InsightsPanel renders:
-  - 'topics'    -- a running topic list (previous_topics / topics)
-  - 'questions' -- a question/answer list (previous_items / items)
-There is no third shape; every type picks one of these two at creation time.
+Every type's prompt produces the same combined shape -- topics + questions +
+action_items in one call (see services/insights.analyze and db.py's
+_DEFAULT_GENERAL_PROMPT / _DEFAULT_INTERVIEW_PROMPT) -- so what differs
+between types is tone/framing (a plain meeting vs. an interview), not the
+output shape. The ``kind`` column still exists on the row (see db.py) but is
+no longer read here or anywhere else; it predates this combined shape.
 """
 
 from __future__ import annotations
@@ -22,14 +23,10 @@ from app.db import utcnow
 from app.errors import NotFoundError, ValidationError
 from app.services import prompts as prompts_svc
 
-KINDS = ("topics", "questions")
-
-# What services/insights.py's prompt needs besides {{transcript}}, depending
-# on which list it's growing across calls.
-_REQUIRED_PLACEHOLDER_BY_KIND = {
-    "topics": "previous_topics",
-    "questions": "previous_items",
-}
+# What every insight_types prompt must reference besides {{transcript}} --
+# the three lists services/insights.py grows across calls and carries
+# forward. Fixed now that every type produces the same combined shape.
+REQUIRED_PLACEHOLDERS = ("previous_topics", "previous_questions", "previous_action_items")
 
 
 def _slugify(name: str) -> str:
@@ -53,9 +50,7 @@ def _unique_slug(conn: sqlite3.Connection, name: str) -> str:
     return slug
 
 
-def _validate(kind: str, prompt: str) -> None:
-    if kind not in KINDS:
-        raise ValidationError(f"Unknown kind {kind!r}; must be one of {', '.join(KINDS)}")
+def _validate(prompt: str) -> None:
     if not (prompt or "").strip():
         raise ValidationError("A prompt is required")
 
@@ -65,7 +60,7 @@ def _validate(kind: str, prompt: str) -> None:
     prompts_svc.load_override("insight_type", prompt)
 
     present = prompts_svc.find_placeholders(prompt)
-    required = {"transcript", _REQUIRED_PLACEHOLDER_BY_KIND[kind]}
+    required = {"transcript", *REQUIRED_PLACEHOLDERS}
     missing = required - present
     if missing:
         raise ValidationError(
@@ -85,11 +80,11 @@ def get_type(conn: sqlite3.Connection, slug: str) -> sqlite3.Row:
     return row
 
 
-def create_type(conn: sqlite3.Connection, *, name: str, kind: str, prompt: str) -> sqlite3.Row:
+def create_type(conn: sqlite3.Connection, *, name: str, prompt: str) -> sqlite3.Row:
     name = (name or "").strip()
     if not name:
         raise ValidationError("A name is required")
-    _validate(kind, prompt)
+    _validate(prompt)
 
     slug = _unique_slug(conn, name)
     now = utcnow()
@@ -97,9 +92,9 @@ def create_type(conn: sqlite3.Connection, *, name: str, kind: str, prompt: str) 
         "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM insight_types"
     ).fetchone()[0]
     conn.execute(
-        "INSERT INTO insight_types (slug, name, kind, prompt, sort_order, created_at, updated_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (slug, name, kind, prompt, next_order, now, now),
+        "INSERT INTO insight_types (slug, name, prompt, sort_order, created_at, updated_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (slug, name, prompt, next_order, now, now),
     )
     return get_type(conn, slug)
 
@@ -109,7 +104,6 @@ def update_type(
     slug: str,
     *,
     name: str | None = None,
-    kind: str | None = None,
     prompt: str | None = None,
 ) -> sqlite3.Row:
     """Edits in place -- the slug never changes once created (see module
@@ -117,15 +111,14 @@ def update_type(
     a still-running recording."""
     row = get_type(conn, slug)
     next_name = row["name"] if name is None else name.strip()
-    next_kind = row["kind"] if kind is None else kind
     next_prompt = row["prompt"] if prompt is None else prompt
     if not next_name:
         raise ValidationError("A name is required")
-    _validate(next_kind, next_prompt)
+    _validate(next_prompt)
 
     conn.execute(
-        "UPDATE insight_types SET name = ?, kind = ?, prompt = ?, updated_at = ? WHERE slug = ?",
-        (next_name, next_kind, next_prompt, utcnow(), slug),
+        "UPDATE insight_types SET name = ?, prompt = ?, updated_at = ? WHERE slug = ?",
+        (next_name, next_prompt, utcnow(), slug),
     )
     return get_type(conn, slug)
 

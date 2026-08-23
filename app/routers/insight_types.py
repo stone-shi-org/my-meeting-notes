@@ -25,28 +25,25 @@ log = get_logger("insight_types")
 
 class InsightTypeCreate(BaseModel):
     name: str = Field(min_length=1, max_length=200)
-    kind: str
     prompt: str = Field(min_length=1, max_length=50_000)
 
 
 class InsightTypeUpdate(BaseModel):
     # None means "leave this alone" -- same convention as ThreadUpdateRequest
     # (see CLAUDE.md's Groups section) -- so a caller editing just the prompt
-    # doesn't have to round-trip name/kind it never looked at.
+    # doesn't have to round-trip name it never looked at.
     name: str | None = Field(default=None, min_length=1, max_length=200)
-    kind: str | None = None
     prompt: str | None = Field(default=None, min_length=1, max_length=50_000)
 
 
 def _public(row: sqlite3.Row) -> dict:
-    return {"slug": row["slug"], "name": row["name"], "kind": row["kind"]}
+    return {"slug": row["slug"], "name": row["name"]}
 
 
 def _full(row: sqlite3.Row) -> dict:
     return {
         "slug": row["slug"],
         "name": row["name"],
-        "kind": row["kind"],
         "prompt": row["prompt"],
         "sort_order": row["sort_order"],
         "created_at": row["created_at"],
@@ -77,7 +74,7 @@ def create_insight_type(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     row = insight_types_svc.create_type(
-        conn, name=payload.name, kind=payload.kind, prompt=payload.prompt
+        conn, name=payload.name, prompt=payload.prompt
     )
     log.info("admin %s created meeting type %s", admin.username, row["slug"])
     return _full(row)
@@ -91,7 +88,7 @@ def update_insight_type(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     row = insight_types_svc.update_type(
-        conn, slug, name=payload.name, kind=payload.kind, prompt=payload.prompt
+        conn, slug, name=payload.name, prompt=payload.prompt
     )
     log.info("admin %s edited meeting type %s", admin.username, slug)
     return _full(row)
