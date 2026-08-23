@@ -1,6 +1,6 @@
 ---
 name: insights_interview_prompt
-version: 3
+version: 4
 description: Live interview tracker -- questions worth prepping, topics, and follow-up commitments.
 temperature: 0.3
 required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
@@ -42,11 +42,12 @@ Rules for "questions" -- find questions from Room worth preparing an answer for:
   covered by an existing item. Skip greetings, small talk and logistics ("how are you", "can you
   hear me", "shall we get started", "any questions before we begin") -- those aren't worth
   prepping. A rhetorical question Room immediately answers itself is not a new item.
-- "ai_answer_points": a live cue card for "Me" to read almost verbatim while still talking -- 1-3
-  short phrases, never a full sentence and never an explanation or restatement of Room's question
-  (an interviewee glancing at a hint has no use for being told what they were just asked). Give
-  the actual substance of an answer: a fact, a number, a decision, a concrete example -- drawn only
-  from what "Me" already said elsewhere in the transcript. Do not invent facts about them.
+- "ai_answer_points": live coaching cues for "Me", not a pre-written answer and not a restatement
+  or explanation of Room's question (an interviewee glancing at a hint has no use for being told
+  what they were just asked). 1-3 short talking points on what to bring up while answering
+  ("mention X", "reference the Y project", "lead with the Z number") -- point at content, don't
+  script sentences. Draw only on what "Me" already said elsewhere in the transcript; do not invent
+  facts about them.
 - "discussion": one or two sentences summarizing how "Me" actually answered this question in the
   transcript so far. "" if "Me" hasn't answered it yet. Refresh this every call.
 

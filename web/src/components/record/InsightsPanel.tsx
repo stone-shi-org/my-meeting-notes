@@ -305,11 +305,16 @@ export function InsightsPanel({ captions, enabled }: { captions: Caption[]; enab
                 >
                   <div className="space-y-1.5">
                     {question.ai_answer_points.length > 0 && (
-                      <ul className="list-inside list-disc space-y-0.5 text-sm text-fg-muted">
-                        {question.ai_answer_points.map((point, j) => (
-                          <li key={j}>{point}</li>
-                        ))}
-                      </ul>
+                      <div>
+                        <p className="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+                          Answer suggestion
+                        </p>
+                        <ul className="mt-0.5 list-inside list-disc space-y-0.5 text-sm text-fg-muted">
+                          {question.ai_answer_points.map((point, j) => (
+                            <li key={j}>{point}</li>
+                          ))}
+                        </ul>
+                      </div>
                     )}
                     {question.discussion && (
                       <p className="text-sm text-fg-muted">
