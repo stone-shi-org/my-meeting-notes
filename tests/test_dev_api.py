@@ -2,12 +2,27 @@
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
+import respx
 
 from app.config import reset_settings_cache
 from app.db import get_conn
+
+# Same fixed test endpoint test_chat.py's autouse llm_settings fixture uses --
+# pinned explicitly rather than left to resolve from whatever MMN_LLM_BASE_URL
+# a real .env happens to set, since that file is untracked and varies by machine.
+LLM_URL = "https://llm.test/v1/chat/completions"
+
+
+@pytest.fixture(autouse=True)
+def llm_settings(monkeypatch):
+    monkeypatch.setenv("MMN_LLM_BASE_URL", "https://llm.test/v1")
+    monkeypatch.setenv("MMN_LLM_API_KEY", "sk-test")
+    reset_settings_cache()
 
 
 @pytest.fixture(autouse=True)
@@ -304,15 +319,65 @@ def seed_thread(client):
     return thread, meeting
 
 
-def stub_llm(monkeypatch, payload):
-    from app.services import llm as llm_svc
+def stream_body(text: str) -> bytes:
+    """An SSE body matching the real omniroute chunk shape: one content delta
+    holding the whole reply, then a terminal chunk, then ``[DONE]`` -- same
+    shape as test_chat.py's ``stream_body``, just a single piece since the
+    dev-seed reply is one JSON object rather than prose to render token by
+    token.
+    """
+    frames = [
+        {"choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}]},
+        {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]},
+    ]
+    body = "".join(f"data: {json.dumps(f)}\n\n" for f in frames)
+    return (body + "data: [DONE]\n\n").encode()
 
-    monkeypatch.setattr(
-        llm_svc, "chat_json", lambda *a, **k: (payload, {}, "raw"), raising=True
+
+def stream_response(payload: dict) -> httpx.Response:
+    return httpx.Response(
+        200, content=stream_body(json.dumps(payload)), headers={"content-type": "text/event-stream"}
     )
 
 
-def test_generate_returns_drafts_without_writing(user_client, monkeypatch):
+def parse_sse_frames(text: str) -> list[tuple[str, dict]]:
+    frames = []
+    for block in text.strip("\n").split("\n\n"):
+        if not block or block.startswith(":"):
+            continue
+        event, data = "message", None
+        for line in block.split("\n"):
+            if line.startswith("event:"):
+                event = line[len("event:"):].strip()
+            elif line.startswith("data:"):
+                data = line[len("data:"):].strip()
+        if data is not None:
+            frames.append((event, json.loads(data)))
+    return frames
+
+
+def stub_llm(payload: dict):
+    """Mocks the LLM endpoint the ``generate`` route now streams from -- see
+    ``dev_data.stream_generate_response``."""
+    respx.post(LLM_URL).mock(return_value=stream_response(payload))
+
+
+def generate(client, integration_id, thread_id, **fields) -> dict:
+    """POSTs to ``/generate`` and returns the ``done`` event's payload, failing
+    loudly if the stream ended in an ``error`` frame instead."""
+    resp = client.post(
+        f"/api/dev/integrations/{integration_id}/generate",
+        json={"thread_id": thread_id, **fields},
+    )
+    assert resp.status_code == 200, resp.text
+    frames = parse_sse_frames(resp.text)
+    error = next((data for event, data in frames if event == "error"), None)
+    assert error is None, error
+    return next(data for event, data in frames if event == "done")
+
+
+@respx.mock
+def test_generate_returns_drafts_without_writing(user_client):
     """A model that returns half a batch of nonsense should cost a click, not a
     cleanup -- so nothing is persisted until the user accepts it."""
     account = connect(user_client)
@@ -320,14 +385,9 @@ def test_generate_returns_drafts_without_writing(user_client, monkeypatch):
 
     reply = {"items": [dict(i) for i in GOOD_REPLY["items"]]}
     reply["items"][0]["anchor_meeting_id"] = meeting["id"]
-    stub_llm(monkeypatch, reply)
+    stub_llm(reply)
 
-    resp = user_client.post(
-        f"/api/dev/integrations/{account['id']}/generate",
-        json={"thread_id": thread["id"], "count": 5},
-    )
-    assert resp.status_code == 200
-    drafts = resp.json()["drafts"]
+    drafts = generate(user_client, account["id"], thread["id"], count=5)["drafts"]
     assert [d["kind"] for d in drafts] == ["emails", "events"]
     assert drafts[0]["anchor_meeting_id"] == meeting["id"]
     assert drafts[1]["expected_relevant"] is False
@@ -335,55 +395,46 @@ def test_generate_returns_drafts_without_writing(user_client, monkeypatch):
     assert user_client.get(f"/api/dev/integrations/{account['id']}/emails").json() == []
 
 
-def test_a_draft_anchored_to_an_invented_meeting_keeps_the_item(user_client, monkeypatch):
+@respx.mock
+def test_a_draft_anchored_to_an_invented_meeting_keeps_the_item(user_client):
     account = connect(user_client)
     thread, _ = seed_thread(user_client)
     stub_llm(
-        monkeypatch,
         {"items": [{"kind": "email", "subject": "Hi", "date_mode": "anchored",
                     "anchor_meeting_id": 9999, "offset_minutes": 60}]},
     )
 
-    drafts = user_client.post(
-        f"/api/dev/integrations/{account['id']}/generate",
-        json={"thread_id": thread["id"]},
-    ).json()["drafts"]
+    drafts = generate(user_client, account["id"], thread["id"])["drafts"]
     assert drafts[0]["date_mode"] == "relative"
     assert drafts[0]["anchor_meeting_id"] is None
 
 
-def test_unusable_drafts_are_dropped_not_fatal(user_client, monkeypatch):
+@respx.mock
+def test_unusable_drafts_are_dropped_not_fatal(user_client):
     account = connect(user_client)
     thread, _ = seed_thread(user_client)
     stub_llm(
-        monkeypatch,
         {"items": ["not an object", {"kind": "email"}, {"kind": "email", "subject": "Keeper"}]},
     )
 
-    drafts = user_client.post(
-        f"/api/dev/integrations/{account['id']}/generate",
-        json={"thread_id": thread["id"]},
-    ).json()["drafts"]
+    drafts = generate(user_client, account["id"], thread["id"])["drafts"]
     assert [d["subject"] for d in drafts] == ["Keeper"]
 
 
-def test_an_empty_reply_is_not_an_error(user_client, monkeypatch):
+@respx.mock
+def test_an_empty_reply_is_not_an_error(user_client):
     account = connect(user_client)
     thread, _ = seed_thread(user_client)
-    stub_llm(monkeypatch, {"items": []})
+    stub_llm({"items": []})
 
-    resp = user_client.post(
-        f"/api/dev/integrations/{account['id']}/generate",
-        json={"thread_id": thread["id"]},
-    )
-    assert resp.status_code == 200
-    assert resp.json()["drafts"] == []
+    assert generate(user_client, account["id"], thread["id"])["drafts"] == []
 
 
-def test_cannot_generate_against_someone_elses_thread(user_client, other_user_client, monkeypatch):
+@respx.mock
+def test_cannot_generate_against_someone_elses_thread(user_client, other_user_client):
     account = connect(other_user_client, "Bob's")
     thread, _ = seed_thread(user_client)
-    stub_llm(monkeypatch, {"items": []})
+    stub_llm({"items": []})
 
     resp = other_user_client.post(
         f"/api/dev/integrations/{account['id']}/generate",

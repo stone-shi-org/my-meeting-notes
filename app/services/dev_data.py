@@ -10,17 +10,23 @@ ownership from a user id -- there is one authorisation point, and it is the rout
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 
 from app.db import get_conn, utcnow
-from app.errors import NotFoundError, ValidationError
+from app.errors import AppError, LLMError, NotFoundError, ValidationError
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 from app.services.providers.dev import DATE_MODES, MAX_REPEAT
 
 log = get_logger("dev_data")
+
+# Same value as chat.py/home_chat.py/meeting_chat.py's KEEPALIVE_SEC: long enough
+# that a normal LLM call never triggers it, short enough that an intermediate
+# proxy never decides a silent connection is dead.
+KEEPALIVE_SEC = 15.0
 
 # What a client may set, per table. Writing the list out rather than accepting a
 # dict keeps a typo in the SPA from silently creating nothing, and keeps
@@ -239,50 +245,130 @@ def thread_brief(conn: sqlite3.Connection, thread_id: int) -> dict:
     }
 
 
-def generate_sync(db_path, *, thread_id: int, count: int, model: str | None = None) -> dict:
-    """Draft fake email and calendar traffic around a thread. One LLM call.
+def _sse(event: str, data: dict) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
-    Blocking (an HTTP round trip), so the route runs it through ``to_thread`` --
-    the same shape as ``notes.generate_title_sync`` and
-    ``next_step.generate_sync``.
+
+async def _stream_llm_json(config: llm_svc.LLMConfig, system: str, user: str,
+                            queue: "asyncio.Queue[str | None]") -> dict:
+    """Stream one LLM call, forwarding a ``progress`` frame as content arrives,
+    and retry once if the reply is not parseable JSON -- the same retry
+    ``chat_json`` does, just over ``achat_stream`` instead of one buffered POST.
+
+    The generation is a single JSON object, not prose, so there is nothing
+    sensible to render live token by token; ``progress`` only reports a running
+    character count, purely so the caller can show the request is still alive
+    instead of one long silent wait -- which is the actual bug this replaces.
+    """
+    messages = [
+        {"role": "system", "content": system},
+        {"role": "user", "content": user},
+    ]
+    payload = {
+        "model": config.model,
+        "messages": messages,
+        "temperature": config.temperature,
+        "stream": True,
+        "include_reasoning": False,
+    }
+
+    async def _once() -> str:
+        raw = ""
+        async for delta in llm_svc.achat_stream(config, payload):
+            raw += delta
+            await queue.put(_sse("progress", {"chars": len(raw)}))
+        return raw
+
+    raw = await _once()
+    try:
+        return llm_svc.extract_json(raw)
+    except LLMError:
+        log.warning("dev seed generation returned unparseable JSON; retrying once")
+        messages.extend(
+            [
+                {"role": "assistant", "content": raw},
+                {
+                    "role": "user",
+                    "content": "Your previous reply was not valid JSON. Return "
+                               "only the JSON object, with no prose and no code fence.",
+                },
+            ]
+        )
+        raw = await _once()
+        return llm_svc.extract_json(raw)
+
+
+async def _produce_generate(
+    queue: "asyncio.Queue[str | None]", db_path, thread_id: int, count: int, model: str | None,
+) -> None:
+    """Draft fake email and calendar traffic around a thread. One LLM call,
+    streamed over SSE (``progress``/``done``/``error``) instead of one blocking
+    POST -- a batch generation runs long enough that a proxy or the browser
+    gave up on a silent connection well before the model finished, the same
+    fix as ``chat.stream_chat_response``.
 
     **Nothing is written.** The drafts come back for the caller to accept, edit
     or discard, and accepting goes through :func:`create_item` like the manual
     form does. That is what makes malformed model output a non-event rather than
     a half-populated table, and it keeps one write path.
     """
-    count = max(1, min(count, MAX_GENERATED))
+    try:
+        count = max(1, min(count, MAX_GENERATED))
 
-    with get_conn(db_path) as conn:
-        brief = thread_brief(conn, thread_id)
-        config = llm_svc.LLMConfig.from_db(conn, model_override=model)
+        with get_conn(db_path) as conn:
+            brief = thread_brief(conn, thread_id)
+            config = llm_svc.LLMConfig.from_db(conn, model_override=model)
 
-    prompt = prompts_svc.load("dev_seed_prompt")
-    if prompt.temperature is not None:
-        config.temperature = prompt.temperature
+        prompt = prompts_svc.load("dev_seed_prompt")
+        if prompt.temperature is not None:
+            config.temperature = prompt.temperature
 
-    meetings_text = "\n".join(
-        f"- id={m['id']} | {m['meeting_at']} | {m['title']}"
-        + (f"\n    {m['tldr']}" if m["tldr"] else "")
-        for m in brief["meetings"]
-    ) or "(no meetings on this thread yet)"
+        meetings_text = "\n".join(
+            f"- id={m['id']} | {m['meeting_at']} | {m['title']}"
+            + (f"\n    {m['tldr']}" if m["tldr"] else "")
+            for m in brief["meetings"]
+        ) or "(no meetings on this thread yet)"
 
-    system, user = prompt.render(
-        {
-            "thread_title": brief["title"],
-            "thread_description": brief["description"] or "(none)",
-            "meetings": meetings_text,
-            "count": str(count),
-        }
-    )
+        system, user = prompt.render(
+            {
+                "thread_title": brief["title"],
+                "thread_description": brief["description"] or "(none)",
+                "meetings": meetings_text,
+                "count": str(count),
+            }
+        )
 
-    parsed, _, raw = llm_svc.chat_json(config, system, user)
-    drafts = _coerce_drafts(parsed, brief)
+        parsed = await _stream_llm_json(config, system, user, queue)
+        drafts = _coerce_drafts(parsed, brief)
 
-    if not drafts:
-        log.warning("dev seed generation returned nothing usable: %s", raw[:300])
+        if not drafts:
+            log.warning("dev seed generation returned nothing usable for thread %s", thread_id)
 
-    return {"drafts": drafts[:count], "model": config.model}
+        await queue.put(_sse("done", {"drafts": drafts[:count], "model": config.model}))
+    except AppError as exc:
+        await queue.put(_sse("error", {"code": exc.code, "message": exc.message}))
+    finally:
+        await queue.put(None)
+
+
+async def stream_generate_response(db_path, *, thread_id: int, count: int, model: str | None = None):
+    """SSE generator for ``StreamingResponse``, same shape as
+    ``chat.stream_chat_response``: the real work runs in a background task
+    feeding ``queue``, decoupled from this generator so a disconnected client
+    does not cut off a generation that is already spending LLM budget.
+    """
+    queue: asyncio.Queue[str | None] = asyncio.Queue()
+    asyncio.create_task(_produce_generate(queue, db_path, thread_id, count, model))
+
+    while True:
+        try:
+            item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
+        except asyncio.TimeoutError:
+            yield ": keepalive\n\n"
+            continue
+        if item is None:
+            return
+        yield item
 
 
 def _coerce_drafts(parsed: dict, brief: dict) -> list[dict]:

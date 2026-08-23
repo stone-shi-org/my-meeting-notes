@@ -15,17 +15,20 @@ import { useState } from 'react';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
-import { api } from '@/lib/api';
+import { api, notifyUnauthorized } from '@/lib/api';
+import { parseSseFrames } from '@/lib/chatStream';
 import { cn } from '@/lib/cn';
-import type {
-  DevDateMode,
-  DevDraft,
-  DevEmail,
-  DevEvent,
-  Integration,
-  Meeting,
-  Paginated,
-  Thread,
+import {
+  ApiError,
+  type ApiErrorBody,
+  type DevDateMode,
+  type DevDraft,
+  type DevEmail,
+  type DevEvent,
+  type Integration,
+  type Meeting,
+  type Paginated,
+  type Thread,
 } from '@/types/api';
 
 const DEV_PROVIDER = 'dev';
@@ -500,6 +503,71 @@ function ItemList({
 /* Generation                                                                 */
 /* -------------------------------------------------------------------------- */
 
+interface GenerateResult {
+  drafts: DevDraft[];
+  model: string;
+}
+
+/**
+ * POSTs to `/generate` and reads the SSE reply (`progress`/`done`/`error`)
+ * instead of one blocking JSON response. A batch draft is a single LLM call
+ * that can run long enough for the browser or a proxy in front of it to give
+ * up on a connection sitting silent the whole time -- the same reasoning as
+ * `lib/chatStream.ts`'s `streamChat`, reusing its frame parser since the wire
+ * format is the same `event:`/`data:` shape. `onProgress` only reports a
+ * running character count: the reply is one JSON object, not prose, so there
+ * is nothing to render token by token -- the count exists purely so the
+ * button doesn't look frozen while the model is still working.
+ */
+async function streamGenerate(
+  integrationId: number,
+  body: { thread_id: number; count: number },
+  onProgress: (chars: number) => void,
+): Promise<GenerateResult> {
+  const response = await fetch(`/api/dev/integrations/${integrationId}/generate`, {
+    method: 'POST',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+
+  if (!response.ok) {
+    let errBody: ApiErrorBody | undefined;
+    let message = response.statusText;
+    let code = 'http_error';
+    try {
+      errBody = (await response.json()) as ApiErrorBody;
+      message = errBody?.error?.message ?? message;
+      code = errBody?.error?.code ?? code;
+    } catch {
+      /* non-JSON error body */
+    }
+    if (response.status === 401) notifyUnauthorized();
+    throw new ApiError(response.status, code, message, errBody);
+  }
+  if (!response.body) throw new Error('Empty response body');
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) throw new Error('Generation stream ended without a result');
+
+    buffer += decoder.decode(value, { stream: true });
+    const { frames, rest } = parseSseFrames(buffer);
+    buffer = rest;
+
+    for (const frame of frames) {
+      const data = JSON.parse(frame.data);
+      if (frame.event === 'progress') onProgress(data.chars);
+      else if (frame.event === 'done') return data as GenerateResult;
+      else if (frame.event === 'error') throw new ApiError(502, data.code, data.message, { error: data });
+    }
+  }
+}
+
 function GeneratePanel({
   integrationId,
   threads,
@@ -512,13 +580,13 @@ function GeneratePanel({
   const [count, setCount] = useState(8);
   const [drafts, setDrafts] = useState<DevDraft[] | null>(null);
   const [accepting, setAccepting] = useState(false);
+  const [progress, setProgress] = useState(0);
 
   const generate = useMutation({
-    mutationFn: () =>
-      api.post<{ drafts: DevDraft[] }>(`/dev/integrations/${integrationId}/generate`, {
-        thread_id: threadId,
-        count,
-      }),
+    mutationFn: () => {
+      setProgress(0);
+      return streamGenerate(integrationId, { thread_id: threadId as number, count }, setProgress);
+    },
     onSuccess: (result) => setDrafts(result.drafts),
   });
 
@@ -587,6 +655,10 @@ function GeneratePanel({
           Generate
         </Button>
       </div>
+
+      {generate.isPending && progress > 0 && (
+        <p className="mt-3 text-sm text-fg-subtle">Generating… {progress} characters so far</p>
+      )}
 
       {generate.error && (
         <p role="alert" className="mt-3 text-sm text-danger-ink">

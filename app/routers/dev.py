@@ -12,10 +12,10 @@ cannot reach another user's fixtures.
 
 from __future__ import annotations
 
-import asyncio
 import sqlite3
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.deps import CurrentUser, active_user, get_db
@@ -202,15 +202,19 @@ async def generate(
     payload: DevGenerateRequest,
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
-) -> dict:
+) -> StreamingResponse:
     """Draft items around a thread, for the caller to review.
 
-    Returns drafts and writes nothing. Accepting one POSTs it back through the
-    ordinary create route, so there is a single write path and a model that
-    returns half a batch of nonsense costs you a click rather than a cleanup.
+    Streamed as SSE (``progress``/``done``/``error``), the same contract as
+    ``chat.send_chat_message``: a batch generation is a long enough LLM call
+    that one blocking POST left the connection silent long enough for a proxy
+    or the browser to give up on it. Returns drafts and writes nothing --
+    accepting one POSTs it back through the ordinary create route, so there is
+    a single write path and a model that returns half a batch of nonsense
+    costs you a click rather than a cleanup.
 
-    Off the event loop for the same reason ``threads.refresh_next_step`` is: it
-    is a blocking HTTP round trip to the LLM.
+    Ownership is checked synchronously here, before the stream starts, exactly
+    like ``chat.send_chat_message`` checks thread access up front.
     """
     _own_integration(conn, integration_id, user)
     # Authorise the thread as its own object -- a thread id is not covered by
@@ -221,15 +225,20 @@ async def generate(
     if thread is None or (thread["owner_id"] != user.id and not user.is_admin):
         raise NotFoundError("Thread not found")
 
-    result = await asyncio.to_thread(
-        dev_data.generate_sync,
-        get_settings().db_path,
-        thread_id=payload.thread_id,
-        count=payload.count,
-        model=payload.model,
-    )
     log.info(
-        "user %s generated %d dev draft(s) for thread %s",
-        user.username, len(result["drafts"]), payload.thread_id,
+        "user %s generating dev draft(s) for thread %s", user.username, payload.thread_id
     )
-    return result
+    return StreamingResponse(
+        dev_data.stream_generate_response(
+            get_settings().db_path,
+            thread_id=payload.thread_id,
+            count=payload.count,
+            model=payload.model,
+        ),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )

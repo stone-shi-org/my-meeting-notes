@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DevDataPanel } from '../dev/DevDataPanel';
 import type { DevDraft, DevEmail, Integration, Meeting, Paginated, Thread } from '@/types/api';
 
@@ -213,14 +213,41 @@ describe('draft review', () => {
     },
   ];
 
+  /** `/generate` is now an SSE stream (see DevDataPanel's `streamGenerate`),
+   * not a plain `api.post` round trip, so it is exercised through a stubbed
+   * `fetch` returning one `done` frame instead of through the `api` mock. */
+  function stubGenerateStream(drafts: DevDraft[]) {
+    const body = `event: done\ndata: ${JSON.stringify({ drafts, model: 'test-model' })}\n\n`;
+    const encoder = new TextEncoder();
+    let sent = false;
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (sent) return { value: undefined, done: true };
+            sent = true;
+            return { value: encoder.encode(body), done: false };
+          },
+        }),
+      },
+      json: async () => ({}),
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    return fetchMock;
+  }
+
   beforeEach(() => {
     stub();
-    vi.mocked(api.post).mockImplementation((path: string) =>
-      Promise.resolve((path.endsWith('/generate') ? { drafts: DRAFTS } : {}) as never),
-    );
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   async function generate(user: ReturnType<typeof userEvent.setup>) {
+    stubGenerateStream(DRAFTS);
     renderPanel();
     await user.selectOptions(await screen.findByLabelText('Thread'), '1');
     await user.click(screen.getByRole('button', { name: 'Generate' }));
@@ -231,8 +258,7 @@ describe('draft review', () => {
     const user = userEvent.setup();
     await generate(user);
 
-    expect(api.post).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(api.post).mock.calls[0][0]).toBe('/dev/integrations/7/generate');
+    expect(api.post).not.toHaveBeenCalled();
   });
 
   it('only writes the drafts that were kept', async () => {
