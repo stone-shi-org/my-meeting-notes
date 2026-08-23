@@ -201,6 +201,13 @@ export function RecorderPanel({
   const [withMic, setWithMic] = useState(true);
   const [liveCaptionsOn, setLiveCaptionsOn] = useState(false);
 
+  // Bumped only when the user deliberately starts a *new* recording (Start /
+  // "Record again"), never on Pause/Resume -- InsightsPanel resets its
+  // accumulated topics/questions/action-items whenever this changes (see
+  // useInsights' sessionKey param). Stopping on its own must not clear
+  // anything, which is why this doesn't live on recorder.phase directly.
+  const [recordingSession, setRecordingSession] = useState(0);
+
   // Settings -> Live captions' value is only the *default* -- see
   // live_caption_language's doc comment in config.py. `null` here means
   // "hasn't been touched yet", so this panel keeps tracking that default
@@ -556,6 +563,7 @@ export function RecorderPanel({
               ) {
                 return;
               }
+              setRecordingSession((n) => n + 1);
               void recorder.start({ source, deviceId: deviceId || undefined, withMic });
             }}
           >
@@ -674,7 +682,7 @@ export function RecorderPanel({
           it stays on its own here so a long meeting's topic/question list
           doesn't compete with the transcript for the same column. */}
       <div className="space-y-4">
-        <InsightsPanel captions={captions} enabled={captionsLive} />
+        <InsightsPanel captions={captions} enabled={captionsLive} sessionKey={recordingSession} />
       </div>
       {/* Controls, the transcript, and the rest of the meeting form (title,
           when, thread, submit -- see NewMeetingPage's rightExtra) share this

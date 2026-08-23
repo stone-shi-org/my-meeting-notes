@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from '@/lib/api';
 import type { Caption } from './useLiveCaption';
 
@@ -54,12 +54,23 @@ function renderTranscript(captions: Caption[]): string {
  * server grows all three lists together. Switching meeting_type starts that
  * over: a topic/question/action-item list from the other prompt doesn't
  * mean anything here.
+ *
+ * Deliberately does NOT reset on `enabled` going false -- that is what
+ * happens when the user clicks Stop, and the whole point of this feature is
+ * that stopping must not throw away what was gathered (InsightsPanel keeps
+ * rendering it after Stop). The only things that clear the accumulated
+ * state are: `meetingType` changing (a topic list from the other prompt
+ * means nothing here), `sessionKey` changing (bumped by the caller when a
+ * genuinely new recording starts, e.g. "Record again" -- see
+ * RecorderPanel), or calling the returned `clear()` directly (the panel's
+ * manual "Clean" button).
  */
 export function useInsights(
   captions: Caption[],
   meetingType: string,
   enabled: boolean,
   intervalSec: number = DEFAULT_INSIGHTS_INTERVAL_SEC,
+  sessionKey: number = 0,
 ) {
   const [topics, setTopics] = useState<InsightTopic[]>([]);
   const [questions, setQuestions] = useState<InsightQuestion[]>([]);
@@ -76,13 +87,20 @@ export function useInsights(
   const previousRef = useRef<AnalyzeResponse | null>(null);
   const inFlight = useRef(false);
 
-  useEffect(() => {
+  // Stable identity (setState setters never change) so including it in the
+  // effect below never causes an extra run -- it's there so a manual Clean
+  // click and an automatic reset share exactly one implementation.
+  const clear = useCallback(() => {
     setTopics([]);
     setQuestions([]);
     setActionItems([]);
     setError(null);
     previousRef.current = null;
-  }, [meetingType]);
+  }, []);
+
+  useEffect(() => {
+    clear();
+  }, [meetingType, sessionKey, clear]);
 
   useEffect(() => {
     if (!enabled) return;
@@ -126,5 +144,5 @@ export function useInsights(
     };
   }, [enabled, meetingType, intervalSec]);
 
-  return { topics, questions, actionItems, error, loading };
+  return { topics, questions, actionItems, error, loading, clear };
 }
