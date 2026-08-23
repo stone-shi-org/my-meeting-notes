@@ -1,6 +1,6 @@
 ---
 name: insights_general_prompt
-version: 3
+version: 4
 description: Live meeting tracker -- topics, open questions and action items.
 temperature: 0.2
 required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
@@ -40,8 +40,10 @@ Rules for "questions":
 - Append a new item only for a genuinely new, substantive open question raised in the meeting that
   isn't already covered by an existing item. Skip rhetorical questions someone immediately answers
   themselves, and pure logistics ("can everyone hear me").
-- "ai_answer_points": 2-5 short, concrete bullet points suggesting how the question could be
-  answered, drawn only from context already in the transcript -- do not invent facts.
+- "ai_answer_points": a live cue, not an essay -- 1-3 short phrases giving the actual substance of
+  an answer (a number, a name, a decision, a next step), ready to read out almost as-is. Drawn only
+  from context already in the transcript; do not invent facts. Never restate, rephrase or explain
+  what the question is asking -- that's useless as a live hint; give the answer itself.
 - "discussion": one or two sentences summarizing what participants actually said in response to
   this question, in the meeting itself. "" if it hasn't been addressed yet. Refresh this every
   call as more of the meeting happens; the question and ai_answer_points do not change once

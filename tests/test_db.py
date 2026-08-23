@@ -135,6 +135,45 @@ def test_late_indexes_are_created(conn):
     assert "idx_threads_group" in _indexes(conn)
 
 
+class TestInsightTypePromptUpgrade:
+    """init_db's seed block only ever runs once (see its own comment), so an
+    already-initialized DB needs a separate path to pick up a stock prompt
+    edit -- without it, every DB created before this file's ai_answer_points
+    wording change would keep the old wording forever. Covers both hops: the
+    original single-shape prompt, and the intermediate combined-shape one
+    this repo's own dev DB could be sitting on."""
+
+    def _prompt(self, db_path, slug: str) -> str:
+        with get_conn(db_path) as conn:
+            return conn.execute(
+                "SELECT prompt FROM insight_types WHERE slug = ?", (slug,)
+            ).fetchone()[0]
+
+    def _set_prompt(self, db_path, slug: str, prompt: str) -> None:
+        with get_conn(db_path) as conn:
+            conn.execute("UPDATE insight_types SET prompt = ? WHERE slug = ?", (prompt, slug))
+
+    def test_upgrades_the_original_legacy_prompt(self, initialised_db):
+        from app.db import _DEFAULT_GENERAL_PROMPT, _LEGACY_DEFAULT_GENERAL_PROMPT
+
+        self._set_prompt(initialised_db, "general", _LEGACY_DEFAULT_GENERAL_PROMPT)
+        init_db(initialised_db)
+        assert self._prompt(initialised_db, "general") == _DEFAULT_GENERAL_PROMPT
+
+    def test_upgrades_the_intermediate_combined_shape_prompt(self, initialised_db):
+        from app.db import _COMBINED_V1_DEFAULT_INTERVIEW_PROMPT, _DEFAULT_INTERVIEW_PROMPT
+
+        self._set_prompt(initialised_db, "interview", _COMBINED_V1_DEFAULT_INTERVIEW_PROMPT)
+        init_db(initialised_db)
+        assert self._prompt(initialised_db, "interview") == _DEFAULT_INTERVIEW_PROMPT
+
+    def test_leaves_a_customized_prompt_alone(self, initialised_db):
+        custom = "{{transcript}} {{previous_topics}} {{previous_questions}} {{previous_action_items}}"
+        self._set_prompt(initialised_db, "general", custom)
+        init_db(initialised_db)
+        assert self._prompt(initialised_db, "general") == custom
+
+
 def _make_user(conn, user_id: int, username: str) -> None:
     now = utcnow()
     conn.execute(
