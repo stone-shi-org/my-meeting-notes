@@ -174,6 +174,13 @@ class TestInsightTypePromptUpgrade:
         init_db(initialised_db)
         assert self._prompt(initialised_db, "general") == _DEFAULT_GENERAL_PROMPT
 
+    def test_upgrades_the_pre_detailed_answer_combined_shape_prompt(self, initialised_db):
+        from app.db import _COMBINED_V3_DEFAULT_INTERVIEW_PROMPT, _DEFAULT_INTERVIEW_PROMPT
+
+        self._set_prompt(initialised_db, "interview", _COMBINED_V3_DEFAULT_INTERVIEW_PROMPT)
+        init_db(initialised_db)
+        assert self._prompt(initialised_db, "interview") == _DEFAULT_INTERVIEW_PROMPT
+
     def test_leaves_a_customized_prompt_alone(self, initialised_db):
         custom = "{{transcript}} {{previous_topics}} {{previous_questions}} {{previous_action_items}}"
         self._set_prompt(initialised_db, "general", custom)

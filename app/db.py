@@ -736,11 +736,154 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
 #
 # Every type now produces all three sections (topics + questions +
 # action_items) from one combined prompt -- see services/insights.py. The
-# _LEGACY_* / _COMBINED_V1_* / _COMBINED_V2_* constants below are earlier
-# text these two built-ins shipped with; init_db uses them to upgrade an
-# already-initialized DB's stock prompt in place, without touching one an
-# admin has customized.
+# _LEGACY_* / _COMBINED_V1_* / _COMBINED_V2_* / _COMBINED_V3_* constants
+# below are earlier text these two built-ins shipped with; init_db uses them
+# to upgrade an already-initialized DB's stock prompt in place, without
+# touching one an admin has customized.
 _DEFAULT_GENERAL_PROMPT = """---
+name: insights_general_prompt
+version: 6
+description: Live meeting tracker -- topics, open questions and action items.
+temperature: 0.2
+required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
+---
+
+## SYSTEM
+
+You're watching a live, rough transcript of a meeting ("Room" = everyone else, "Me" = the local
+participant; expect typos and dropped words).
+
+Track three things as the meeting happens. Return ONLY this JSON, nothing else:
+
+  {
+    "topics": [{"title": string, "summary": string, "current": boolean}],
+    "questions": [{"question": string, "ai_answer_points": [string, ...], "discussion": string}],
+    "action_items": [{"text": string, "owner": string|null}]
+  }
+
+Rules for "topics":
+- Keep every topic from previous_topics, same order, "summary" refreshed.
+- New topic only on a real subject change, not every sentence.
+- Exactly one topic has "current": true.
+- "title": 3-6 words. "summary": ONE headline-style bullet, <=12 words, no filler ("discussed",
+  "talked about") -- lead with the news, like a headline, not a recap sentence.
+- Unchanged since previous_topics? Return it unchanged.
+
+Rules for "questions":
+- Keep every item in previous_questions, unchanged and in the same order -- this list only grows
+  across calls, it never loses an entry.
+- Append a new item only for a genuinely new, substantive open question raised in the meeting that
+  isn't already covered by an existing item. Skip rhetorical questions someone immediately answers
+  themselves, and pure logistics ("can everyone hear me").
+- "ai_answer_points": suggestions for *how* to answer, not a pre-written answer and not an
+  explanation of the question. A vague pointer ("mention your experience") is not useful -- pull
+  in the actual specifics already sitting in the transcript (the number, the project name, the
+  decision, the example) and say what to do with them ("bring up the 20% latency drop from the
+  caching change discussed earlier"). 2-5 points, each a full clause or short sentence, as detailed
+  as the transcript supports. Draw only from context already in the transcript; do not invent
+  facts.
+- "discussion": one or two sentences summarizing what participants actually said in response to
+  this question, in the meeting itself. "" if it hasn't been addressed yet. Refresh this every
+  call as more of the meeting happens; the question and ai_answer_points do not change once
+  appended.
+
+Rules for "action_items":
+- Keep every item in previous_action_items, unchanged and in the same order -- this list only
+  grows across calls.
+- Append a new item only for a concrete task or commitment someone in the meeting took on.
+- "owner": the person's name or label if stated explicitly, else null. Never invent an owner.
+
+JSON only. No prose, no code fence.
+
+## USER
+
+Topics so far:
+{{previous_topics}}
+
+Questions so far:
+{{previous_questions}}
+
+Action items so far:
+{{previous_action_items}}
+
+Live transcript so far:
+{{transcript}}
+"""
+
+_DEFAULT_INTERVIEW_PROMPT = """---
+name: insights_interview_prompt
+version: 5
+description: Live interview tracker -- questions worth prepping, topics, and follow-up commitments.
+temperature: 0.3
+required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
+---
+
+## SYSTEM
+
+You are watching a live, rough transcript of an interview as it happens. Two
+sides are labelled "Room" (the interviewer, or the other side of the call)
+and "Me" (the person being interviewed). The labels come from separate audio
+channels, not a real diarizer, and every line is a live, low-quality caption
+-- expect typos, dropped words and missing punctuation.
+
+Track three things. Return ONLY this JSON, nothing else:
+
+  {
+    "topics": [{"title": string, "summary": string, "current": boolean}],
+    "questions": [{"question": string, "ai_answer_points": [string, ...], "discussion": string}],
+    "action_items": [{"text": string, "owner": string|null}]
+  }
+
+Rules for "topics":
+- Keep every topic from previous_topics, same order, "summary" refreshed.
+- New topic only on a real subject change in the conversation, not every sentence.
+- Exactly one topic has "current": true.
+- "title": 3-6 words. "summary": ONE headline-style bullet, <=12 words.
+
+Rules for "questions" -- find questions from Room worth preparing an answer for:
+- Keep every item in previous_questions, unchanged and in the same order -- this list only grows
+  across calls, it never loses an entry.
+- Append a new item only for a genuinely new, substantive question from Room that isn't already
+  covered by an existing item. Skip greetings, small talk and logistics ("how are you", "can you
+  hear me", "shall we get started", "any questions before we begin") -- those aren't worth
+  prepping. A rhetorical question Room immediately answers itself is not a new item.
+- "ai_answer_points": coaching cues for "Me", not a pre-written answer and not a restatement or
+  explanation of Room's question (an interviewee glancing at a hint has no use for being told what
+  they were just asked). A vague pointer ("mention your experience") is not useful -- pull in the
+  actual specifics "Me" already gave elsewhere in the transcript (the project name, the number,
+  the example, the decision) and say what to do with them ("bring up leading the 3-person migration
+  you described earlier"). 2-5 points, each a full clause or short sentence, as detailed as the
+  transcript supports. Do not invent facts about them.
+- "discussion": one or two sentences summarizing how "Me" actually answered this question in the
+  transcript so far. "" if "Me" hasn't answered it yet. Refresh this every call.
+
+Rules for "action_items" -- commitments or follow-ups either side took on (e.g. "I'll send my
+portfolio", "let's schedule a follow-up call", "I'll check with the team and get back to you"):
+- Keep every item in previous_action_items, unchanged and in the same order -- only grows.
+- "owner": "Me", "Room", or a stated name/label; null if unclear. Never invent one.
+
+Return the JSON only. No prose, no code fence.
+
+## USER
+
+Topics so far:
+{{previous_topics}}
+
+Already-detected questions (carry forward unchanged, then add anything new; do not duplicate):
+{{previous_questions}}
+
+Action items so far:
+{{previous_action_items}}
+
+Live transcript so far (most recent last):
+{{transcript}}
+"""
+
+# The combined-shape text these two built-ins shipped with before
+# ai_answer_points was loosened from "1-3 terse talking points" to "2-5
+# detailed points grounded in transcript specifics" -- see the upgrade loop
+# in init_db.
+_COMBINED_V3_DEFAULT_GENERAL_PROMPT = """---
 name: insights_general_prompt
 version: 5
 description: Live meeting tracker -- topics, open questions and action items.
@@ -807,7 +950,7 @@ Live transcript so far:
 {{transcript}}
 """
 
-_DEFAULT_INTERVIEW_PROMPT = """---
+_COMBINED_V3_DEFAULT_INTERVIEW_PROMPT = """---
 name: insights_interview_prompt
 version: 4
 description: Live interview tracker -- questions worth prepping, topics, and follow-up commitments.
@@ -1281,6 +1424,7 @@ def init_db(db_path: Path | str | None = None) -> None:
                         _LEGACY_DEFAULT_GENERAL_PROMPT,
                         _COMBINED_V1_DEFAULT_GENERAL_PROMPT,
                         _COMBINED_V2_DEFAULT_GENERAL_PROMPT,
+                        _COMBINED_V3_DEFAULT_GENERAL_PROMPT,
                     ),
                     _DEFAULT_GENERAL_PROMPT,
                 ),
@@ -1290,6 +1434,7 @@ def init_db(db_path: Path | str | None = None) -> None:
                         _LEGACY_DEFAULT_INTERVIEW_PROMPT,
                         _COMBINED_V1_DEFAULT_INTERVIEW_PROMPT,
                         _COMBINED_V2_DEFAULT_INTERVIEW_PROMPT,
+                        _COMBINED_V3_DEFAULT_INTERVIEW_PROMPT,
                     ),
                     _DEFAULT_INTERVIEW_PROMPT,
                 ),

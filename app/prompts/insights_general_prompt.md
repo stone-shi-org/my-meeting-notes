@@ -1,6 +1,6 @@
 ---
 name: insights_general_prompt
-version: 5
+version: 6
 description: Live meeting tracker -- topics, open questions and action items.
 temperature: 0.2
 required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
@@ -41,9 +41,12 @@ Rules for "questions":
   isn't already covered by an existing item. Skip rhetorical questions someone immediately answers
   themselves, and pure logistics ("can everyone hear me").
 - "ai_answer_points": suggestions for *how* to answer, not a pre-written answer and not an
-  explanation of the question -- 1-3 short talking points ("mention X", "bring up the Y number",
-  "give the Z example") pointing at what to cover, grounded only in context already in the
-  transcript. Do not compose a full sentence as if scripting the answer, and do not invent facts.
+  explanation of the question. A vague pointer ("mention your experience") is not useful -- pull
+  in the actual specifics already sitting in the transcript (the number, the project name, the
+  decision, the example) and say what to do with them ("bring up the 20% latency drop from the
+  caching change discussed earlier"). 2-5 points, each a full clause or short sentence, as detailed
+  as the transcript supports. Draw only from context already in the transcript; do not invent
+  facts.
 - "discussion": one or two sentences summarizing what participants actually said in response to
   this question, in the meeting itself. "" if it hasn't been addressed yet. Refresh this every
   call as more of the meeting happens; the question and ai_answer_points do not change once

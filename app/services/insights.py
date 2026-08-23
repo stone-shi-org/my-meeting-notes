@@ -32,9 +32,12 @@ from app.services import prompts as prompts_svc
 MAX_TRANSCRIPT_CHARS = 12_000
 
 # Three growing lists now share this budget instead of one -- topics used to
-# be the whole reply; a long session's topics + questions (with discussion)
-# + action_items needs more room to avoid truncating mid-JSON.
-MAX_OUTPUT_TOKENS = 2500
+# be the whole reply; a long session's topics + questions (with discussion
+# and now up to 5 detailed ai_answer_points each) + action_items needs more
+# room to avoid truncating mid-JSON. Set generously (well past what a single
+# tick's growth actually needs) so a long recording's accumulated lists never
+# get cut off mid-JSON as they carry forward call after call.
+MAX_OUTPUT_TOKENS = 8000
 
 
 def analyze(
