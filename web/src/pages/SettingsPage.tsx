@@ -16,7 +16,7 @@ import { ErrorState } from '@/components/ui/states';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import { LIVE_STT_CAPTION_LANGUAGES } from '@/lib/recording';
+import { languageSupportNoteFor, restrictedLanguagesForModel } from '@/lib/recording';
 import type {
   Integration,
   IntegrationTestResult,
@@ -131,10 +131,24 @@ function SettingsForm({
   keys: {
     key: string;
     label: string;
-    hint?: string;
+    /** Static, or computed from the current draft/saved settings -- e.g.
+     * live_caption_language's own hint depends on whichever backend's model
+     * is currently configured, not just this field's own value. */
+    hint?: string | ((draft: Record<string, string>, entries: Record<string, { value?: unknown }>) => string | undefined);
     type?: string;
     step?: string;
-    options?: { value: string; label: string }[];
+    /** Static, or computed the same way `hint` above is -- a dropdown whose
+     * choices depend on another field's current value (see
+     * live_caption_language, driven by whichever backend's model is set).
+     * A computed `undefined` means "no restriction known, fall back to free
+     * text" -- distinct from an empty array, which would render a picklist
+     * with nothing pickable. */
+    options?:
+      | { value: string; label: string }[]
+      | ((
+          draft: Record<string, string>,
+          entries: Record<string, { value?: unknown }>,
+        ) => { value: string; label: string }[] | undefined);
     badge?: (value: string) => { label: string; variant: 'info' | 'success' | 'warning' | 'neutral' | 'primary' | 'danger' } | null;
     visible?: (draft: Record<string, string>, entries: Record<string, { value?: unknown }>) => boolean;
     /** Greys the field out without hiding it -- for a setting that's saved
@@ -221,6 +235,8 @@ function SettingsForm({
           const isModelField = key === modelKey;
           const badgeObj = badge ? badge(String(value)) : null;
           const fieldDisabled = !isAdmin || !!keyDisabled;
+          const resolvedHint = typeof hint === 'function' ? hint(draft, entries) : hint;
+          const resolvedOptions = typeof options === 'function' ? options(draft, entries) : options;
 
           return (
             <div key={key}>
@@ -233,7 +249,7 @@ function SettingsForm({
                 )}
               </div>
 
-              {options ? (
+              {resolvedOptions ? (
                 <Select
                   id={key}
                   className="mt-1.5"
@@ -244,7 +260,7 @@ function SettingsForm({
                     setTestResult(null);
                   }}
                 >
-                  {options.map((opt) => (
+                  {resolvedOptions.map((opt) => (
                     <option key={opt.value} value={opt.value}>
                       {opt.label}
                     </option>
@@ -297,7 +313,7 @@ function SettingsForm({
               {keyDisabled && disabledHint ? (
                 <p className="mt-1 text-xs text-fg-faint">{disabledHint}</p>
               ) : (
-                hint && <p className="mt-1 text-xs text-fg-subtle">{hint}</p>
+                resolvedHint && <p className="mt-1 text-xs text-fg-subtle">{resolvedHint}</p>
               )}
 
               {isModelField && modelOptions.length > 0 && (
@@ -798,21 +814,31 @@ export function LiveCaptionsSettingsPage() {
           {
             key: 'live_caption_language',
             label: 'Language',
-            hint:
-              backend === 'live_stt'
-                ? "This backend (Parakeet/Nemotron-family streaming models) only supports English and " +
-                  "Spanish -- confirmed against a real deployment, anything else fails the connection " +
-                  "outright rather than just mis-transcribing. Leave blank for auto-detect."
-                : 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
-            // Only live_stt gets a restricted picklist -- the other two
-            // backends' Whisper-shaped ~100-language coverage isn't worth
-            // hardcoding into a dropdown, and a typo there mis-transcribes
-            // rather than fails outright (see LIVE_CAPTION_LANGUAGES' own
-            // doc comment in lib/recording.ts).
-            options:
-              backend === 'live_stt'
-                ? LIVE_STT_CAPTION_LANGUAGES.map(({ code, label }) => ({ value: code, label }))
-                : undefined,
+            // Driven by whichever backend is active *and* that backend's
+            // own configured model -- asrLanguageSupport.json is keyed by
+            // model name, not backend, because the three backends' default
+            // models turn out to have three different (and all narrow)
+            // language ceilings, not just live_stt's. `entries` here is the
+            // full settings snapshot (every SettingsForm on this page reads
+            // the same query), so this can see another card's *saved*
+            // model even though it can't see that card's own unsaved draft.
+            hint: (_draft, entries) => {
+              const model = String(entries[`live_caption_${backend}_model`]?.value ?? '');
+              return (
+                languageSupportNoteFor(model) ??
+                'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.'
+              );
+            },
+            // undefined (not a mapped generic list) for a model with no
+            // known restriction -- see restrictedLanguagesForModel's doc
+            // comment: this field falls back to free text in that case
+            // (SettingsForm's Input+datalist branch), which is more useful
+            // than a fixed picklist for a Whisper/VibeVoice-shaped model's
+            // ~50-100 languages.
+            options: (_draft, entries) => {
+              const model = String(entries[`live_caption_${backend}_model`]?.value ?? '');
+              return restrictedLanguagesForModel(model)?.map(({ code, label }) => ({ value: code, label }));
+            },
           },
           {
             key: 'live_caption_commit_interval_sec',

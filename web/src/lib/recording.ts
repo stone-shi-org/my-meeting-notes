@@ -8,6 +8,8 @@
  * sources this browser can actually deliver.
  */
 
+import asrLanguageSupportData from './asrLanguageSupport.json';
+
 export type Source = 'mic' | 'tab' | 'system';
 
 export interface Capability {
@@ -209,19 +211,18 @@ export function audioConstraints(source: Source, deviceId?: string): MediaTrackC
 }
 
 /**
- * Live-caption language choices for the /v1/realtime and
- * /v1/audio/transcriptions backends, offered as a picklist rather than free
- * text. Both speak the Whisper-shaped ISO-639-1 convention ("en"), not a
- * language name ("english") -- confirmed against a real streaming ASR
- * backend that the latter doesn't get rejected, it silently breaks
- * streaming entirely, with an error that never mentions language. A
- * picklist makes that typo structurally impossible instead of documenting
- * it in a hint underneath a text box. `''` means "auto-detect per window".
+ * Generic live-caption language choices, offered as a picklist rather than
+ * free text. The Whisper-shaped ISO-639-1 convention ("en"), not a language
+ * name ("english") -- confirmed against a real streaming ASR backend that
+ * the latter doesn't get rejected, it silently breaks streaming entirely,
+ * with an error that never mentions language. A picklist makes that typo
+ * structurally impossible instead of documenting it in a hint underneath a
+ * text box. `''` means "auto-detect per window".
  *
- * Not used for the live_stt (gRPC) backend -- see
- * LIVE_STT_CAPTION_LANGUAGES below, which exists for a sharper reason than
- * typo-proofing: that backend doesn't quietly mis-transcribe an unsupported
- * language, it refuses the connection outright.
+ * This is the *fallback* for a model asrLanguageSupport.json doesn't know
+ * about, or one explicitly marked "unbounded" there (Whisper/VibeVoice-
+ * shaped, ~50-100 languages, not worth hardcoding into a short list) -- see
+ * captionLanguagesForModel below, which is what callers actually want.
  */
 export const LIVE_CAPTION_LANGUAGES: { code: string; label: string }[] = [
   { code: '', label: 'Auto-detect' },
@@ -240,39 +241,97 @@ export const LIVE_CAPTION_LANGUAGES: { code: string; label: string }[] = [
   { code: 'ar', label: 'Arabic' },
 ];
 
-/**
- * live_stt (gRPC, Parakeet/Nemotron-family streaming models) accepts a far
- * narrower set of codes than LIVE_CAPTION_LANGUAGES above. Confirmed
- * against a real deployment: picking "Chinese" failed *worker init*
- * outright with `parakeet: unknown target_lang 'zh'. Valid examples:
- * en-US, en, en-GB, enGB, es-ES, esES, es-US, es, ...` -- every other code
- * in the general list (fr, de, ja, ...) fails the exact same way against
- * this backend, which is English/Spanish only in this deployment, not
- * Whisper's ~100-language coverage. Only the hyphenated spelling of each
- * dialect is offered here even though the server also accepts a no-hyphen
- * alias ("enGB", "esES") -- a picklist gains nothing from listing the same
- * dialect twice under two spellings.
- */
-export const LIVE_STT_CAPTION_LANGUAGES: { code: string; label: string }[] = [
-  { code: '', label: 'Auto-detect' },
-  { code: 'en', label: 'English' },
-  { code: 'en-US', label: 'English (US)' },
-  { code: 'en-GB', label: 'English (UK)' },
-  { code: 'es', label: 'Spanish' },
-  { code: 'es-ES', label: 'Spanish (Spain)' },
-  { code: 'es-US', label: 'Spanish (US)' },
-];
+interface ModelLanguageEntry {
+  note?: string;
+  sources?: string[];
+  /** Whisper/VibeVoice-shaped: broad, near-universal coverage. No
+   * confirmed/documented list is worth hardcoding -- LIVE_CAPTION_LANGUAGES
+   * above is offered instead. */
+  unbounded?: boolean;
+  /** Codes actually observed to work (or fail) against a real running
+   * instance of this app -- what the picker restricts itself to. */
+  confirmed?: { code: string; label: string }[];
+  /** The wider set the model's own vendor docs claim, kept as a worklist
+   * even though the picker doesn't offer it directly -- see
+   * asrLanguageSupport.json's own _readme for how to promote one by hand. */
+  documented?: { code: string; label: string }[];
+}
+
+const ASR_LANGUAGE_SUPPORT = (asrLanguageSupportData as { models: Record<string, ModelLanguageEntry> })
+  .models;
 
 /**
- * Picks between the two lists above -- the one bit of backend-awareness
- * both the recorder's per-recording override and the Settings page's
- * default need, so neither can drift into offering live_stt a language it
- * will just reject.
+ * confirmed ++ whatever's in documented but not already in confirmed, the
+ * latter suffixed "(untested here)" -- picking one *replaces* the other
+ * (`confirmed ?? documented`) would make documented dead weight the picker
+ * never actually offers, which is exactly the bug this replaced: selecting
+ * nemotron-3.5-asr-streaming-0.6b showed only English/Spanish even though
+ * its own entry documents 40 locales. Showing the untested ones (clearly
+ * labelled) rather than hiding them is what "I can change manually later"
+ * is for -- picking one is also how an entry gets promoted from documented
+ * to confirmed by hand once someone's actually tried it. A pick that fails
+ * is no longer silent either, now that channel_worker_livestt/channel_worker
+ * relay a worker-init failure as {"type": "warning", ...} (see
+ * useLiveCaption's CaptionWarning).
  */
-export function captionLanguagesFor(
-  backend: string | null | undefined,
+function mergedLanguages(entry: ModelLanguageEntry): { code: string; label: string }[] {
+  const confirmed = entry.confirmed ?? [];
+  const confirmedCodes = new Set(confirmed.map((l) => l.code));
+  const untested = (entry.documented ?? [])
+    .filter((l) => !confirmedCodes.has(l.code))
+    .map((l) => ({ code: l.code, label: `${l.label} (untested here)` }));
+  return [...confirmed, ...untested];
+}
+
+/**
+ * Which language codes to offer for a given ASR model -- see
+ * asrLanguageSupport.json (which this reads) for where the data comes from
+ * and how to edit it by hand as more codes get confirmed against a real
+ * deployment. A model that file doesn't mention, or one marked "unbounded"
+ * (Whisper/VibeVoice-shaped), falls back to the generic list above rather
+ * than guessing at a restriction that might be wrong.
+ *
+ * Keyed by *model name*, not backend: the three live-caption backends'
+ * default models (nemotron-3.5-asr-streaming-0.6b, realtime_eou_120m-v1,
+ * lfm2.5-audio-1.5b-realtime) turn out to have three different, all-narrow
+ * language ceilings -- a backend-level list would have missed that the
+ * /v1/realtime backend's own default model is English-only too, not just
+ * live_stt's.
+ */
+export function captionLanguagesForModel(
+  model: string | null | undefined,
 ): { code: string; label: string }[] {
-  return backend === 'live_stt' ? LIVE_STT_CAPTION_LANGUAGES : LIVE_CAPTION_LANGUAGES;
+  const entry = model ? ASR_LANGUAGE_SUPPORT[model] : undefined;
+  if (!entry || entry.unbounded) return LIVE_CAPTION_LANGUAGES;
+  const merged = mergedLanguages(entry);
+  return merged.length > 0 ? merged : LIVE_CAPTION_LANGUAGES;
+}
+
+/**
+ * Like captionLanguagesForModel above, but `undefined` -- not the generic
+ * fallback -- for a model with no confirmed/documented restriction. Meant
+ * for a UI that has its own free-text fallback (the Settings page's
+ * language field): a fixed picklist can't usefully enumerate Whisper's
+ * ~99 languages, so there's no dropdown worth forcing there, unlike
+ * RecorderPanel's language <select>, which has no free-text mode and wants
+ * captionLanguagesForModel's generic-list fallback instead.
+ */
+export function restrictedLanguagesForModel(
+  model: string | null | undefined,
+): { code: string; label: string }[] | undefined {
+  const entry = model ? ASR_LANGUAGE_SUPPORT[model] : undefined;
+  if (!entry || entry.unbounded) return undefined;
+  const merged = mergedLanguages(entry);
+  return merged.length > 0 ? merged : undefined;
+}
+
+/** A one-line reason the language picker is restricted for this model, for
+ * a hint under the dropdown -- undefined when nothing is known about it (or
+ * it's unbounded, where no explanation is needed since the full list is
+ * offered). */
+export function languageSupportNoteFor(model: string | null | undefined): string | undefined {
+  const entry = model ? ASR_LANGUAGE_SUPPORT[model] : undefined;
+  return entry && !entry.unbounded ? entry.note : undefined;
 }
 
 /** `12:04`, counting up. Recording length, not a media position. */

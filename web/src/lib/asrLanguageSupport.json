@@ -1,0 +1,284 @@
+{
+  "_readme": [
+    "Per-model language support for live captions, keyed by the exact model",
+    "name typed into Settings -> Live captions (live_caption_{backend}_model).",
+    "Edit this file directly -- it's plain data, no deploy pipeline of its",
+    "own, but it IS bundled into the frontend build like everything else in",
+    "web/src, so a change needs `npm run build` (or a dev server reload) to",
+    "show up, same as editing recording.ts by hand would.",
+    "",
+    "Two lists per model, and they can legitimately disagree:",
+    "  confirmed  -- codes actually observed to work (or fail) against a",
+    "                real running instance of THIS app. This is what the",
+    "                language picker restricts itself to.",
+    "  documented -- the wider set the underlying model's own vendor",
+    "                docs/README claim support for. Kept alongside confirmed",
+    "                as a worklist: if you test one of these against your own",
+    "                deployment and it works, move it into confirmed by hand.",
+    "",
+    "unbounded: true means the model is Whisper/VibeVoice-shaped (broad,",
+    "near-universal coverage, no fixed short list worth hardcoding) -- the",
+    "picker falls back to the generic LIVE_CAPTION_LANGUAGES list for these",
+    "and for any model name this file doesn't mention at all.",
+    "",
+    "Sourced August 2026 from vendor docs, cited per model below -- not from",
+    "a controlled test of every code against every deployment. Treat",
+    "'documented' as 'plausible, per the vendor', not 'guaranteed to work here'."
+  ],
+  "models": {
+    "nemotron-3.5-asr-streaming-0.6b": {
+      "note": "NVIDIA's own model card and the parakeet.cpp README (the C++/ggml port this app's live-stt server is built on -- see ServerInfoResponse.parakeet_ref in asr.proto) both describe this as a 40-locale model with automatic language detection, no selection needed at runtime. That directly contradicts a real error seen against this app's own live-stt deployment (`parakeet: unknown target_lang 'zh'. Valid examples: en-US, en, en-GB, enGB, es-ES, esES, es-US, es, ...`), so 'confirmed' stays narrow -- English/Spanish only. Everything else NVIDIA documents is still offered in the picker, marked \"(untested here)\" -- pick one to actually try it (a failure now surfaces as an in-app warning instead of silence, see useLiveCaption's CaptionWarning), and move it into 'confirmed' below by hand once it's worked. It's also possible this deployment is actually running the separate English-only nvidia/nemotron-speech-streaming-en-0.6b checkpoint under this model name; if so, none of the untested ones will ever pass and confirmed is the real ceiling.",
+      "sources": [
+        "https://huggingface.co/nvidia/nemotron-3.5-asr-streaming-0.6b",
+        "https://github.com/mudler/parakeet.cpp",
+        "https://huggingface.co/nvidia/nemotron-speech-streaming-en-0.6b"
+      ],
+      "confirmed": [
+        {
+          "code": "",
+          "label": "Auto-detect"
+        },
+        {
+          "code": "en",
+          "label": "English"
+        },
+        {
+          "code": "en-US",
+          "label": "English (US)"
+        },
+        {
+          "code": "en-GB",
+          "label": "English (UK)"
+        },
+        {
+          "code": "es",
+          "label": "Spanish"
+        },
+        {
+          "code": "es-ES",
+          "label": "Spanish (Spain)"
+        },
+        {
+          "code": "es-US",
+          "label": "Spanish (US)"
+        }
+      ],
+      "documented": [
+        {
+          "code": "",
+          "label": "Auto-detect"
+        },
+        {
+          "code": "en-US",
+          "label": "English (US)"
+        },
+        {
+          "code": "en-GB",
+          "label": "English (UK)"
+        },
+        {
+          "code": "es-ES",
+          "label": "Spanish (Spain)"
+        },
+        {
+          "code": "es-US",
+          "label": "Spanish (US)"
+        },
+        {
+          "code": "de",
+          "label": "German"
+        },
+        {
+          "code": "fr-FR",
+          "label": "French (France)"
+        },
+        {
+          "code": "fr-CA",
+          "label": "French (Canada)"
+        },
+        {
+          "code": "it",
+          "label": "Italian"
+        },
+        {
+          "code": "ar",
+          "label": "Arabic"
+        },
+        {
+          "code": "ja",
+          "label": "Japanese"
+        },
+        {
+          "code": "ko",
+          "label": "Korean"
+        },
+        {
+          "code": "pt-BR",
+          "label": "Portuguese (Brazil)"
+        },
+        {
+          "code": "pt-PT",
+          "label": "Portuguese (Portugal)"
+        },
+        {
+          "code": "ru",
+          "label": "Russian"
+        },
+        {
+          "code": "hi",
+          "label": "Hindi"
+        },
+        {
+          "code": "tr",
+          "label": "Turkish"
+        },
+        {
+          "code": "vi",
+          "label": "Vietnamese"
+        },
+        {
+          "code": "nl",
+          "label": "Dutch"
+        },
+        {
+          "code": "uk",
+          "label": "Ukrainian"
+        },
+        {
+          "code": "pl",
+          "label": "Polish"
+        },
+        {
+          "code": "fi",
+          "label": "Finnish"
+        },
+        {
+          "code": "zh",
+          "label": "Mandarin"
+        },
+        {
+          "code": "cs",
+          "label": "Czech"
+        },
+        {
+          "code": "bg",
+          "label": "Bulgarian"
+        },
+        {
+          "code": "sk",
+          "label": "Slovak"
+        },
+        {
+          "code": "sv",
+          "label": "Swedish"
+        },
+        {
+          "code": "hr",
+          "label": "Croatian"
+        },
+        {
+          "code": "ro",
+          "label": "Romanian"
+        },
+        {
+          "code": "et",
+          "label": "Estonian"
+        },
+        {
+          "code": "da",
+          "label": "Danish"
+        },
+        {
+          "code": "hu",
+          "label": "Hungarian"
+        },
+        {
+          "code": "nb",
+          "label": "Norwegian Bokmål"
+        },
+        {
+          "code": "nn",
+          "label": "Norwegian Nynorsk"
+        },
+        {
+          "code": "he",
+          "label": "Hebrew"
+        },
+        {
+          "code": "el",
+          "label": "Greek"
+        },
+        {
+          "code": "lt",
+          "label": "Lithuanian"
+        },
+        {
+          "code": "lv",
+          "label": "Latvian"
+        },
+        {
+          "code": "mt",
+          "label": "Maltese"
+        },
+        {
+          "code": "sl",
+          "label": "Slovenian"
+        },
+        {
+          "code": "th",
+          "label": "Thai"
+        }
+      ]
+    },
+    "realtime_eou_120m-v1": {
+      "note": "nvidia/parakeet_realtime_eou_120m-v1 -- a 120M-parameter streaming model built specifically for low-latency end-of-utterance detection (see asr.proto's EndOfUtterance/Ready.supports_turn_detection, and live_caption.py's docstring on why nemotron above needs a periodic-flush fallback that this model doesn't). Its own model card documents English only, with no punctuation or capitalization either -- a separate limitation, not language-related.",
+      "sources": [
+        "https://huggingface.co/nvidia/parakeet_realtime_eou_120m-v1"
+      ],
+      "confirmed": [
+        {
+          "code": "",
+          "label": "Auto-detect"
+        },
+        {
+          "code": "en",
+          "label": "English"
+        }
+      ]
+    },
+    "lfm2.5-audio-1.5b-realtime": {
+      "note": "LiquidAI/LFM2.5-Audio-1.5B -- the realtime pipeline model this app's /v1/realtime backend defaults to. English only today; a separate -JP checkpoint adds Japanese (add \"ja\" to confirmed by hand if that's what's actually deployed here), and Liquid AI has said broader multilingual support matching LFM2.5-Base's own coverage is in progress but not shipped as of this writing.",
+      "sources": [
+        "https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B",
+        "https://www.liquid.ai/blog/lfm2-audio-an-end-to-end-audio-foundation-model",
+        "https://huggingface.co/LiquidAI/LFM2.5-Audio-1.5B-JP"
+      ],
+      "confirmed": [
+        {
+          "code": "",
+          "label": "Auto-detect"
+        },
+        {
+          "code": "en",
+          "label": "English"
+        }
+      ]
+    },
+    "whisper-large-turbo-q8_0": {
+      "note": "whisper-large-v3-turbo, ggml q8_0 quantization (whisper.cpp) -- Whisper's large models are multilingual across ~99 languages, so this app's own generic language list applies rather than a model-specific short list. One real caveat: the turbo distillation was never trained for the separate cross-language *translation* task (only same-language transcription), which doesn't affect the language picker itself.",
+      "sources": [
+        "https://huggingface.co/openai/whisper-large-v3-turbo",
+        "https://github.com/ggml-org/whisper.cpp",
+        "https://openai-whisper.mintlify.app/concepts/languages"
+      ],
+      "unbounded": true
+    },
+    "vibevoice-cpp-asr": {
+      "note": "microsoft/VibeVoice-ASR -- this app's batch diarization_model default, not a live-caption backend, but documented here too since diarize.py and this file share the same \"which models has anyone actually looked up\" concern. 50+ languages, auto-detects, no language parameter needed at all.",
+      "sources": [
+        "https://huggingface.co/microsoft/VibeVoice-ASR"
+      ],
+      "unbounded": true
+    }
+  }
+}

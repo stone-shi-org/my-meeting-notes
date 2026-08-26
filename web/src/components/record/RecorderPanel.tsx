@@ -22,9 +22,10 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import {
   blockedReason,
-  captionLanguagesFor,
+  captionLanguagesForModel,
   detectPlatform,
   fmtElapsedMs,
+  languageSupportNoteFor,
   sourceSupport,
   type Source,
 } from '@/lib/recording';
@@ -222,13 +223,20 @@ export function RecorderPanel({
   );
   const [captionLanguageChoice, setCaptionLanguageChoice] = useState<string | null>(null);
   const captionLanguage = captionLanguageChoice ?? defaultCaptionLanguage;
-  // live_stt (gRPC) accepts a far narrower set of language codes than the
-  // other two backends and rejects an unsupported one outright instead of
-  // just mis-transcribing it -- see captionLanguagesFor's doc comment.
+  // Which backend is active, and *that backend's own configured model* --
+  // language support is a property of the model, not the backend (the
+  // three backends' default models turn out to have three different, all-
+  // narrow ceilings -- see asrLanguageSupport.json). This <select> has no
+  // free-text fallback, so captionLanguagesForModel's generic-list default
+  // is what an unknown/unbounded model falls back to.
   const liveCaptionBackend = String(
     settingsQuery.data?.settings.live_caption_backend?.value ?? 'live_stt',
   );
-  const captionLanguageOptions = captionLanguagesFor(liveCaptionBackend);
+  const liveCaptionModel = String(
+    settingsQuery.data?.settings[`live_caption_${liveCaptionBackend}_model`]?.value ?? '',
+  );
+  const captionLanguageOptions = captionLanguagesForModel(liveCaptionModel);
+  const captionLanguageNote = languageSupportNoteFor(liveCaptionModel);
 
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
@@ -555,8 +563,7 @@ export function RecorderPanel({
             ))}
           </Select>
           <p className="mt-1 text-xs text-fg-subtle">
-            {liveCaptionBackend === 'live_stt' &&
-              'This backend only supports English and Spanish. '}
+            {captionLanguageNote && `${captionLanguageNote} `}
             Defaults to whatever Settings → Live captions has set. Pick a specific language if
             captions sometimes come back in the wrong one.
           </p>
