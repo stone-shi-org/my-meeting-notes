@@ -135,6 +135,42 @@ def test_clearing_a_setting_falls_back_to_the_env_default(admin_client, isolated
     assert body["llm_model"]["value"] == isolated_settings.llm_model
 
 
+def test_live_caption_backends_keep_independent_settings_across_switches(admin_client):
+    """Each of the three live-caption backends owns its own url/api_key/model
+    now (see config.RUNTIME_KEYS) -- switching live_caption_backend and back
+    must not touch any of them, unlike the old shared
+    live_caption_model/live_stt_url/diarization_url* setup this replaced."""
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "live_caption_backend": "live_stt",
+                "live_caption_live_stt_url": "livestt-host:4030",
+                "live_caption_live_stt_model": "realtime_eou_120m-v1",
+                "live_caption_realtime_url": "wss://realtime-host/v1/realtime",
+                "live_caption_realtime_model": "lfm2.5-audio-1.5b-realtime",
+                "live_caption_transcriptions_url": "http://transcriptions-host/v1/audio/transcriptions",
+                "live_caption_transcriptions_model": "whisper-large-turbo-q8_0",
+            }
+        },
+    )
+
+    admin_client.put("/api/settings", json={"values": {"live_caption_backend": "realtime"}})
+    admin_client.put("/api/settings", json={"values": {"live_caption_backend": "transcriptions"}})
+    admin_client.put("/api/settings", json={"values": {"live_caption_backend": "live_stt"}})
+
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["live_caption_live_stt_url"]["value"] == "livestt-host:4030"
+    assert body["live_caption_live_stt_model"]["value"] == "realtime_eou_120m-v1"
+    assert body["live_caption_realtime_url"]["value"] == "wss://realtime-host/v1/realtime"
+    assert body["live_caption_realtime_model"]["value"] == "lfm2.5-audio-1.5b-realtime"
+    assert (
+        body["live_caption_transcriptions_url"]["value"]
+        == "http://transcriptions-host/v1/audio/transcriptions"
+    )
+    assert body["live_caption_transcriptions_model"]["value"] == "whisper-large-turbo-q8_0"
+
+
 def test_a_json_list_setting_round_trips(admin_client):
     resp = admin_client.put(
         "/api/settings",

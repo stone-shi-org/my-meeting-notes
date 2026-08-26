@@ -55,14 +55,22 @@ class DiarizationTestRequest(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
-    live_stt_url: str | None = Field(default=None, max_length=500)
-    live_caption_backend: str | None = Field(default=None, max_length=50)
 
 
 class TranscribeTestRequest(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
+
+
+class LiveCaptionTestRequest(BaseModel):
+    backend: str = Field(max_length=50)
+    url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
+
+
+LIVE_CAPTION_BACKENDS = ("live_stt", "realtime", "transcriptions")
 
 
 
@@ -191,15 +199,13 @@ def test_diarization(
     url = effective(conn, "diarization_url")
     model = effective(conn, "diarization_model")
     api_key = effective(conn, "diarization_api_key")
-    live_stt_url = effective(conn, "live_stt_url")
-    # Unlike url/model/api_key above, backend has no saved-default fallback:
-    # the Diarization settings panel tests this endpoint too and never sends
-    # live_caption_backend, and that setting's own default is "live_stt" --
-    # defaulting to it here would make every plain diarization test silently
-    # probe the live-stt gRPC service instead of the URL/model being tested.
-    # diarize_svc.test_connection() falls back to is_live_stt_model(model)
-    # when backend is None, which is the right signal for that panel.
-    backend = None
+    # Not this panel's own setting -- only consulted by
+    # diarize_svc.test_connection()'s is_live_stt_model(model) fallback, for
+    # the one case where `model` looks live-stt-shaped even though this
+    # panel has no "backend" concept of its own (unlike /live-caption/test,
+    # which always passes an explicit backend). Testing `url` above in that
+    # case would be testing the wrong protocol entirely.
+    live_stt_url = effective(conn, "live_caption_live_stt_url")
 
     if payload is not None:
         if payload.url:
@@ -208,20 +214,64 @@ def test_diarization(
             model = payload.model
         if payload.api_key is not None and not payload.api_key.startswith(MASK):
             api_key = payload.api_key
-        if payload.live_stt_url:
-            live_stt_url = payload.live_stt_url
-        if payload.live_caption_backend:
-            backend = payload.live_caption_backend
 
     result = diarize_svc.test_connection(
-        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC, live_stt_url=live_stt_url, backend=backend
+        url, model, api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC, live_stt_url=live_stt_url
     )
-
-
 
     log.info(
         "admin %s tested diarization (%s): ok=%s %sms",
         admin.username, model, result["ok"], result["latency_ms"],
+    )
+    return result
+
+
+@router.post("/live-caption/test")
+def test_live_caption(
+    payload: LiveCaptionTestRequest,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Tests exactly the one backend named in the payload, against its own
+    url/api_key/model (live_caption_{backend}_*). Unlike /diarization/test,
+    there is no diarization_url/diarization_api_key fallback here: the three
+    live-caption backends stopped sharing settings with the Diarization panel
+    and with each other (see config.RUNTIME_KEYS), and falling back to
+    diarization_url when a field is blank would quietly reintroduce that
+    coupling for whichever backend hasn't been configured yet.
+    """
+    if payload.backend not in LIVE_CAPTION_BACKENDS:
+        raise ValidationError(f"Unknown live caption backend: {payload.backend!r}")
+
+    backend = payload.backend
+    url = effective(conn, f"live_caption_{backend}_url")
+    model = effective(conn, f"live_caption_{backend}_model")
+    api_key = effective(conn, f"live_caption_{backend}_api_key")
+    # See /diarization/test's own comment on this parameter -- kept
+    # consistent here too so a live-stt-shaped model typed into the realtime
+    # or transcriptions fields by mistake still gets redirected to the right
+    # protocol instead of a confusing HTTP 404/timeout against a gRPC host.
+    live_stt_url = effective(conn, "live_caption_live_stt_url")
+
+    if payload.url:
+        url = payload.url
+    if payload.model:
+        model = payload.model
+    if payload.api_key is not None and not payload.api_key.startswith(MASK):
+        api_key = payload.api_key
+
+    result = diarize_svc.test_connection(
+        url,
+        model,
+        api_key or None,
+        timeout=DIARIZATION_TEST_TIMEOUT_SEC,
+        live_stt_url=url if backend == "live_stt" else live_stt_url,
+        backend=backend,
+    )
+
+    log.info(
+        "admin %s tested live caption %s (%s): ok=%s %sms",
+        admin.username, backend, model, result["ok"], result["latency_ms"],
     )
     return result
 

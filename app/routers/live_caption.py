@@ -8,9 +8,10 @@ recording itself keeps those sources apart: a live caption is a disposable
 draft and is never written to transcripts/diarizations.
 
 Each channel gets its own persistent session on the ASR backend's
-/v1/realtime endpoint (see services/diarize.realtime_url) -- audio is
-forwarded to that session the moment it arrives off the browser socket, with
-no local windowing on our side.
+/v1/realtime endpoint (live_caption_realtime_url, its own setting -- not
+derived from the batch diarizer's diarization_url any more, see
+config.RUNTIME_KEYS) -- audio is forwarded to that session the moment it
+arrives off the browser socket, with no local windowing on our side.
 
 Server VAD is deliberately turned OFF (_transcription_session_update sends
 ``turn_detection: null``), and this app commits the buffer itself on a fixed
@@ -49,21 +50,25 @@ pipeline model and no live-stt gRPC service to point at instead. It still
 has no cache-aware-vs-not special case (that conclusion above didn't change:
 every call is a fresh, disconnected POST no matter the chunk size, so a
 model's cache gets no benefit here regardless), and quality/latency are both
-worse than the other two backends -- but it needs nothing beyond the
-diarization service's own /v1/audio/transcriptions route (see
-services/diarize.transcriptions_url), so it is the one backend that asks
-nothing new of the operator.
+worse than the other two backends. It used to need nothing beyond the batch
+diarizer's own /v1/audio/transcriptions route (see
+services/diarize.transcriptions_url); now it has its own
+live_caption_transcriptions_url/_api_key/_model instead, so pointing it at
+the same backend as the Diarization panel -- still the common case, since a
+LocalAI-style host that serves diarization at /v1/audio/diarization usually
+serves plain transcription at /v1/audio/transcriptions too -- is one extra
+copy-paste rather than automatic.
 
 Confirmed against this deployment: only one model
-(live_caption_model's default, "lfm2.5-audio-1.5b-realtime") is registered
-as a realtime *pipeline* model. Every other model tried -- including the
-batch diarizer's own diarization_model -- gets a /v1/realtime connection
-rejected outright with "Model is not a pipeline model" the moment it opens,
-regardless of query parameters. A freshly-opened session also defaults to a
-full voice-assistant pipeline (spoken replies via server-VAD-triggered
-turn_detection.create_response) -- _open_session's session.update switches
-it to a passive transcription-only session before any audio is forwarded,
-so this never talks back.
+(live_caption_realtime_model's default, "lfm2.5-audio-1.5b-realtime") is
+registered as a realtime *pipeline* model. Every other model tried --
+including the batch diarizer's own diarization_model -- gets a /v1/realtime
+connection rejected outright with "Model is not a pipeline model" the
+moment it opens, regardless of query parameters. A freshly-opened session
+also defaults to a full voice-assistant pipeline (spoken replies via
+server-VAD-triggered turn_detection.create_response) -- _open_session's
+session.update switches it to a passive transcription-only session before
+any audio is forwarded, so this never talks back.
 
 Deliberately not a job (see jobs/queue.py). Nothing here is durable or
 resumable -- a dropped connection just means the browser reconnects and
@@ -118,13 +123,7 @@ from app.config import effective, get_settings
 from app.db import get_conn
 from app.logging_config import get_logger
 from app.services import users as users_svc
-from app.services.diarize import (
-    _headers,
-    is_live_stt_model,
-    realtime_url,
-    strip_language_tag,
-    transcriptions_url,
-)
+from app.services.diarize import _headers, strip_language_tag
 
 
 log = get_logger("live_caption")
@@ -458,6 +457,7 @@ async def channel_worker_livestt(
     queue: asyncio.Queue,
     target_url: str,
     model: str,
+    api_key: str | None,
     language: str | None,
     commit_interval_sec: float,
 ) -> None:
@@ -466,6 +466,14 @@ async def channel_worker_livestt(
     Connects to live-stt gRPC StreamingASR service, streams PCM16 audio
     chunks from queue, and relays committed text back to the browser
     WebSocket.
+
+    ``api_key``, when set, rides along as an ``("authorization", api_key)``
+    gRPC metadata pair on the Transcribe call -- the channel itself
+    (``grpc.aio.insecure_channel``) carries no transport-level auth, so this
+    is the only place a live-stt deployment behind a shared key can check
+    one. Omitted entirely (rather than sent empty) when unset, since this
+    app's own reference live-stt service has no auth concept at all and
+    plenty of deployments will leave it blank.
 
     live-stt's TranscriptDelta.text fragments are meant to be *appended*, not
     treated as independently-formatted units -- see asr.proto's doc comment
@@ -537,7 +545,8 @@ async def channel_worker_livestt(
                         break
                     yield asr_pb2.TranscriptionRequest(audio=chunk)
 
-            call = stub.Transcribe(request_generator())
+            metadata = [("authorization", api_key)] if api_key else None
+            call = stub.Transcribe(request_generator(), metadata=metadata)
 
             async def periodic_flush() -> None:
                 # Fallback cadence for models with no <EOU> (nemotron) so
@@ -756,14 +765,19 @@ async def live_caption_ws(websocket: WebSocket) -> None:
 
     with get_conn() as conn:
         enabled = effective(conn, "live_caption_enabled")
-        model = effective(conn, "live_caption_model")
         open_timeout = effective(conn, "live_caption_timeout_sec")
         commit_interval_sec = effective(conn, "live_caption_commit_interval_sec")
         default_language = effective(conn, "live_caption_language")
-        api_key = effective(conn, "diarization_api_key")
-        diarization_url = effective(conn, "diarization_url")
-        live_stt_url = effective(conn, "live_stt_url")
         backend = effective(conn, "live_caption_backend")
+        live_stt_url = effective(conn, "live_caption_live_stt_url")
+        live_stt_api_key = effective(conn, "live_caption_live_stt_api_key")
+        live_stt_model = effective(conn, "live_caption_live_stt_model")
+        realtime_target_url = effective(conn, "live_caption_realtime_url")
+        realtime_api_key = effective(conn, "live_caption_realtime_api_key")
+        realtime_model = effective(conn, "live_caption_realtime_model")
+        transcriptions_target_url = effective(conn, "live_caption_transcriptions_url")
+        transcriptions_api_key = effective(conn, "live_caption_transcriptions_api_key")
+        transcriptions_model = effective(conn, "live_caption_transcriptions_model")
 
     if not enabled:
         await websocket.close(code=4404)
@@ -779,19 +793,25 @@ async def live_caption_ws(websocket: WebSocket) -> None:
     raw_language = websocket.query_params.get("language")
     language = raw_language if raw_language is not None else default_language
 
-    # is_live_stt_model(model) always wins to the gRPC backend regardless of
-    # the live_caption_backend setting -- a safety net for a model that is
-    # obviously live-stt-shaped even if the setting says otherwise. Once that
-    # heuristic is out of the way, the setting picks between the other two:
-    # "transcriptions" for the reinstated stateless per-chunk POST backend
-    # (see channel_worker_transcriptions), everything else (the default,
-    # "realtime") for the persistent /v1/realtime session.
-    if backend == "live_stt" or is_live_stt_model(model):
+    # Each backend now owns its own url/api_key/model (see config.RUNTIME_KEYS
+    # and services/diarize.migrate_live_caption_backend_settings) -- no more
+    # is_live_stt_model(model) cross-check rerouting a plain setting mismatch
+    # onto the gRPC backend. That heuristic existed only because every
+    # backend used to share one live_caption_model field, so a live-stt-named
+    # value could end up selected while live_caption_backend said otherwise;
+    # with the fields fully separated, live_caption_backend alone decides.
+    if backend == "live_stt":
         resolved_backend = "live_stt"
     elif backend == "transcriptions":
         resolved_backend = "transcriptions"
     else:
         resolved_backend = "realtime"
+
+    model = {
+        "live_stt": live_stt_model,
+        "transcriptions": transcriptions_model,
+        "realtime": realtime_model,
+    }[resolved_backend]
 
     await websocket.accept()
     await websocket.send_json({"type": "info", "model": model, "backend": resolved_backend})
@@ -806,7 +826,8 @@ async def live_caption_ws(websocket: WebSocket) -> None:
                     websocket,
                     queues[ch],
                     live_stt_url,
-                    model,
+                    live_stt_model,
+                    live_stt_api_key or None,
                     language or None,
                     commit_interval_sec,
                 )
@@ -815,16 +836,15 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         ]
 
     elif resolved_backend == "transcriptions":
-        url = transcriptions_url(diarization_url)
         workers = [
             asyncio.create_task(
                 channel_worker_transcriptions(
                     ch,
                     websocket,
                     queues[ch],
-                    url,
-                    model,
-                    api_key or None,
+                    transcriptions_target_url,
+                    transcriptions_model,
+                    transcriptions_api_key or None,
                     language or None,
                     commit_interval_sec,
                     open_timeout,
@@ -834,16 +854,15 @@ async def live_caption_ws(websocket: WebSocket) -> None:
         ]
 
     else:
-        url = realtime_url(diarization_url)
         workers = [
             asyncio.create_task(
                 channel_worker(
                     ch,
                     websocket,
                     queues[ch],
-                    url,
-                    model,
-                    api_key or None,
+                    realtime_target_url,
+                    realtime_model,
+                    realtime_api_key or None,
                     language or None,
                     open_timeout,
                     commit_interval_sec,

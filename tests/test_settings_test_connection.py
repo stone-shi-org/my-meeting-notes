@@ -428,6 +428,139 @@ def test_diarization_test_endpoint_is_admin_only(user_client):
     assert user_client.post("/api/diarization/test").status_code == 403
 
 
+# --------------------------------------------------------------------------- #
+# /api/live-caption/test -- each of the three backends independently, with no
+# diarization_url/diarization_api_key fallback (see config.RUNTIME_KEYS on why
+# the three stopped sharing settings with each other and with Diarization).
+# --------------------------------------------------------------------------- #
+
+
+@respx.mock
+def test_live_caption_test_endpoint_uses_the_saved_realtime_config(admin_client):
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "live_caption_realtime_url": "http://realtime.test/v1/audio/diarization",
+                "live_caption_realtime_model": "lfm2.5-audio-1.5b-realtime",
+            }
+        },
+    )
+    respx.get("http://realtime.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "lfm2.5-audio-1.5b-realtime"}]})
+    )
+    resp = admin_client.post("/api/live-caption/test", json={"backend": "realtime"})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["model_found"] is True
+
+
+@respx.mock
+def test_live_caption_test_endpoint_uses_the_saved_transcriptions_config(admin_client):
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "live_caption_transcriptions_url": "http://transcriptions.test/v1/audio/transcriptions",
+                "live_caption_transcriptions_model": "whisper-large-turbo-q8_0",
+            }
+        },
+    )
+    respx.get("http://transcriptions.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "whisper-large-turbo-q8_0"}]})
+    )
+    resp = admin_client.post("/api/live-caption/test", json={"backend": "transcriptions"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+
+
+def test_live_caption_test_endpoint_dispatches_live_stt_to_the_grpc_probe(admin_client, monkeypatch):
+    """live_stt has no HTTP /v1/models to hit at all -- this must go through
+    diarize_svc.test_live_stt_connection, not list_models()."""
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "live_caption_live_stt_url": "livestt.test:4030",
+                "live_caption_live_stt_model": "realtime_eou_120m-v1",
+            }
+        },
+    )
+    seen = {}
+
+    def fake_test_live_stt_connection(target_url, model, timeout=15):
+        seen["target_url"] = target_url
+        seen["model"] = model
+        return {"ok": True, "latency_ms": 5, "error": None, "models_count": 1, "model_found": True}
+
+    monkeypatch.setattr(diarize_svc, "test_live_stt_connection", fake_test_live_stt_connection)
+
+    resp = admin_client.post("/api/live-caption/test", json={"backend": "live_stt"})
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert seen == {"target_url": "livestt.test:4030", "model": "realtime_eou_120m-v1"}
+
+
+@respx.mock
+def test_live_caption_test_endpoint_can_try_unsaved_edits(admin_client):
+    route = respx.get("http://other-realtime.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "custom-model"}]})
+    )
+    resp = admin_client.post(
+        "/api/live-caption/test",
+        json={
+            "backend": "realtime",
+            "url": "http://other-realtime.test/v1/audio/diarization",
+            "model": "custom-model",
+        },
+    )
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert route.called
+
+
+@respx.mock
+def test_live_caption_test_endpoint_never_reflects_a_later_diarization_url_change(admin_client):
+    """The whole point of splitting these settings apart: once
+    live_caption_realtime_url exists (seeded once at first boot -- see
+    services/diarize.migrate_live_caption_backend_settings), changing
+    diarization_url afterward (e.g. from the Diarization panel) must not
+    move what /live-caption/test for "realtime" probes."""
+    before = admin_client.get("/api/settings").json()["settings"]["live_caption_realtime_url"]["value"]
+    # Whatever this already-seeded value is (derived once from the
+    # env-default diarization_url at boot -- see the migration), mock its
+    # own /v1/models so the request the endpoint *should* make completes.
+    seeded_models_url = before.split("/v1/")[0].rstrip("/") + "/v1/models"
+    respx.get(seeded_models_url).mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "whatever"}]})
+    )
+
+    admin_client.put(
+        "/api/settings",
+        json={"values": {"diarization_url": "http://new-diarizer.test/v1/audio/diarization"}},
+    )
+    new_diarizer_route = respx.get("http://new-diarizer.test/v1/models").mock(
+        return_value=httpx.Response(200, json={"data": [{"id": "some-model"}]})
+    )
+
+    resp = admin_client.post("/api/live-caption/test", json={"backend": "realtime"})
+
+    after = admin_client.get("/api/settings").json()["settings"]["live_caption_realtime_url"]["value"]
+    assert resp.status_code == 200
+    assert after == before
+    assert not new_diarizer_route.called
+
+
+def test_live_caption_test_endpoint_rejects_an_unknown_backend(admin_client):
+    resp = admin_client.post("/api/live-caption/test", json={"backend": "bogus"})
+    assert resp.status_code == 400
+
+
+def test_live_caption_test_endpoint_is_admin_only(user_client):
+    assert user_client.post("/api/live-caption/test", json={"backend": "realtime"}).status_code == 403
+
+
 @respx.mock
 def test_transcribe_test_endpoint_uses_the_saved_config(admin_client):
     respx.get(TRANSCRIBE_MODELS_URL).mock(

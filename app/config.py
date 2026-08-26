@@ -91,15 +91,13 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # users.telegram_notify_* columns in LATE_COLUMNS), not a setting here.
     "telegram_enabled": ("bool", False),
     "telegram_bot_token": ("str", True),
-    # Realtime-session text captions during an active recording, over the
-    # same LocalAI instance/host as batch diarization but a different
-    # endpoint (see services/diarize.realtime_url and routers/live_caption.py's
-    # module docstring). Off by default: every open connection holds a
-    # persistent /v1/realtime session per channel open for the whole
-    # recording, on a box that also serves the LLM and the real diarizer, and
-    # an operator should opt into that load deliberately -- same reasoning as
-    # auto_match_enabled, not the env-only dev_provider_enabled bar, since
-    # nothing here is written anywhere for good.
+    # Realtime-session text captions during an active recording. Off by
+    # default: every open connection holds a persistent session per channel
+    # open for the whole recording, on a box that also serves the LLM and the
+    # real diarizer, and an operator should opt into that load deliberately --
+    # same reasoning as auto_match_enabled, not the env-only
+    # dev_provider_enabled bar, since nothing here is written anywhere for
+    # good.
     "live_caption_enabled": ("bool", False),
     # How often channel_worker commits whatever audio has been forwarded
     # since the last commit. Server-side VAD is deliberately off (see
@@ -118,18 +116,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # _open_session). Generous on purpose: this is a cold-start budget paid
     # once per channel per recording, not a per-caption one -- there is no
     # equivalent of the old per-window round trip to bound any more, since a
-    # session, once open, just stays open.
+    # session, once open, just stays open. Shared across all three backends
+    # (unlike url/api_key/model below): it bounds a connect handshake for
+    # realtime, and doubles as the per-call timeout for transcriptions'
+    # periodic POSTs -- live_stt's gRPC stream doesn't use it at all.
     "live_caption_timeout_sec": ("int", False),
-    # The model must be registered on the LocalAI instance as a realtime
-    # *pipeline* model -- confirmed against this deployment that every plain
-    # ASR/LLM model (including the batch diarizer's own diarization_model)
-    # gets rejected outright with "Model is not a pipeline model" the moment
-    # a /v1/realtime connection is opened for it. There is deliberately no
-    # "empty means fall back to diarization_model" behaviour here any more
-    # (that used to be live_caption_model's default): diarization_model is
-    # essentially never a realtime pipeline model, so falling back to it
-    # would just swap one guaranteed rejection for another.
-    "live_caption_model": ("str", False),
     # ISO-639-1 code ("en"), not a language name ("english") -- carried over
     # from the same requirement on the old per-chunk route, unconfirmed on
     # this one but kept narrow rather than risk the same silent breakage.
@@ -140,15 +131,50 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # to this), for a one-off meeting in a different language than usual
     # without a trip to Settings.
     "live_caption_language": ("str", False),
-    # Host:port for the standalone live-stt gRPC service (e.g. "localhost:4030").
-    # Used when live_caption_model is set to a live-stt model (e.g. "realtime_eou_120m-v1").
-    "live_stt_url": ("str", False),
     # Backend type for live captions: "live_stt" (gRPC), "realtime"
     # (persistent /v1/realtime WebSocket session, the default), or
     # "transcriptions" (periodic POST to the stateless /v1/audio/transcriptions
     # route -- see live_caption.py's module docstring for why this is the
     # last resort of the three, not the default).
+    #
+    # Each of the three below is fully independent -- its own url, api_key
+    # and model, never falling back to another backend's or to the batch
+    # diarizer's diarization_url/diarization_api_key. They used to share
+    # diarization_url/diarization_api_key (realtime, transcriptions) or a
+    # single live_caption_model (all three), which meant switching
+    # live_caption_backend and back could silently lose whatever model had
+    # been typed for the backend just left, and editing the Diarization panel
+    # could change what live captions talked to without anyone touching this
+    # page at all. See services/diarize.migrate_live_caption_backend_settings
+    # for the one-time upgrade that split those old shared values apart.
     "live_caption_backend": ("str", False),
+    # Host:port for the standalone live-stt gRPC service (e.g. "localhost:4030").
+    "live_caption_live_stt_url": ("str", False),
+    # gRPC has no built-in auth story here -- sent as an ("authorization", key)
+    # metadata pair on the Transcribe call when set, skipped entirely when not
+    # (see routers/live_caption.channel_worker_livestt).
+    "live_caption_live_stt_api_key": ("str", True),
+    "live_caption_live_stt_model": ("str", False),
+    # The literal ws(s)://.../v1/realtime URL -- not derived from
+    # diarization_url any more (see services/diarize.realtime_url, now only
+    # used by the one-time settings migration above).
+    "live_caption_realtime_url": ("str", False),
+    "live_caption_realtime_api_key": ("str", True),
+    # Must be registered on that backend as a realtime *pipeline* model --
+    # confirmed against this deployment that every plain ASR/LLM model
+    # (including the batch diarizer's own diarization_model) gets rejected
+    # outright with "Model is not a pipeline model" the moment a /v1/realtime
+    # connection is opened for it. Deliberately no "empty means fall back to
+    # diarization_model" behaviour: diarization_model is essentially never a
+    # realtime pipeline model, so falling back to it would just swap one
+    # guaranteed rejection for another.
+    "live_caption_realtime_model": ("str", False),
+    # The literal .../v1/audio/transcriptions URL -- not derived from
+    # diarization_url any more (see services/diarize.transcriptions_url, now
+    # only used by the one-time settings migration above).
+    "live_caption_transcriptions_url": ("str", False),
+    "live_caption_transcriptions_api_key": ("str", True),
+    "live_caption_transcriptions_model": ("str", False),
 
 
     # Periodic LLM analysis of the rolling live-caption transcript during a
@@ -318,10 +344,9 @@ class Settings(BaseSettings):
 
     # --- live captions ----------------------------------------------------
     # See RUNTIME_KEYS above for why this is a Settings toggle rather than an
-    # env-only flag. Reuses diarization_url's host/key -- see
-    # services/diarize.realtime_url -- but the model is its own setting
-    # (live_caption_model), since it must specifically be one registered as a
-    # realtime pipeline model, which diarization_model essentially never is.
+    # env-only flag, and for why each backend below owns its own url/api_key/
+    # model rather than sharing diarization_url/diarization_api_key or one
+    # another's model.
     live_caption_enabled: bool = False
     # See RUNTIME_KEYS above -- server VAD is off, so this is what actually
     # paces captions now.
@@ -329,16 +354,25 @@ class Settings(BaseSettings):
     # See RUNTIME_KEYS above -- a per-channel connect+handshake budget, not a
     # per-caption one.
     live_caption_timeout_sec: int = 45
-    # No fallback-to-diarization_model default any more -- see RUNTIME_KEYS
-    # above for why. This is the one model confirmed registered as a
-    # realtime pipeline on the deployment this was built against; an
-    # operator pointing at a different LocalAI instance will need to confirm
-    # what that instance has registered the same way.
-    live_caption_model: str = "lfm2.5-audio-1.5b-realtime"
     # ISO-639-1 code, or empty for auto-detect -- see RUNTIME_KEYS above.
     live_caption_language: str = ""
-    live_stt_url: str = "localhost:4030"
     live_caption_backend: str = "live_stt"
+    live_caption_live_stt_url: str = "localhost:4030"
+    live_caption_live_stt_api_key: str = ""
+    live_caption_live_stt_model: str = "realtime_eou_120m-v1"
+    # Blank on purpose: unlike live_stt above, there's no host:port this app
+    # can assume -- an operator turning this backend on must supply the
+    # actual ws(s)://.../v1/realtime URL for their own deployment.
+    live_caption_realtime_url: str = ""
+    live_caption_realtime_api_key: str = ""
+    # The one model confirmed registered as a realtime pipeline on the
+    # deployment this was built against; an operator pointing at a different
+    # backend will need to confirm what that instance has registered the
+    # same way.
+    live_caption_realtime_model: str = "lfm2.5-audio-1.5b-realtime"
+    live_caption_transcriptions_url: str = ""
+    live_caption_transcriptions_api_key: str = ""
+    live_caption_transcriptions_model: str = ""
 
 
 

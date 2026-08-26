@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends
 from app.config import get_settings
 from app.db import get_conn
 from app.deps import CurrentUser, active_user, get_db
-from app.errors import AppError
+from app.errors import AppError, ValidationError
 from app.logging_config import get_logger
 
 router = APIRouter(prefix="/api", tags=["system"])
@@ -151,6 +151,10 @@ def diarization_models(
     _: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    """Backs only the Diarization panel's model field -- Live Captions has
+    its own per-backend dropdown now (see /live-caption/models/{backend}),
+    since each of its three backends has its own url/api_key instead of
+    reusing diarization_url/diarization_api_key."""
     from app.config import effective
     from app.services import diarize as diarize_svc
 
@@ -160,24 +164,61 @@ def diarization_models(
     if refresh:
         _MODEL_CACHE.pop("diarization", None)
 
-    # This dropdown backs both the Diarization panel's model field and the
-    # Live Caption panel's (see SettingsPage.tsx, both pass modelsPath=
-    # "/diarization/models") -- the latter needs the live-stt realtime model
-    # offered too, even when the diarization HTTP service itself is down,
-    # since it's served by an entirely separate gRPC process. Added here
-    # rather than in diarize_svc.list_models() because that function's exact
-    # output also feeds test_connection()'s models_count/model_found.
-    live_stt_option = {"id": "realtime_eou_120m-v1", "object": "model"}
-
     try:
         models = _cached(
             "diarization", lambda: diarize_svc.list_models(url, api_key or None)
         )
     except AppError as exc:
-        return {"models": [live_stt_option], "error": exc.message, "base_url": url}
+        return {"models": [], "error": exc.message, "base_url": url}
 
-    if not any(m.get("id") == live_stt_option["id"] for m in models if isinstance(m, dict)):
-        models = [*models, live_stt_option]
+    return {"models": models, "error": None, "base_url": url}
+
+
+_LIVE_CAPTION_MODEL_BACKENDS = ("live_stt", "realtime", "transcriptions")
+
+
+@router.get("/live-caption/models/{backend}")
+def live_caption_models(
+    backend: str,
+    refresh: bool = False,
+    _: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Model dropdown for the Live Captions panel, one per backend -- each
+    queries that backend's own live_caption_{backend}_url/_api_key, never
+    diarization_url (see config.RUNTIME_KEYS on why the three stopped
+    sharing settings).
+
+    live_stt has no HTTP catalog to query here: it's a gRPC target, and this
+    app's live-stt client exposes no models-list call. The two ids this app
+    actually knows how to drive it with (diarize_svc.LIVE_STT_MODELS) are
+    offered as suggestions instead of a live lookup -- any other id is still
+    typeable.
+    """
+    from app.config import effective
+    from app.services import diarize as diarize_svc
+
+    if backend not in _LIVE_CAPTION_MODEL_BACKENDS:
+        raise ValidationError(f"Unknown live caption backend: {backend!r}")
+
+    if backend == "live_stt":
+        return {
+            "models": [{"id": m, "object": "model"} for m in sorted(diarize_svc.LIVE_STT_MODELS)],
+            "error": None,
+            "base_url": None,
+        }
+
+    url = effective(conn, f"live_caption_{backend}_url")
+    api_key = effective(conn, f"live_caption_{backend}_api_key")
+    cache_key = f"live_caption_{backend}"
+
+    if refresh:
+        _MODEL_CACHE.pop(cache_key, None)
+
+    try:
+        models = _cached(cache_key, lambda: diarize_svc.list_models(url, api_key or None))
+    except AppError as exc:
+        return {"models": [], "error": exc.message, "base_url": url}
 
     return {"models": models, "error": None, "base_url": url}
 

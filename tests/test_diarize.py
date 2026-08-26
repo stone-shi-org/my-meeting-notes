@@ -8,6 +8,7 @@ import httpx
 import pytest
 import respx
 
+from app.db import get_conn, utcnow
 from app.errors import DiarizationError, DiarizationUnreachableError
 from app.services import diarize as diarize_svc
 from tests.conftest import FIXTURES
@@ -313,3 +314,88 @@ class TestStripLanguageTag:
         # survive -- only the specific lowercase-language/uppercase-region
         # BCP-47 shape is stripped.
         assert diarize_svc.strip_language_tag("check the <DIV> tag") == "check the <DIV> tag"
+
+
+class TestMigrateLiveCaptionBackendSettings:
+    """The one-time split of the old shared live_caption_model/live_stt_url/
+    diarization_url/diarization_api_key into three fully independent
+    backends -- see the function's own docstring for why this exists."""
+
+    def _row(self, db_path, key):
+        with get_conn(db_path) as conn:
+            return conn.execute(
+                "SELECT value, value_type, is_secret FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+
+    def test_carries_the_old_shared_values_into_all_three_backends(self, initialised_db):
+        with get_conn(initialised_db) as conn:
+            now = utcnow()
+            conn.executemany(
+                "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [
+                    ("live_stt_url", "old-livestt-host:4030", "str", 0, now),
+                    ("live_caption_model", "old-shared-model", "str", 0, now),
+                    ("diarization_url", "http://diarizer.test/v1/audio/diarization", "str", 0, now),
+                    ("diarization_api_key", "sk-old-diarization-key", "str", 1, now),
+                ],
+            )
+
+        seeded = diarize_svc.migrate_live_caption_backend_settings(initialised_db)
+        assert seeded == 8
+
+        assert self._row(initialised_db, "live_caption_live_stt_url")["value"] == "old-livestt-host:4030"
+        assert self._row(initialised_db, "live_caption_live_stt_model")["value"] == "old-shared-model"
+        # realtime/transcriptions URLs are computed with the exact same
+        # helpers the old runtime-derivation path used, not re-derived by
+        # some new formula -- see realtime_url/transcriptions_url above.
+        assert self._row(initialised_db, "live_caption_realtime_url")["value"] == diarize_svc.realtime_url(
+            "http://diarizer.test/v1/audio/diarization"
+        )
+        assert self._row(
+            initialised_db, "live_caption_transcriptions_url"
+        )["value"] == diarize_svc.transcriptions_url("http://diarizer.test/v1/audio/diarization")
+        assert self._row(initialised_db, "live_caption_realtime_model")["value"] == "old-shared-model"
+        assert self._row(initialised_db, "live_caption_transcriptions_model")["value"] == "old-shared-model"
+        assert self._row(initialised_db, "live_caption_realtime_api_key")["value"] == "sk-old-diarization-key"
+        assert self._row(initialised_db, "live_caption_transcriptions_api_key")["value"] == "sk-old-diarization-key"
+        # is_secret carried over correctly for the two api_key fields.
+        assert self._row(initialised_db, "live_caption_realtime_api_key")["is_secret"] == 1
+        assert self._row(initialised_db, "live_caption_live_stt_url")["is_secret"] == 0
+
+    def test_falls_back_to_the_old_literal_defaults_when_nothing_was_ever_set(self, initialised_db):
+        """A fresh install (or one that only ever ran on env defaults, never
+        touching Settings) still gets seeded -- from the same literal
+        defaults live_stt_url/live_caption_model used to have, not from
+        whatever RUNTIME_KEYS says today."""
+        diarize_svc.migrate_live_caption_backend_settings(initialised_db)
+
+        assert self._row(initialised_db, "live_caption_live_stt_url")["value"] == "localhost:4030"
+        assert (
+            self._row(initialised_db, "live_caption_live_stt_model")["value"]
+            == "lfm2.5-audio-1.5b-realtime"
+        )
+        assert (
+            self._row(initialised_db, "live_caption_realtime_model")["value"]
+            == "lfm2.5-audio-1.5b-realtime"
+        )
+
+    def test_running_it_twice_changes_nothing_the_second_time(self, initialised_db):
+        assert diarize_svc.migrate_live_caption_backend_settings(initialised_db) == 8
+        assert diarize_svc.migrate_live_caption_backend_settings(initialised_db) == 0
+
+    def test_does_not_clobber_a_value_already_set_some_other_way(self, initialised_db):
+        """INSERT OR IGNORE per key, not a blanket skip on the marker alone:
+        if something already wrote one of these keys before this ran (e.g. an
+        admin who'd already discovered and started using the new field), that
+        value wins over a freshly computed one."""
+        with get_conn(initialised_db) as conn:
+            conn.execute(
+                "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+                "VALUES ('live_caption_live_stt_url', 'already-set:9999', 'str', 0, ?)",
+                (utcnow(),),
+            )
+
+        diarize_svc.migrate_live_caption_backend_settings(initialised_db)
+
+        assert self._row(initialised_db, "live_caption_live_stt_url")["value"] == "already-set:9999"

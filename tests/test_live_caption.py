@@ -533,16 +533,24 @@ class TestLiveCaptionWsRealtimeRelay:
 
 
 class TestIsLiveSttModel:
+    """is_live_stt_model itself lives in services/diarize.py (see
+    test_diarize.py for its own coverage) -- live_caption.py no longer
+    imports it at all now that each backend has its own model setting and
+    live_caption_ws resolves purely on live_caption_backend, so this just
+    confirms the diarize-owned heuristic diarize_svc.test_connection still
+    relies on hasn't drifted."""
+
     def test_identifies_live_stt_models(self):
-        assert live_caption.is_live_stt_model("realtime_eou_120m-v1") is True
-        assert live_caption.is_live_stt_model("nemotron-3.5-asr-streaming-0.6b") is True
-        assert live_caption.is_live_stt_model("lfm2.5-audio-1.5b-realtime") is False
-        assert live_caption.is_live_stt_model("") is False
+        from app.services import diarize as diarize_svc
+
+        assert diarize_svc.is_live_stt_model("realtime_eou_120m-v1") is True
+        assert diarize_svc.is_live_stt_model("nemotron-3.5-asr-streaming-0.6b") is True
+        assert diarize_svc.is_live_stt_model("lfm2.5-audio-1.5b-realtime") is False
+        assert diarize_svc.is_live_stt_model("") is False
 
 
 class TestChannelWorkerLiveSTT:
-    @pytest.mark.asyncio
-    async def test_relays_delta_events_as_captions(self, monkeypatch):
+    def _patch_grpc(self, monkeypatch, events, stub_calls: list):
         from app.pb.livestt.v1 import asr_pb2
 
         class FakeGrpcCall:
@@ -561,19 +569,9 @@ class TestChannelWorkerLiveSTT:
             def __init__(self, channel):
                 pass
 
-            def Transcribe(self, request_iterator):
-                events = [
-                    asr_pb2.TranscriptionEvent(ready=asr_pb2.Ready(model="realtime_eou_120m-v1")),
-                    asr_pb2.TranscriptionEvent(
-                        delta=asr_pb2.TranscriptDelta(text="hello from live stt")
-                    ),
-                    # Deltas only buffer (see channel_worker_livestt's
-                    # docstring on why -- fragments must be concatenated with
-                    # no separator, not relayed as independent captions); an
-                    # EndOfUtterance is the real flush trigger.
-                    asr_pb2.TranscriptionEvent(eou=asr_pb2.EndOfUtterance(at_sec=1.0)),
-                ]
-                return FakeGrpcCall(events)
+            def Transcribe(self, request_iterator, metadata=None):
+                stub_calls.append(metadata)
+                return FakeGrpcCall(list(events))
 
         class FakeGrpcChannel:
             async def __aenter__(self):
@@ -588,6 +586,25 @@ class TestChannelWorkerLiveSTT:
         import grpc
         monkeypatch.setattr(grpc.aio, "insecure_channel", fake_insecure_channel)
         monkeypatch.setattr("app.pb.livestt.v1.asr_pb2_grpc.StreamingASRStub", FakeGrpcStub)
+        return asr_pb2
+
+    @pytest.mark.asyncio
+    async def test_relays_delta_events_as_captions(self, monkeypatch):
+        from app.pb.livestt.v1 import asr_pb2
+
+        stub_calls: list = []
+        events = [
+            asr_pb2.TranscriptionEvent(ready=asr_pb2.Ready(model="realtime_eou_120m-v1")),
+            asr_pb2.TranscriptionEvent(
+                delta=asr_pb2.TranscriptDelta(text="hello from live stt")
+            ),
+            # Deltas only buffer (see channel_worker_livestt's docstring on
+            # why -- fragments must be concatenated with no separator, not
+            # relayed as independent captions); an EndOfUtterance is the
+            # real flush trigger.
+            asr_pb2.TranscriptionEvent(eou=asr_pb2.EndOfUtterance(at_sec=1.0)),
+        ]
+        self._patch_grpc(monkeypatch, events, stub_calls)
 
         browser = FakeBrowserSocket()
         queue: asyncio.Queue = asyncio.Queue()
@@ -595,7 +612,7 @@ class TestChannelWorkerLiveSTT:
 
         task = asyncio.create_task(
             live_caption.channel_worker_livestt(
-                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, 30.0
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, None, 30.0
             )
         )
         try:
@@ -608,6 +625,35 @@ class TestChannelWorkerLiveSTT:
         finally:
             task.cancel()
             await asyncio.gather(task, return_exceptions=True)
+
+        # No api_key given -- Transcribe must not be called with a metadata
+        # pair at all, since this app's own reference live-stt service has
+        # no auth concept and plenty of deployments will leave it blank.
+        assert stub_calls == [None]
+
+    @pytest.mark.asyncio
+    async def test_sends_api_key_as_authorization_metadata_when_set(self, monkeypatch):
+        from app.pb.livestt.v1 import asr_pb2
+
+        stub_calls: list = []
+        events = [asr_pb2.TranscriptionEvent(ready=asr_pb2.Ready(model="realtime_eou_120m-v1"))]
+        self._patch_grpc(monkeypatch, events, stub_calls)
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_livestt(
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", "sk-livestt", None, 30.0
+            )
+        )
+        try:
+            await browser.next()  # the "ready" event's idle status
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert stub_calls == [[("authorization", "sk-livestt")]]
 
 
 TRANSCRIPTIONS_URL = "http://asr.test/v1/audio/transcriptions"
@@ -823,20 +869,24 @@ class TestLiveCaptionWsTranscriptionsRelay:
             "VALUES ('live_caption_commit_interval_sec', '0.05', 'float', 0, ?)",
             (utcnow(),),
         )
-        # Set explicitly rather than relying on diarization_url's class
-        # default: a real deployment's .env overrides that default to a
-        # live service address, which would make this test a real network
-        # call instead of an offline respx-mocked one (see test_diarize.py
-        # for the same convention).
+        # Set explicitly rather than relying on the class default: a real
+        # deployment's .env overrides that default to a live service
+        # address, which would make this test a real network call instead
+        # of an offline respx-mocked one (see test_diarize.py for the same
+        # convention). live_caption_transcriptions_url is its own setting
+        # now -- not derived from diarization_url (see
+        # services/diarize.migrate_live_caption_backend_settings). REPLACE,
+        # not a plain INSERT: that same migration already ran (and already
+        # seeded a row for this key) during admin_client's own app startup,
+        # above.
         conn.execute(
-            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
-            "VALUES ('diarization_url', 'http://diarizer.test/v1/audio/diarization', 'str', 0, ?)",
+            "INSERT OR REPLACE INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('live_caption_transcriptions_url', "
+            "'http://diarizer.test/v1/audio/transcriptions', 'str', 0, ?)",
             (utcnow(),),
         )
         conn.commit()
 
-        # Derived from diarization_url above via transcriptions_url -- see
-        # services/diarize.transcriptions_url.
         url = "http://diarizer.test/v1/audio/transcriptions"
         respx.post(url).mock(return_value=_sse_transcript_response("hi there"))
 

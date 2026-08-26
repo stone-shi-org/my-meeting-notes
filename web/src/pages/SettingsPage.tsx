@@ -123,6 +123,7 @@ function SettingsForm({
   modelKey,
   testPath,
   testKeyMap,
+  testExtra,
 }: {
   title: string;
   description: string;
@@ -151,6 +152,11 @@ function SettingsForm({
    * test endpoint expects (e.g. "base_url"), so Test always exercises
    * whatever is currently in the form -- saved or not. */
   testKeyMap?: Record<string, string>;
+  /** Extra fixed fields merged into the Test request body alongside
+   * testKeyMap's, for an endpoint that needs to know which of several
+   * things it's testing (e.g. /live-caption/test's `backend`) -- not itself
+   * a settings key, so there's nothing to look up in `entries`/`draft`. */
+  testExtra?: Record<string, unknown>;
 }) {
   const { isAdmin } = useAuth();
   const queryClient = useQueryClient();
@@ -179,7 +185,7 @@ function SettingsForm({
 
   const test = useMutation({
     mutationFn: () => {
-      const body: Record<string, unknown> = {};
+      const body: Record<string, unknown> = { ...testExtra };
       for (const [settingKey, shortKey] of Object.entries(testKeyMap ?? {})) {
         const entry = entries[settingKey];
         const value = draft[settingKey] ?? entry?.value;
@@ -733,82 +739,175 @@ export function DiarizationSettingsPage() {
   );
 }
 
-export function LiveCaptionsSettingsPage() {
+/**
+ * Endpoint type is its own immediate-save control, same pattern as
+ * DiarizeOnlyToggle above -- it gates which of the three per-backend forms
+ * below is shown, and a half-saved draft value would leave the visible form
+ * not matching what's actually configured.
+ */
+function LiveCaptionBackendSelect() {
+  const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
+  const settings = useSettings();
+  const value = String(settings.data?.settings.live_caption_backend?.value ?? 'live_stt');
+
+  const save = useMutation({
+    mutationFn: (next: string) => api.put('/settings', { values: { live_caption_backend: next } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  });
+
+  if (settings.isLoading) return <Skeleton className="h-24 w-full" />;
+
   return (
-    <SettingsForm
-      title="Live captions"
-      description="A rough transcript shown while a recording is in progress. Live STT and /v1/realtime hold one persistent streaming session open per audio channel for the whole recording; /v1/audio/transcriptions instead POSTs short chunks on a fixed interval."
-      modelsPath="/diarization/models"
-      modelKey="live_caption_model"
-      testPath="/diarization/test"
-      testKeyMap={{
-        diarization_url: 'url',
-        diarization_api_key: 'api_key',
-        live_caption_model: 'model',
-        live_stt_url: 'live_stt_url',
-        live_caption_backend: 'live_caption_backend',
-      }}
-      keys={[
-        {
-          key: 'live_caption_enabled',
-          label: 'Show live captions while recording',
-        },
-        {
-          key: 'live_caption_backend',
-          label: 'Endpoint type',
-          hint: 'Select the live caption streaming endpoint architecture.',
-          options: [
-            { value: 'live_stt', label: 'Live STT (gRPC)' },
-            { value: 'realtime', label: 'OpenAI /v1/realtime (WebSocket)' },
-            { value: 'transcriptions', label: '/v1/audio/transcriptions (periodic POST)' },
-          ],
-          badge: (val: string) => {
-            if (val === 'live_stt') {
-              return { label: 'gRPC live-stt', variant: 'success' };
-            }
-            if (val === 'transcriptions') {
-              return { label: 'Periodic /v1/audio/transcriptions', variant: 'warning' };
-            }
-            return { label: 'WebSocket /v1/realtime', variant: 'info' };
+    <Card className="p-5">
+      <Label htmlFor="live_caption_backend">Endpoint type</Label>
+      <p className="mt-1 text-sm text-fg-subtle">
+        Each endpoint type below keeps its own URL, API key and model -- switching here doesn't
+        touch the settings for the other two, and switching back restores them exactly as left.
+      </p>
+      <Select
+        id="live_caption_backend"
+        className="mt-2"
+        value={value}
+        disabled={!isAdmin || save.isPending}
+        onChange={(e) => save.mutate(e.target.value)}
+      >
+        <option value="live_stt">Live STT (gRPC)</option>
+        <option value="realtime">OpenAI /v1/realtime (WebSocket)</option>
+        <option value="transcriptions">/v1/audio/transcriptions (periodic POST)</option>
+      </Select>
+    </Card>
+  );
+}
+
+export function LiveCaptionsSettingsPage() {
+  const settings = useSettings();
+  const backend = String(settings.data?.settings.live_caption_backend?.value ?? 'live_stt');
+
+  return (
+    <div className="space-y-4">
+      <SettingsForm
+        title="Live captions"
+        description="A rough transcript shown while a recording is in progress. Live STT and /v1/realtime hold one persistent streaming session open per audio channel for the whole recording; /v1/audio/transcriptions instead POSTs short chunks on a fixed interval."
+        keys={[
+          {
+            key: 'live_caption_enabled',
+            label: 'Show live captions while recording',
           },
-        },
-        {
-          key: 'live_stt_url',
-          label: 'Live STT gRPC URL',
-          hint: 'Host:port for the standalone live-stt gRPC streaming service (e.g. localhost:4030).',
-          visible: (draft, entries) => {
-            const val = draft.live_caption_backend ?? entries.live_caption_backend?.value ?? 'live_stt';
-            return val === 'live_stt';
+          {
+            key: 'live_caption_language',
+            label: 'Language',
+            hint: 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
           },
-        },
-        {
-          key: 'live_caption_model',
-          label: 'Model',
-          hint: 'The streaming ASR model name. Default for Live STT gRPC: realtime_eou_120m-v1. Default for WebSocket /v1/realtime: lfm2.5-audio-1.5b-realtime. /v1/audio/transcriptions mode uses whatever plain ASR model the diarization service has registered.',
-        },
-        {
-          key: 'live_caption_language',
-          label: 'Language',
-          hint: 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
-        },
-        {
-          key: 'live_caption_commit_interval_sec',
-          label: 'Commit interval (seconds)',
-          type: 'number',
-          hint: 'How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode), or how long a chunk is before it is POSTed (periodic /v1/audio/transcriptions mode). Not used by Live STT gRPC, which flushes on its own utterance boundaries.',
-          visible: (draft, entries) => {
-            const val = draft.live_caption_backend ?? entries.live_caption_backend?.value ?? 'live_stt';
-            return val === 'realtime' || val === 'transcriptions';
+          {
+            key: 'live_caption_commit_interval_sec',
+            label: 'Commit interval (seconds)',
+            type: 'number',
+            hint: 'How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode), or how long a chunk is before it is POSTed (periodic /v1/audio/transcriptions mode). Not used by Live STT gRPC, which flushes on its own utterance boundaries.',
+            visible: () => backend === 'realtime' || backend === 'transcriptions',
           },
-        },
-        {
-          key: 'live_caption_timeout_sec',
-          label: 'Connect timeout (seconds)',
-          type: 'number',
-          hint: 'How long one channel may take to open its session and complete the initial handshake before timing out (WebSocket /v1/realtime mode), or the per-call timeout for one chunk\'s POST (periodic /v1/audio/transcriptions mode).',
-        },
-      ]}
-    />
+          {
+            key: 'live_caption_timeout_sec',
+            label: 'Connect timeout (seconds)',
+            type: 'number',
+            hint: 'How long one channel may take to open its session and complete the initial handshake before timing out (WebSocket /v1/realtime mode), or the per-call timeout for one chunk\'s POST (periodic /v1/audio/transcriptions mode).',
+          },
+        ]}
+      />
+
+      <LiveCaptionBackendSelect />
+
+      {backend === 'live_stt' && (
+        <SettingsForm
+          title="Live STT (gRPC)"
+          description="A standalone streaming ASR service this app speaks gRPC to directly -- no realtime pipeline model or diarization-shaped HTTP endpoint required."
+          modelsPath="/live-caption/models/live_stt"
+          modelKey="live_caption_live_stt_model"
+          testPath="/live-caption/test"
+          testExtra={{ backend: 'live_stt' }}
+          testKeyMap={{
+            live_caption_live_stt_url: 'url',
+            live_caption_live_stt_api_key: 'api_key',
+            live_caption_live_stt_model: 'model',
+          }}
+          keys={[
+            {
+              key: 'live_caption_live_stt_url',
+              label: 'Endpoint URL',
+              hint: 'Host:port for the standalone live-stt gRPC streaming service, e.g. localhost:4030.',
+            },
+            {
+              key: 'live_caption_live_stt_api_key',
+              label: 'API key',
+              hint: 'Leave blank if the service has no auth. Sent as an authorization gRPC metadata pair when set.',
+            },
+            {
+              key: 'live_caption_live_stt_model',
+              label: 'Model',
+              hint: 'The streaming ASR model name, e.g. realtime_eou_120m-v1.',
+            },
+          ]}
+        />
+      )}
+
+      {backend === 'realtime' && (
+        <SettingsForm
+          title="OpenAI /v1/realtime (WebSocket)"
+          description="A persistent /v1/realtime session per audio channel, held open for the whole recording. The model must be registered on that backend as a realtime pipeline model -- a plain ASR/LLM model gets rejected outright the moment a session opens."
+          modelsPath="/live-caption/models/realtime"
+          modelKey="live_caption_realtime_model"
+          testPath="/live-caption/test"
+          testExtra={{ backend: 'realtime' }}
+          testKeyMap={{
+            live_caption_realtime_url: 'url',
+            live_caption_realtime_api_key: 'api_key',
+            live_caption_realtime_model: 'model',
+          }}
+          keys={[
+            {
+              key: 'live_caption_realtime_url',
+              label: 'Endpoint URL',
+              hint: 'The full ws(s):// /v1/realtime URL, e.g. wss://host:4012/v1/realtime.',
+            },
+            { key: 'live_caption_realtime_api_key', label: 'API key', hint: 'Leave blank if not required' },
+            {
+              key: 'live_caption_realtime_model',
+              label: 'Model',
+              hint: 'Must be registered on that backend as a realtime pipeline model, e.g. lfm2.5-audio-1.5b-realtime.',
+            },
+          ]}
+        />
+      )}
+
+      {backend === 'transcriptions' && (
+        <SettingsForm
+          title="/v1/audio/transcriptions (periodic POST)"
+          description="No persistent session -- each channel POSTs a short window of audio on a fixed interval instead. Lower quality/latency than the other two, but works against a plain ASR endpoint with no realtime pipeline model and no gRPC service."
+          modelsPath="/live-caption/models/transcriptions"
+          modelKey="live_caption_transcriptions_model"
+          testPath="/live-caption/test"
+          testExtra={{ backend: 'transcriptions' }}
+          testKeyMap={{
+            live_caption_transcriptions_url: 'url',
+            live_caption_transcriptions_api_key: 'api_key',
+            live_caption_transcriptions_model: 'model',
+          }}
+          keys={[
+            {
+              key: 'live_caption_transcriptions_url',
+              label: 'Endpoint URL',
+              hint: 'Full path, e.g. http://host:4012/v1/audio/transcriptions.',
+            },
+            { key: 'live_caption_transcriptions_api_key', label: 'API key', hint: 'Leave blank if not required' },
+            {
+              key: 'live_caption_transcriptions_model',
+              label: 'Model',
+              hint: 'Whatever plain ASR model that endpoint has registered.',
+            },
+          ]}
+        />
+      )}
+    </div>
   );
 }
 

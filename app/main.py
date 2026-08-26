@@ -41,6 +41,7 @@ from app.routers import (
     users,
 )
 from app.services import pipeline  # noqa: F401  -- registers the job bodies
+from app.services import diarize as diarize_svc
 from app.services import integrations as integrations_svc
 from app.services import users as users_svc
 
@@ -61,6 +62,7 @@ async def lifespan(app: FastAPI):
     # After seed_admin, so a first boot migrates the seeded MCP config onto the
     # admin account rather than finding no users and doing nothing.
     integrations_svc.migrate_mcp_servers()
+    diarize_svc.migrate_live_caption_backend_settings()
     if purged:
         log.info("purged %d expired session(s)", purged)
     log.info("database ready at %s", settings.db_path)

@@ -22,7 +22,7 @@ from pathlib import Path
 import httpx
 
 from app.config import effective, get_settings
-from app.db import get_conn
+from app.db import get_conn, utcnow
 from app.errors import DiarizationError, DiarizationUnreachableError
 from app.logging_config import get_logger
 
@@ -404,4 +404,81 @@ def list_models(base_url: str, api_key: str | None = None, timeout: int = 15) ->
     except httpx.HTTPError as exc:
         raise DiarizationError(f"Could not list diarization models: {exc}") from exc
     return response.json().get("data", [])
+
+
+_LIVE_CAPTION_MIGRATION_KEY = "live_caption_backend_settings_migrated"
+
+
+def migrate_live_caption_backend_settings(db_path=None) -> int:
+    """One-time split of the old shared live-caption config into three fully
+    independent backends.
+
+    Before this, all three backends read one shared ``live_caption_model``,
+    and two of them (realtime, transcriptions) derived their URL from the
+    batch diarizer's own ``diarization_url``/``diarization_api_key`` via
+    ``realtime_url``/``transcriptions_url`` above rather than having a
+    setting of their own. That meant switching ``live_caption_backend`` and
+    back could silently lose whatever model had been typed for the backend
+    just left, and editing the Diarization panel could change what live
+    captions talked to without anyone touching the Live Captions page at
+    all.
+
+    Runs once, guarded by a marker in ``app_settings``, same pattern as
+    ``integrations.migrate_mcp_servers``. Old keys are read directly by
+    their literal historical defaults rather than through
+    RUNTIME_KEYS/``effective()``, since ``live_caption_model`` and
+    ``live_stt_url`` are retired from the settings schema the moment this
+    ships -- this keeps working even after they're gone.
+
+    ``INSERT OR IGNORE`` per key rather than a blanket skip on the marker
+    row alone: if a key already picked up a value some other way before this
+    ran, that value wins over a computed one.
+    """
+    with get_conn(db_path) as conn:
+        marker = conn.execute(
+            "SELECT value FROM app_settings WHERE key = ?", (_LIVE_CAPTION_MIGRATION_KEY,)
+        ).fetchone()
+        if marker and marker["value"] == "1":
+            return 0
+
+        def _old(key: str, default: str) -> str:
+            row = conn.execute(
+                "SELECT value FROM app_settings WHERE key = ?", (key,)
+            ).fetchone()
+            if row is not None and row["value"]:
+                return row["value"]
+            return default
+
+        old_live_stt_url = _old("live_stt_url", "localhost:4030")
+        old_model = _old("live_caption_model", "lfm2.5-audio-1.5b-realtime")
+        diar_url = effective(conn, "diarization_url")
+        diar_api_key = effective(conn, "diarization_api_key")
+
+        now = utcnow()
+        seed = [
+            ("live_caption_live_stt_url", old_live_stt_url, "str", 0),
+            ("live_caption_live_stt_model", old_model, "str", 0),
+            ("live_caption_realtime_url", realtime_url(diar_url), "str", 0),
+            ("live_caption_realtime_api_key", diar_api_key, "str", 1),
+            ("live_caption_realtime_model", old_model, "str", 0),
+            ("live_caption_transcriptions_url", transcriptions_url(diar_url), "str", 0),
+            ("live_caption_transcriptions_api_key", diar_api_key, "str", 1),
+            ("live_caption_transcriptions_model", old_model, "str", 0),
+        ]
+        seeded = 0
+        for key, value, value_type, is_secret in seed:
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO app_settings "
+                "(key, value, value_type, is_secret, updated_at) VALUES (?, ?, ?, ?, ?)",
+                (key, value or "", value_type, is_secret, now),
+            )
+            seeded += cur.rowcount
+
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES (?, '1', 'str', 0, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = '1', updated_at = excluded.updated_at",
+            (_LIVE_CAPTION_MIGRATION_KEY, now),
+        )
+        return seeded
 
