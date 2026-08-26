@@ -16,7 +16,7 @@ import { ErrorState } from '@/components/ui/states';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import { languageSupportNoteFor, restrictedLanguagesForModel } from '@/lib/recording';
+import { restrictedLanguagesForModel } from '@/lib/recording';
 import type {
   Integration,
   IntegrationTestResult,
@@ -127,7 +127,7 @@ function SettingsForm({
   testExtra,
 }: {
   title: string;
-  description: string;
+  description?: string;
   keys: {
     key: string;
     label: string;
@@ -223,7 +223,7 @@ function SettingsForm({
   return (
     <Card className="p-5">
       <h2 className="font-display text-lg font-semibold">{title}</h2>
-      <p className="mt-1 text-sm text-fg-subtle">{description}</p>
+      {description && <p className="mt-1 text-sm text-fg-subtle">{description}</p>}
 
       <div className="mt-5 space-y-4">
         {keys.map(({ key, label, hint, type, step, options, badge, visible, disabled: keyDisabled, disabledHint }) => {
@@ -778,10 +778,6 @@ function LiveCaptionBackendSelect() {
   return (
     <Card className="p-5">
       <Label htmlFor="live_caption_backend">Endpoint type</Label>
-      <p className="mt-1 text-sm text-fg-subtle">
-        Each endpoint type below keeps its own URL, API key and model -- switching here doesn't
-        touch the settings for the other two, and switching back restores them exactly as left.
-      </p>
       <Select
         id="live_caption_backend"
         className="mt-2"
@@ -805,7 +801,6 @@ export function LiveCaptionsSettingsPage() {
     <div className="space-y-4">
       <SettingsForm
         title="Live captions"
-        description="A rough transcript shown while a recording is in progress. Live STT and /v1/realtime hold one persistent streaming session open per audio channel for the whole recording; /v1/audio/transcriptions instead POSTs short chunks on a fixed interval."
         keys={[
           {
             key: 'live_caption_enabled',
@@ -814,27 +809,8 @@ export function LiveCaptionsSettingsPage() {
           {
             key: 'live_caption_language',
             label: 'Language',
-            // Driven by whichever backend is active *and* that backend's
-            // own configured model -- asrLanguageSupport.json is keyed by
-            // model name, not backend, because the three backends' default
-            // models turn out to have three different (and all narrow)
-            // language ceilings, not just live_stt's. `entries` here is the
-            // full settings snapshot (every SettingsForm on this page reads
-            // the same query), so this can see another card's *saved*
-            // model even though it can't see that card's own unsaved draft.
-            hint: (_draft, entries) => {
-              const model = String(entries[`live_caption_${backend}_model`]?.value ?? '');
-              return (
-                languageSupportNoteFor(model) ??
-                'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.'
-              );
-            },
-            // undefined (not a mapped generic list) for a model with no
-            // known restriction -- see restrictedLanguagesForModel's doc
-            // comment: this field falls back to free text in that case
-            // (SettingsForm's Input+datalist branch), which is more useful
-            // than a fixed picklist for a Whisper/VibeVoice-shaped model's
-            // ~50-100 languages.
+            // See restrictedLanguagesForModel's doc comment: undefined for
+            // a model with no known restriction falls back to free text.
             options: (_draft, entries) => {
               const model = String(entries[`live_caption_${backend}_model`]?.value ?? '');
               return restrictedLanguagesForModel(model)?.map(({ code, label }) => ({ value: code, label }));
@@ -844,14 +820,12 @@ export function LiveCaptionsSettingsPage() {
             key: 'live_caption_commit_interval_sec',
             label: 'Commit interval (seconds)',
             type: 'number',
-            hint: 'How often each channel commits whatever audio arrived since the last commit (WebSocket /v1/realtime mode), or how long a chunk is before it is POSTed (periodic /v1/audio/transcriptions mode). Not used by Live STT gRPC, which flushes on its own utterance boundaries.',
             visible: () => backend === 'realtime' || backend === 'transcriptions',
           },
           {
             key: 'live_caption_timeout_sec',
             label: 'Connect timeout (seconds)',
             type: 'number',
-            hint: 'How long one channel may take to open its session and complete the initial handshake before timing out (WebSocket /v1/realtime mode), or the per-call timeout for one chunk\'s POST (periodic /v1/audio/transcriptions mode).',
           },
         ]}
       />
@@ -861,7 +835,6 @@ export function LiveCaptionsSettingsPage() {
       {backend === 'live_stt' && (
         <SettingsForm
           title="Live STT (gRPC)"
-          description="A standalone streaming ASR service this app speaks gRPC to directly -- no realtime pipeline model or diarization-shaped HTTP endpoint required."
           modelsPath="/live-caption/models/live_stt"
           modelKey="live_caption_live_stt_model"
           testPath="/live-caption/test"
@@ -872,21 +845,9 @@ export function LiveCaptionsSettingsPage() {
             live_caption_live_stt_model: 'model',
           }}
           keys={[
-            {
-              key: 'live_caption_live_stt_url',
-              label: 'Endpoint URL',
-              hint: 'Host:port for the standalone live-stt gRPC streaming service, e.g. localhost:4030.',
-            },
-            {
-              key: 'live_caption_live_stt_api_key',
-              label: 'API key',
-              hint: 'Leave blank if the service has no auth. Sent as an authorization gRPC metadata pair when set.',
-            },
-            {
-              key: 'live_caption_live_stt_model',
-              label: 'Model',
-              hint: 'The streaming ASR model name, e.g. realtime_eou_120m-v1.',
-            },
+            { key: 'live_caption_live_stt_url', label: 'Endpoint URL' },
+            { key: 'live_caption_live_stt_api_key', label: 'API key' },
+            { key: 'live_caption_live_stt_model', label: 'Model' },
           ]}
         />
       )}
@@ -894,7 +855,6 @@ export function LiveCaptionsSettingsPage() {
       {backend === 'realtime' && (
         <SettingsForm
           title="OpenAI /v1/realtime (WebSocket)"
-          description="A persistent /v1/realtime session per audio channel, held open for the whole recording. The model must be registered on that backend as a realtime pipeline model -- a plain ASR/LLM model gets rejected outright the moment a session opens."
           modelsPath="/live-caption/models/realtime"
           modelKey="live_caption_realtime_model"
           testPath="/live-caption/test"
@@ -905,17 +865,9 @@ export function LiveCaptionsSettingsPage() {
             live_caption_realtime_model: 'model',
           }}
           keys={[
-            {
-              key: 'live_caption_realtime_url',
-              label: 'Endpoint URL',
-              hint: 'The full ws(s):// /v1/realtime URL, e.g. wss://host:4012/v1/realtime.',
-            },
-            { key: 'live_caption_realtime_api_key', label: 'API key', hint: 'Leave blank if not required' },
-            {
-              key: 'live_caption_realtime_model',
-              label: 'Model',
-              hint: 'Must be registered on that backend as a realtime pipeline model, e.g. lfm2.5-audio-1.5b-realtime.',
-            },
+            { key: 'live_caption_realtime_url', label: 'Endpoint URL' },
+            { key: 'live_caption_realtime_api_key', label: 'API key' },
+            { key: 'live_caption_realtime_model', label: 'Model' },
           ]}
         />
       )}
@@ -923,7 +875,6 @@ export function LiveCaptionsSettingsPage() {
       {backend === 'transcriptions' && (
         <SettingsForm
           title="/v1/audio/transcriptions (periodic POST)"
-          description="No persistent session -- each channel POSTs a short window of audio on a fixed interval instead. Lower quality/latency than the other two, but works against a plain ASR endpoint with no realtime pipeline model and no gRPC service."
           modelsPath="/live-caption/models/transcriptions"
           modelKey="live_caption_transcriptions_model"
           testPath="/live-caption/test"
@@ -934,17 +885,9 @@ export function LiveCaptionsSettingsPage() {
             live_caption_transcriptions_model: 'model',
           }}
           keys={[
-            {
-              key: 'live_caption_transcriptions_url',
-              label: 'Endpoint URL',
-              hint: 'Full path, e.g. http://host:4012/v1/audio/transcriptions.',
-            },
-            { key: 'live_caption_transcriptions_api_key', label: 'API key', hint: 'Leave blank if not required' },
-            {
-              key: 'live_caption_transcriptions_model',
-              label: 'Model',
-              hint: 'Whatever plain ASR model that endpoint has registered.',
-            },
+            { key: 'live_caption_transcriptions_url', label: 'Endpoint URL' },
+            { key: 'live_caption_transcriptions_api_key', label: 'API key' },
+            { key: 'live_caption_transcriptions_model', label: 'Model' },
           ]}
         />
       )}

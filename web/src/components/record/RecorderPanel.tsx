@@ -25,7 +25,6 @@ import {
   captionLanguagesForModel,
   detectPlatform,
   fmtElapsedMs,
-  languageSupportNoteFor,
   sourceSupport,
   type Source,
 } from '@/lib/recording';
@@ -236,7 +235,6 @@ export function RecorderPanel({
     settingsQuery.data?.settings[`live_caption_${liveCaptionBackend}_model`]?.value ?? '',
   );
   const captionLanguageOptions = captionLanguagesForModel(liveCaptionModel);
-  const captionLanguageNote = languageSupportNoteFor(liveCaptionModel);
 
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
@@ -434,15 +432,6 @@ export function RecorderPanel({
         })}
       </div>
 
-      <p
-        className={cn(
-          'text-xs',
-          chosen.available ? 'text-fg-subtle' : 'text-warning-ink',
-        )}
-      >
-        {chosen.hint}
-      </p>
-
       {/* Before the device select, which is the thing it governs. */}
       {source !== 'mic' && chosen.available && (
         <label className="flex items-center gap-2 text-sm text-fg-muted">
@@ -454,9 +443,6 @@ export function RecorderPanel({
             className="size-4 rounded border-border-strong"
           />
           Also record my microphone
-          <span className="text-xs text-fg-subtle">
-            — without it you capture everyone but yourself
-          </span>
         </label>
       )}
 
@@ -503,14 +489,6 @@ export function RecorderPanel({
                 </option>
               ))}
           </Select>
-          {/* Pausing a mic recording releases the device entirely (see
-              useRecorder), which is what makes it safe to offer a different
-              one here -- Resume opens whichever is selected at that point. */}
-          {canSwitchWhilePaused && (
-            <p className="mt-1 text-xs text-fg-subtle">
-              Pick a different input, then Resume.
-            </p>
-          )}
           {requestError && (
             <p role="alert" className="mt-1 text-xs text-danger-ink">
               {requestError}
@@ -528,15 +506,8 @@ export function RecorderPanel({
           className="size-4 rounded border-border-strong"
         />
         Show live captions while recording
-        <span className="text-xs text-fg-subtle">
-          — a rough draft only; the real transcript is still built after you stop
-        </span>
       </label>
 
-      {/* Locked once live: the language is sent when the caption websocket
-          first connects (see useLiveCaption), and a rolling window is short
-          enough that auto-detect can misfire mid-recording -- picking this
-          before Start is the point, not something to reconsider mid-call. */}
       {liveCaptionsOn && (
         <div>
           <Label htmlFor="live-caption-language">Live caption language</Label>
@@ -562,11 +533,6 @@ export function RecorderPanel({
               </option>
             ))}
           </Select>
-          <p className="mt-1 text-xs text-fg-subtle">
-            {captionLanguageNote && `${captionLanguageNote} `}
-            Defaults to whatever Settings → Live captions has set. Pick a specific language if
-            captions sometimes come back in the wrong one.
-          </p>
         </div>
       )}
 
