@@ -1,7 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Zap } from 'lucide-react';
 import { Badge, Card, Input } from '@/components/ui/primitives';
-import { LIVE_CAPTION_BACKEND_BADGE, type Caption, type LiveCaptionBackend } from '@/hooks/useLiveCaption';
+import {
+  LIVE_CAPTION_BACKEND_BADGE,
+  type Caption,
+  type CaptionWarning,
+  type LiveCaptionBackend,
+} from '@/hooks/useLiveCaption';
 import { cn } from '@/lib/cn';
 import { initials, speakerVars } from '@/lib/speakerColors';
 
@@ -96,6 +101,7 @@ export function LiveTranscriptPanel({
   enabled,
   backend,
   partial,
+  warnings,
   soleChannel,
 }: {
   captions: Caption[];
@@ -107,6 +113,10 @@ export function LiveTranscriptPanel({
    * through (none currently, but nothing here requires it) still compile;
    * an absent value just means no preview bubble is shown. */
   partial?: Record<'me' | 'room', string>;
+  /** Channel-level failures -- see useLiveCaption's CaptionWarning. Optional
+   * for the same reason `partial` is: an absent value just means nothing is
+   * shown, not that nothing went wrong. */
+  warnings?: CaptionWarning[];
   /** Set when the capture only ever has one audio source -- a plain mic
    * recording (`'me'`), or a tab/system share with no mic mixed in
    * (`'room'`) -- see useRecorder's `liveStreams`/`mixing`. `null` while two
@@ -212,6 +222,20 @@ export function LiveTranscriptPanel({
         {soleChannel &&
           ' One audio source right now, so this preview can’t split speakers apart either.'}
       </p>
+
+      {/* A channel-level failure (see useLiveCaption's CaptionWarning) --
+          the only way something like a rejected live_caption_language is
+          visible at all, instead of that channel just sitting on "Waiting
+          for speech…" forever with nothing to explain why. */}
+      {warnings && warnings.length > 0 && (
+        <ul className="mt-2 space-y-1 text-xs text-danger-ink" role="alert">
+          {warnings.map((w, i) => (
+            <li key={`${w.at}-${i}`}>
+              <span className="font-medium">{labelFor(w.channel)}:</span> {w.message}
+            </li>
+          ))}
+        </ul>
+      )}
 
       <div className="mt-4 rounded-lg border border-border bg-surface-2/50 p-3">
         <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-fg-subtle">

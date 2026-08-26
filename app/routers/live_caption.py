@@ -86,6 +86,23 @@ mid-commit (not observed against this deployment, but relayed if a future
 model/version produces them). Both are purely cosmetic/best-effort, same as
 before.
 
+``{"type": "warning", "channel": ..., "message": ...}`` is not cosmetic: it
+is the one signal that a channel is not going to produce any captions this
+recording. Confirmed against a real deployment: an unsupported
+``live_caption_language`` (e.g. "zh" against a Parakeet/Nemotron live-stt
+model that only understands a handful of English/Spanish variants) fails
+*worker init* with a gRPC error before a single event is ever read, and
+without this the whole thing was invisible from the browser -- the channel
+just sat on "idle" forever with no captions and no explanation, and the only
+place the real error showed up was the server log. _send_warning covers
+that failure (channel_worker_livestt's own except-block) and the matching
+mid-session ``kind == "warning"`` event from the live-stt stream itself; the
+realtime path's own already-parsed ``_RelayResult.warning`` (a bare
+``{"type": "error", ...}`` event mid-session) is relayed the same way.
+channel_worker_transcriptions deliberately does not: a single rejected or
+dropped chunk there is normal, expected, and by design invisible (see its
+own docstring) -- warning on every one of those would be noise, not signal.
+
 No process-wide concurrency cap on open /v1/realtime sessions or live-stt
 gRPC streams (the old design's _ASR_CONCURRENCY, in that form, is gone):
 that limit existed to serialize many short-lived *calls* against a backend
@@ -207,6 +224,21 @@ async def _send_partial(websocket: WebSocket, channel: str, text: str) -> None:
     """
     try:
         await websocket.send_json({"type": "partial", "channel": channel, "text": text})
+    except Exception:
+        pass
+
+
+async def _send_warning(websocket: WebSocket, channel: str, message: str) -> None:
+    """A channel-level problem worth surfacing in the recorder UI -- unlike
+    status/partial above, this is not purely cosmetic (see this module's
+    docstring): it is the only way a session-ending failure like a rejected
+    live_caption_language reaches the browser at all, rather than sitting
+    silently on "idle" with nothing in the server log the person recording
+    can see. Same best-effort swallow policy regardless: a dropped warning
+    must not crash the worker over a browser socket that's already gone.
+    """
+    try:
+        await websocket.send_json({"type": "warning", "channel": channel, "message": message})
     except Exception:
         pass
 
@@ -426,6 +458,7 @@ async def channel_worker(
                 partial_state = result.next_partial
                 if result.warning:
                     log.warning("live caption realtime event for %s: %s", name, result.warning)
+                    await _send_warning(websocket, name, result.warning)
                 if result.status is not None:
                     await _send_status(websocket, name, result.status)
                 if result.partial is not None:
@@ -502,6 +535,7 @@ async def channel_worker_livestt(
         from app.pb.livestt.v1 import asr_pb2, asr_pb2_grpc
     except ImportError as exc:
         log.warning("gRPC stubs or grpcio not available for live-stt (%s)", exc)
+        await _send_warning(websocket, name, f"Live STT is not available on this server: {exc}")
         await _send_status(websocket, name, "idle")
         return
 
@@ -580,6 +614,7 @@ async def channel_worker_livestt(
                             return
                     elif kind == "warning":
                         log.warning("live-stt warning for %s: %s", name, event.warning.message)
+                        await _send_warning(websocket, name, event.warning.message)
                     elif kind == "recycled":
                         log.info("live-stt recycled worker for %s: %s", name, event.recycled.reason)
 
@@ -592,6 +627,12 @@ async def channel_worker_livestt(
             type(exc).__name__,
             exc,
         )
+        # grpc.aio.AioRpcError's own str() is a multi-line dump of every RPC
+        # field; .details() is just the servicer's rich_status message (e.g.
+        # "parakeet: unknown target_lang 'zh'. Valid examples: ..."), the
+        # only part worth putting in front of someone recording a meeting.
+        detail = exc.details() if isinstance(exc, grpc.aio.AioRpcError) and exc.details() else str(exc)
+        await _send_warning(websocket, name, f"Live STT session failed: {detail}")
     finally:
         await flush()
         await _send_status(websocket, name, "idle")

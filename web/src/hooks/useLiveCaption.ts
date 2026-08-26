@@ -7,6 +7,19 @@ export interface Caption {
   at: number;
 }
 
+/** A channel-level problem worth showing, not just logging -- pushed as
+ * `{"type": "warning", channel, message}` for a failure that means that
+ * channel isn't going to produce captions this recording (a rejected
+ * live_caption_language, a live-stt worker that failed to start, ...). See
+ * app/routers/live_caption.py's module docstring for the full list of when
+ * this fires and why channel_worker_transcriptions deliberately never
+ * sends one. */
+export interface CaptionWarning {
+  channel: 'me' | 'room';
+  message: string;
+  at: number;
+}
+
 /** Mirrors app/routers/live_caption.py's channel_worker states, pushed over
  * the same socket as `{"type": "status", channel, state}` -- purely for the
  * recorder UI's activity dot next to each level meter. idle (no speech) ->
@@ -41,6 +54,11 @@ export const LIVE_CAPTION_BACKEND_BADGE: Record<
 
 const DEFAULT_ACTIVITY: Record<'me' | 'room', ActivityState> = { me: 'idle', room: 'idle' };
 const DEFAULT_PARTIAL: Record<'me' | 'room', string> = { me: '', room: '' };
+// A handful is plenty -- unlike captions this isn't a transcript to scroll
+// through, it's "is something wrong right now," and a channel that keeps
+// re-failing (e.g. every worker-init retry) shouldn't grow this unbounded
+// for the rest of a long recording.
+const MAX_WARNINGS = 20;
 
 const SAMPLE_RATE = 16000;
 // Native render quantum is 128 samples (~2.7 ms at 16 kHz) -- far too small
@@ -92,6 +110,13 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
   // committed caption arrives (the partial it was building has just been
   // superseded), and on disconnect/re-enable, same as activity above.
   const [partial, setPartial] = useState(DEFAULT_PARTIAL);
+  // See CaptionWarning's doc comment. Unlike activity/partial above, not
+  // cleared on the socket's own onclose (below) -- a channel failing is
+  // exactly the kind of thing worth still being able to read after the
+  // connection has dropped, not something that should vanish the moment
+  // `connected` flips false. Reset only when the whole feature turns off or
+  // the streams disappear, same as the rest of this state.
+  const [warnings, setWarnings] = useState<CaptionWarning[]>([]);
 
   useEffect(() => {
     if (!enabled || (!streams.room && !streams.me)) {
@@ -100,6 +125,7 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       setBackend(null);
       setModelName(null);
       setPartial(DEFAULT_PARTIAL);
+      setWarnings([]);
       return;
     }
 
@@ -151,6 +177,12 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
           ['idle', 'buffering', 'calling'].includes(msg.state)
         ) {
           setActivity((prev) => ({ ...prev, [msg.channel]: msg.state as ActivityState }));
+        } else if (msg?.type === 'warning' && (msg.channel === 'me' || msg.channel === 'room')) {
+          setWarnings((prev) =>
+            [...prev, { channel: msg.channel, message: String(msg.message ?? ''), at: Date.now() }].slice(
+              -MAX_WARNINGS,
+            ),
+          );
         }
       } catch {
         // A malformed message is not worth surfacing -- this is a disposable
@@ -244,5 +276,5 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
     // practice it never changes mid-connection.
   }, [streams.room, streams.me, enabled, language]);
 
-  return { captions, connected, activity, backend, modelName, partial };
+  return { captions, connected, activity, backend, modelName, partial, warnings };
 }

@@ -209,13 +209,19 @@ export function audioConstraints(source: Source, deviceId?: string): MediaTrackC
 }
 
 /**
- * Live-caption language choices, offered as a picklist rather than free
- * text. The backend (app/routers/live_caption.py) wants an ISO-639-1 code
- * ("en"), not a language name ("english") -- confirmed against a real
- * streaming ASR backend that the latter doesn't get rejected, it silently
- * breaks streaming entirely, with an error that never mentions language. A
+ * Live-caption language choices for the /v1/realtime and
+ * /v1/audio/transcriptions backends, offered as a picklist rather than free
+ * text. Both speak the Whisper-shaped ISO-639-1 convention ("en"), not a
+ * language name ("english") -- confirmed against a real streaming ASR
+ * backend that the latter doesn't get rejected, it silently breaks
+ * streaming entirely, with an error that never mentions language. A
  * picklist makes that typo structurally impossible instead of documenting
  * it in a hint underneath a text box. `''` means "auto-detect per window".
+ *
+ * Not used for the live_stt (gRPC) backend -- see
+ * LIVE_STT_CAPTION_LANGUAGES below, which exists for a sharper reason than
+ * typo-proofing: that backend doesn't quietly mis-transcribe an unsupported
+ * language, it refuses the connection outright.
  */
 export const LIVE_CAPTION_LANGUAGES: { code: string; label: string }[] = [
   { code: '', label: 'Auto-detect' },
@@ -233,6 +239,41 @@ export const LIVE_CAPTION_LANGUAGES: { code: string; label: string }[] = [
   { code: 'hi', label: 'Hindi' },
   { code: 'ar', label: 'Arabic' },
 ];
+
+/**
+ * live_stt (gRPC, Parakeet/Nemotron-family streaming models) accepts a far
+ * narrower set of codes than LIVE_CAPTION_LANGUAGES above. Confirmed
+ * against a real deployment: picking "Chinese" failed *worker init*
+ * outright with `parakeet: unknown target_lang 'zh'. Valid examples:
+ * en-US, en, en-GB, enGB, es-ES, esES, es-US, es, ...` -- every other code
+ * in the general list (fr, de, ja, ...) fails the exact same way against
+ * this backend, which is English/Spanish only in this deployment, not
+ * Whisper's ~100-language coverage. Only the hyphenated spelling of each
+ * dialect is offered here even though the server also accepts a no-hyphen
+ * alias ("enGB", "esES") -- a picklist gains nothing from listing the same
+ * dialect twice under two spellings.
+ */
+export const LIVE_STT_CAPTION_LANGUAGES: { code: string; label: string }[] = [
+  { code: '', label: 'Auto-detect' },
+  { code: 'en', label: 'English' },
+  { code: 'en-US', label: 'English (US)' },
+  { code: 'en-GB', label: 'English (UK)' },
+  { code: 'es', label: 'Spanish' },
+  { code: 'es-ES', label: 'Spanish (Spain)' },
+  { code: 'es-US', label: 'Spanish (US)' },
+];
+
+/**
+ * Picks between the two lists above -- the one bit of backend-awareness
+ * both the recorder's per-recording override and the Settings page's
+ * default need, so neither can drift into offering live_stt a language it
+ * will just reject.
+ */
+export function captionLanguagesFor(
+  backend: string | null | undefined,
+): { code: string; label: string }[] {
+  return backend === 'live_stt' ? LIVE_STT_CAPTION_LANGUAGES : LIVE_CAPTION_LANGUAGES;
+}
 
 /** `12:04`, counting up. Recording length, not a media position. */
 export function fmtElapsedMs(ms: number): string {

@@ -24,7 +24,11 @@ export function LiveCaptionStrip({
   /** ISO-639-1 code, or '' for auto-detect -- see useLiveCaption. */
   language: string;
 }) {
-  const { captions, connected, backend, partial } = useLiveCaption(streams, enabled, language);
+  const { captions, connected, backend, partial, warnings } = useLiveCaption(
+    streams,
+    enabled,
+    language,
+  );
   // Channels with an in-progress preview worth a row of their own -- order
   // doesn't matter here (there are at most two), unlike the committed list
   // below which is append-only and already in arrival order.
@@ -67,6 +71,19 @@ export function LiveCaptionStrip({
           {connected ? 'Live' : 'Connecting…'}
         </span>
       </div>
+      {/* A channel-level failure (see useLiveCaption's CaptionWarning) --
+          the only way something like a rejected live_caption_language is
+          visible at all, instead of that channel just sitting on "Waiting
+          for speech…" forever with nothing to explain why. */}
+      {warnings.length > 0 && (
+        <ul className="space-y-1 text-xs text-danger-ink" role="alert">
+          {warnings.map((w, i) => (
+            <li key={`${w.at}-${i}`}>
+              <span className="font-medium">{labelFor(w.channel)}:</span> {w.message}
+            </li>
+          ))}
+        </ul>
+      )}
       {captions.length === 0 && partialChannels.length === 0 ? (
         <p className="text-sm text-fg-faint">Waiting for speech…</p>
       ) : (

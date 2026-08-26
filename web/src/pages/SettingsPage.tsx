@@ -16,6 +16,7 @@ import { ErrorState } from '@/components/ui/states';
 import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { LIVE_STT_CAPTION_LANGUAGES } from '@/lib/recording';
 import type {
   Integration,
   IntegrationTestResult,
@@ -797,7 +798,21 @@ export function LiveCaptionsSettingsPage() {
           {
             key: 'live_caption_language',
             label: 'Language',
-            hint: 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
+            hint:
+              backend === 'live_stt'
+                ? "This backend (Parakeet/Nemotron-family streaming models) only supports English and " +
+                  "Spanish -- confirmed against a real deployment, anything else fails the connection " +
+                  "outright rather than just mis-transcribing. Leave blank for auto-detect."
+                : 'ISO-639-1 code, e.g. en -- not the language name. Leave blank for auto-detection.',
+            // Only live_stt gets a restricted picklist -- the other two
+            // backends' Whisper-shaped ~100-language coverage isn't worth
+            // hardcoding into a dropdown, and a typo there mis-transcribes
+            // rather than fails outright (see LIVE_CAPTION_LANGUAGES' own
+            // doc comment in lib/recording.ts).
+            options:
+              backend === 'live_stt'
+                ? LIVE_STT_CAPTION_LANGUAGES.map(({ code, label }) => ({ value: code, label }))
+                : undefined,
           },
           {
             key: 'live_caption_commit_interval_sec',

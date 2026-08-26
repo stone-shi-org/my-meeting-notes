@@ -461,6 +461,40 @@ class TestChannelWorker:
         assert await browser.next() == {"type": "status", "channel": "me", "state": "idle"}
         assert browser.sent.empty()
 
+    @pytest.mark.asyncio
+    async def test_a_bare_mid_session_error_event_reaches_the_browser_as_a_warning(self, monkeypatch):
+        """_handle_realtime_event has always parsed this into a .warning --
+        it used to only ever be logged server-side (see this module's
+        docstring on why that was a real gap: a session-ending problem with
+        nothing to show for it in the browser)."""
+        conn = FakeRealtimeConnection(
+            [
+                SESSION_CREATED,
+                SESSION_UPDATED,
+                json.dumps({"type": "error", "error": {"message": "unknown_thing"}}),
+            ]
+        )
+        monkeypatch.setattr(live_caption, "_connect_realtime", _fake_connect(conn))
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        task = asyncio.create_task(
+            live_caption.channel_worker(
+                0, browser, queue, "ws://asr.test/v1/realtime", "some-model", None, None, 5, 0.05
+            )
+        )
+        try:
+            # A bare error event carries no status/partial/caption (see
+            # _handle_realtime_event) -- with nothing queued, the warning
+            # this test cares about is the only message this produces.
+            message = await browser.next()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert message == {"type": "warning", "channel": "room", "message": "unknown_thing"}
+
 
 class TestLiveCaptionWsRealtimeRelay:
     """A full round trip through the real websocket endpoint, given a faked
@@ -654,6 +688,137 @@ class TestChannelWorkerLiveSTT:
             await asyncio.gather(task, return_exceptions=True)
 
         assert stub_calls == [[("authorization", "sk-livestt")]]
+
+    @pytest.mark.asyncio
+    async def test_a_mid_stream_warning_event_is_relayed_to_the_browser(self, monkeypatch):
+        from app.pb.livestt.v1 import asr_pb2
+
+        stub_calls: list = []
+        events = [
+            asr_pb2.TranscriptionEvent(
+                warning=asr_pb2.Warning(
+                    code=asr_pb2.WARNING_CODE_FALLING_BEHIND, message="falling behind"
+                )
+            )
+        ]
+        self._patch_grpc(monkeypatch, events, stub_calls)
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        task = asyncio.create_task(
+            live_caption.channel_worker_livestt(
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, None, 30.0
+            )
+        )
+        try:
+            message = await browser.next()
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        assert message == {"type": "warning", "channel": "room", "message": "falling behind"}
+
+    @pytest.mark.asyncio
+    async def test_a_worker_init_failure_is_relayed_with_just_the_grpc_details(self, monkeypatch):
+        """Confirmed against a real deployment: an unsupported
+        live_caption_language fails worker init with a gRPC error whose own
+        str() is a multi-line dump of every RPC field -- only .details()
+        (the servicer's own rich_status message) belongs in front of someone
+        who is trying to record a meeting, not a client-library internals
+        dump."""
+        import grpc
+
+        class FakeAioRpcError(Exception):
+            def __init__(self, details):
+                self._details = details
+                super().__init__(
+                    "a very long multi-line AioRpcError dump: status = StatusCode.UNAVAILABLE ..."
+                )
+
+            def details(self):
+                return self._details
+
+        monkeypatch.setattr(grpc.aio, "AioRpcError", FakeAioRpcError)
+
+        class FakeGrpcCall:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise FakeAioRpcError(
+                    "parakeet: unknown target_lang 'zh'. Valid examples: en-US, en, ..."
+                )
+
+        class FakeGrpcStub:
+            def __init__(self, channel):
+                pass
+
+            def Transcribe(self, request_iterator, metadata=None):
+                return FakeGrpcCall()
+
+        class FakeGrpcChannel:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                pass
+
+        monkeypatch.setattr(grpc.aio, "insecure_channel", lambda target: FakeGrpcChannel())
+        monkeypatch.setattr("app.pb.livestt.v1.asr_pb2_grpc.StreamingASRStub", FakeGrpcStub)
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        await asyncio.wait_for(
+            live_caption.channel_worker_livestt(
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, "zh", 30.0
+            ),
+            timeout=2,
+        )
+
+        messages = []
+        while not browser.sent.empty():
+            messages.append(browser.sent.get_nowait())
+
+        warnings = [m for m in messages if m["type"] == "warning"]
+        assert warnings == [
+            {
+                "type": "warning",
+                "channel": "room",
+                "message": (
+                    "Live STT session failed: parakeet: unknown target_lang 'zh'. "
+                    "Valid examples: en-US, en, ..."
+                ),
+            }
+        ]
+
+    @pytest.mark.asyncio
+    async def test_missing_grpc_stubs_are_reported_as_a_warning_not_just_a_log_line(self, monkeypatch):
+        import sys
+
+        # None in sys.modules makes `import grpc` raise ImportError, without
+        # the collateral risk of patching builtins.__import__ globally for a
+        # module every other test in this file also imports.
+        monkeypatch.setitem(sys.modules, "grpc", None)
+
+        browser = FakeBrowserSocket()
+        queue: asyncio.Queue = asyncio.Queue()
+
+        await asyncio.wait_for(
+            live_caption.channel_worker_livestt(
+                0, browser, queue, "localhost:4030", "realtime_eou_120m-v1", None, None, 30.0
+            ),
+            timeout=2,
+        )
+
+        messages = []
+        while not browser.sent.empty():
+            messages.append(browser.sent.get_nowait())
+
+        assert any(
+            m["type"] == "warning" and "not available" in m["message"] for m in messages
+        )
 
 
 TRANSCRIPTIONS_URL = "http://asr.test/v1/audio/transcriptions"

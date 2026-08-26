@@ -22,9 +22,9 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import {
   blockedReason,
+  captionLanguagesFor,
   detectPlatform,
   fmtElapsedMs,
-  LIVE_CAPTION_LANGUAGES,
   sourceSupport,
   type Source,
 } from '@/lib/recording';
@@ -222,6 +222,13 @@ export function RecorderPanel({
   );
   const [captionLanguageChoice, setCaptionLanguageChoice] = useState<string | null>(null);
   const captionLanguage = captionLanguageChoice ?? defaultCaptionLanguage;
+  // live_stt (gRPC) accepts a far narrower set of language codes than the
+  // other two backends and rejects an unsupported one outright instead of
+  // just mis-transcribing it -- see captionLanguagesFor's doc comment.
+  const liveCaptionBackend = String(
+    settingsQuery.data?.settings.live_caption_backend?.value ?? 'live_stt',
+  );
+  const captionLanguageOptions = captionLanguagesFor(liveCaptionBackend);
 
   const recorder = useRecorder();
   const { devices, refresh, requestAccess, requesting, requestError } = useAudioInputs(true);
@@ -252,6 +259,7 @@ export function RecorderPanel({
     activity: captionsActivity,
     backend: captionsBackend,
     partial: captionsPartial,
+    warnings: captionsWarnings,
   } = useLiveCaption(recorder.liveStreams, captionsLive, captionLanguage);
 
   // Labels are blank until permission has been granted once, so re-read the
@@ -527,17 +535,28 @@ export function RecorderPanel({
           <Select
             id="live-caption-language"
             className="mt-1.5"
-            value={captionLanguage}
+            // Falls back to Auto-detect rather than an unmatched <option> if
+            // the Settings-page default (or a choice made before a backend
+            // switch) isn't one of *this* backend's codes -- e.g. the
+            // general list's "zh" is meaningless once live_stt narrows the
+            // options below to what its model actually supports.
+            value={
+              captionLanguageOptions.some((o) => o.code === captionLanguage)
+                ? captionLanguage
+                : ''
+            }
             disabled={recorder.live || disabled}
             onChange={(e) => setCaptionLanguageChoice(e.target.value)}
           >
-            {LIVE_CAPTION_LANGUAGES.map(({ code, label }) => (
+            {captionLanguageOptions.map(({ code, label }) => (
               <option key={code} value={code}>
                 {label}
               </option>
             ))}
           </Select>
           <p className="mt-1 text-xs text-fg-subtle">
+            {liveCaptionBackend === 'live_stt' &&
+              'This backend only supports English and Spanish. '}
             Defaults to whatever Settings → Live captions has set. Pick a specific language if
             captions sometimes come back in the wrong one.
           </p>
@@ -696,6 +715,7 @@ export function RecorderPanel({
           enabled={captionsLive}
           backend={captionsBackend}
           partial={captionsPartial}
+          warnings={captionsWarnings}
           soleChannel={soleChannel}
         />
         {rightExtra}
