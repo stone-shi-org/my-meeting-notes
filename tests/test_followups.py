@@ -581,3 +581,36 @@ class TestScheduler:
 
         assert len(calls) == 2, "the second thread was still swept"
         assert result["swept"] == 1
+
+    def test_sweep_includes_past_meeting_date_window(
+        self, user_client, meeting, monkeypatch
+    ):
+        """A thread meeting held in the past extends the sweep date window to cover it."""
+        from datetime import datetime, timedelta, timezone
+        from app.services import followups as followups_svc
+
+        past_meeting_dt = datetime.now(timezone.utc) - timedelta(days=30)
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE meetings SET meeting_at = ? WHERE id = ?",
+                (past_meeting_dt.isoformat(), meeting["id"]),
+            )
+
+        captured_start = None
+
+        orig_gather = followups_svc.matching_svc.gather_candidates
+
+        async def mock_gather(*args, **kwargs):
+            nonlocal captured_start
+            captured_start = kwargs.get("start")
+            return await orig_gather(*args, **kwargs)
+
+        monkeypatch.setattr(
+            "app.services.followups.matching_svc.gather_candidates", mock_gather
+        )
+
+        sweep(user_client, meeting["thread_id"])
+
+        assert captured_start is not None
+        # Should be anchored relative to 30 days ago (past meeting), not just now - 7 days (28 - 7 = 21 days ago)
+        assert captured_start <= datetime.now(timezone.utc) - timedelta(days=25)

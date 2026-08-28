@@ -141,12 +141,32 @@ async def sweep_thread(
         keywords = _keywords(conn, thread_id, effective(conn, "match_max_keywords"))
         context = watch_context(conn, thread_id, keywords)
 
-    # Anchored on now, not on a meeting: the question here is "what has arrived
-    # lately", and the window walks forward with the clock on every tick.
+        meeting_rows = conn.execute(
+            "SELECT meeting_at FROM meetings WHERE thread_id = ?",
+            (thread_id,),
+        ).fetchall()
+
+    # Anchored on now, but expanded to include the date ranges of all meetings
+    # in the thread so follow-ups created relative to past meetings fall inside
+    # the search window.
     start = anchor - timedelta(days=days_before)
     end = anchor + timedelta(days=days_after)
     calendar_start = anchor - timedelta(days=calendar_days_before)
     calendar_end = anchor + timedelta(days=calendar_days_after)
+
+    for row in meeting_rows:
+        if not row["meeting_at"]:
+            continue
+        try:
+            m_dt = datetime.fromisoformat(row["meeting_at"].replace("Z", "+00:00"))
+            if m_dt.tzinfo is None:
+                m_dt = m_dt.replace(tzinfo=timezone.utc)
+            start = min(start, m_dt - timedelta(days=days_before))
+            end = max(end, m_dt + timedelta(days=days_after))
+            calendar_start = min(calendar_start, m_dt - timedelta(days=calendar_days_before))
+            calendar_end = max(calendar_end, m_dt + timedelta(days=calendar_days_after))
+        except ValueError:
+            pass
 
     try:
         gathered = await matching_svc.gather_candidates(
