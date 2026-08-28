@@ -339,6 +339,7 @@ class DevGenerateRequest(BaseModel):
     thread_id: int
     count: int = Field(default=8, ge=1, le=20)
     model: str | None = None
+    additional_prompt: str | None = None
 
 
 class DevImportRequest(BaseModel):

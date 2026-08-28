@@ -234,6 +234,7 @@ async def generate(
             thread_id=payload.thread_id,
             count=payload.count,
             model=payload.model,
+            additional_prompt=payload.additional_prompt,
         ),
         media_type="text/event-stream",
         headers={

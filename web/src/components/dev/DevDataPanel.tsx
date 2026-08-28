@@ -521,7 +521,7 @@ interface GenerateResult {
  */
 async function streamGenerate(
   integrationId: number,
-  body: { thread_id: number; count: number },
+  body: { thread_id: number; count: number; additional_prompt?: string },
   onProgress: (chars: number) => void,
 ): Promise<GenerateResult> {
   const response = await fetch(`/api/dev/integrations/${integrationId}/generate`, {
@@ -578,6 +578,7 @@ function GeneratePanel({
   const queryClient = useQueryClient();
   const [threadId, setThreadId] = useState<number | ''>('');
   const [count, setCount] = useState(8);
+  const [additionalPrompt, setAdditionalPrompt] = useState('');
   const [drafts, setDrafts] = useState<DevDraft[] | null>(null);
   const [accepting, setAccepting] = useState(false);
   const [progress, setProgress] = useState(0);
@@ -585,7 +586,15 @@ function GeneratePanel({
   const generate = useMutation({
     mutationFn: () => {
       setProgress(0);
-      return streamGenerate(integrationId, { thread_id: threadId as number, count }, setProgress);
+      return streamGenerate(
+        integrationId,
+        {
+          thread_id: threadId as number,
+          count,
+          additional_prompt: additionalPrompt.trim() || undefined,
+        },
+        setProgress,
+      );
     },
     onSuccess: (result) => setDrafts(result.drafts),
   });
@@ -617,43 +626,56 @@ function GeneratePanel({
         until you accept it.
       </p>
 
-      <div className="mt-4 flex flex-wrap items-end gap-2">
-        <div className="min-w-[14rem] flex-1">
-          <Label htmlFor="gen-thread">Thread</Label>
-          <Select
-            id="gen-thread"
-            className="mt-1"
-            value={threadId}
-            onChange={(e) => setThreadId(e.target.value ? Number(e.target.value) : '')}
+      <div className="mt-4 space-y-3">
+        <div className="flex flex-wrap items-end gap-2">
+          <div className="min-w-[14rem] flex-1">
+            <Label htmlFor="gen-thread">Thread</Label>
+            <Select
+              id="gen-thread"
+              className="mt-1"
+              value={threadId}
+              onChange={(e) => setThreadId(e.target.value ? Number(e.target.value) : '')}
+            >
+              <option value="">Pick a thread…</option>
+              {threads.map((t) => (
+                <option key={t.id} value={t.id}>
+                  {t.title}
+                </option>
+              ))}
+            </Select>
+          </div>
+          <div>
+            <Label htmlFor="gen-count">How many</Label>
+            <Input
+              id="gen-count"
+              className="mt-1 w-20"
+              type="number"
+              min={1}
+              max={20}
+              value={count}
+              onChange={(e) => setCount(Number(e.target.value))}
+            />
+          </div>
+          <Button
+            variant="secondary"
+            disabled={!threadId}
+            loading={generate.isPending}
+            onClick={() => generate.mutate()}
           >
-            <option value="">Pick a thread…</option>
-            {threads.map((t) => (
-              <option key={t.id} value={t.id}>
-                {t.title}
-              </option>
-            ))}
-          </Select>
+            Generate
+          </Button>
         </div>
+
         <div>
-          <Label htmlFor="gen-count">How many</Label>
-          <Input
-            id="gen-count"
-            className="mt-1 w-20"
-            type="number"
-            min={1}
-            max={20}
-            value={count}
-            onChange={(e) => setCount(Number(e.target.value))}
+          <Label htmlFor="gen-additional-prompt">Additional prompt (optional)</Label>
+          <Textarea
+            id="gen-additional-prompt"
+            className="mt-1 min-h-16 resize-none"
+            placeholder="e.g. Include an email about budget approval or vendor quotes..."
+            value={additionalPrompt}
+            onChange={(e) => setAdditionalPrompt(e.target.value)}
           />
         </div>
-        <Button
-          variant="secondary"
-          disabled={!threadId}
-          loading={generate.isPending}
-          onClick={() => generate.mutate()}
-        >
-          Generate
-        </Button>
       </div>
 
       {generate.isPending && progress > 0 && (

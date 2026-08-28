@@ -81,6 +81,7 @@ that a careful reader would call unrelated makes the fixture worse than useless.
   invent colleagues where it does not.
 - Subjects look like subjects: `Re: Oracle cutover — rollback window`, not
   `Follow-up regarding our recent discussion`.
+- When generating a reply (`Re:`) or forward (`Fwd:`) email, the subject after the `Re:` or `Fwd:` prefix MUST be an exact match of the original meeting or thread subject (for example, if the meeting/thread is titled "Things A", a reply email subject MUST be exactly "Re: Things A" or "Fwd: Things A", never rephrased or modified).
 - Do not restate a meeting summary back as an email. An email is one person's
   partial, biased slice of what happened, written to get something done.
 
@@ -94,3 +95,5 @@ Description: {{thread_description}}
 
 Meetings on it:
 {{meetings}}
+
+{{additional_prompt}}

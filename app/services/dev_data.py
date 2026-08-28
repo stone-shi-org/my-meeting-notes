@@ -299,7 +299,12 @@ async def _stream_llm_json(config: llm_svc.LLMConfig, system: str, user: str,
 
 
 async def _produce_generate(
-    queue: "asyncio.Queue[str | None]", db_path, thread_id: int, count: int, model: str | None,
+    queue: "asyncio.Queue[str | None]",
+    db_path,
+    thread_id: int,
+    count: int,
+    model: str | None,
+    additional_prompt: str | None = None,
 ) -> None:
     """Draft fake email and calendar traffic around a thread. One LLM call,
     streamed over SSE (``progress``/``done``/``error``) instead of one blocking
@@ -329,12 +334,19 @@ async def _produce_generate(
             for m in brief["meetings"]
         ) or "(no meetings on this thread yet)"
 
+        add_prompt_text = (
+            f"Additional Requirements:\n{additional_prompt.strip()}"
+            if additional_prompt and additional_prompt.strip()
+            else ""
+        )
+
         system, user = prompt.render(
             {
                 "thread_title": brief["title"],
                 "thread_description": brief["description"] or "(none)",
                 "meetings": meetings_text,
                 "count": str(count),
+                "additional_prompt": add_prompt_text,
             }
         )
 
@@ -351,14 +363,23 @@ async def _produce_generate(
         await queue.put(None)
 
 
-async def stream_generate_response(db_path, *, thread_id: int, count: int, model: str | None = None):
+async def stream_generate_response(
+    db_path,
+    *,
+    thread_id: int,
+    count: int,
+    model: str | None = None,
+    additional_prompt: str | None = None,
+):
     """SSE generator for ``StreamingResponse``, same shape as
     ``chat.stream_chat_response``: the real work runs in a background task
     feeding ``queue``, decoupled from this generator so a disconnected client
     does not cut off a generation that is already spending LLM budget.
     """
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    asyncio.create_task(_produce_generate(queue, db_path, thread_id, count, model))
+    asyncio.create_task(
+        _produce_generate(queue, db_path, thread_id, count, model, additional_prompt)
+    )
 
     while True:
         try:

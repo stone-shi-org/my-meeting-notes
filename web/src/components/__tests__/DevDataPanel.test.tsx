@@ -254,6 +254,23 @@ describe('draft review', () => {
     await screen.findByText('Real follow-up');
   }
 
+  it('sends additional_prompt in the payload when provided', async () => {
+    const user = userEvent.setup();
+    const fetchMock = stubGenerateStream(DRAFTS);
+    renderPanel();
+    await user.selectOptions(await screen.findByLabelText('Thread'), '1');
+    await user.type(screen.getByLabelText('Additional prompt (optional)'), 'Focus on vendor quotes');
+    await user.click(screen.getByRole('button', { name: 'Generate' }));
+    await screen.findByText('Real follow-up');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/dev/integrations/7/generate',
+      expect.objectContaining({
+        body: JSON.stringify({ thread_id: 1, count: 8, additional_prompt: 'Focus on vendor quotes' }),
+      }),
+    );
+  });
+
   it('writes nothing until the drafts are accepted', async () => {
     const user = userEvent.setup();
     await generate(user);
