@@ -390,10 +390,15 @@ export function EmailChainCard({
         <span className="truncate">{participantLabel(chain.participants)}</span>
         {!single ? <span>· {chain.message_count} messages</span> : null}
         <span>· {fmtRelative(chain.last_message_at)}</span>
-        {/* Nothing at all when `awaiting` is null: the UI does not guess a side. */}
+        {/* Both labels are verb-led, and that is the point. "Your reply" read as
+            a description of the message itself -- on a message *from* somebody
+            else it looked like the app was calling their mail your reply, which
+            is the opposite of what it means. It also did not pair grammatically
+            with "Waiting on them".
+            Nothing at all when `awaiting` is null: the UI does not guess a side. */}
         {chain.awaiting === 'you' ? (
           <Badge variant="warning" size="sm">
-            Your reply
+            Needs your reply
           </Badge>
         ) : null}
         {chain.awaiting === 'them' ? (

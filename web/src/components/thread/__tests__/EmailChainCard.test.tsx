@@ -91,11 +91,11 @@ describe('collapsed', () => {
 
   it('shows an awaiting badge only when a side is known', () => {
     const { unmount } = renderCard(chain({ awaiting: 'you' }));
-    expect(screen.getByText('Your reply')).toBeInTheDocument();
+    expect(screen.getByText('Needs your reply')).toBeInTheDocument();
     unmount();
 
     renderCard(chain({ awaiting: null, last_message_from: null }));
-    expect(screen.queryByText('Your reply')).not.toBeInTheDocument();
+    expect(screen.queryByText('Needs your reply')).not.toBeInTheDocument();
     expect(screen.queryByText('Waiting on them')).not.toBeInTheDocument();
   });
 
@@ -521,5 +521,37 @@ describe('the summarise offer matches what the server will do', () => {
       }),
     );
     expect(screen.getByRole('button', { name: /Summarise 2 messages/ })).toBeInTheDocument();
+  });
+});
+
+
+describe('the awaiting badge says who owes what', () => {
+  it('never labels an incoming message as something you wrote', async () => {
+    // The old copy was "Your reply", a noun phrase -- on a message *from*
+    // someone else it read as the app calling their mail your reply, which is
+    // the opposite of what awaiting: 'you' means.
+    renderCard(
+      chain({
+        awaiting: 'you',
+        last_message_from: 'them',
+        messages: [email({ direction: 'inbound', sender: 'james@acme.com' })],
+      }),
+    );
+
+    expect(screen.getByText('Needs your reply')).toBeInTheDocument();
+    expect(screen.queryByText('Your reply')).not.toBeInTheDocument();
+  });
+
+  it('uses the other label when you wrote last', async () => {
+    renderCard(
+      chain({
+        awaiting: 'them',
+        last_message_from: 'you',
+        messages: [email({ direction: 'outbound' })],
+      }),
+    );
+
+    expect(screen.getByText('Waiting on them')).toBeInTheDocument();
+    expect(screen.queryByText('Needs your reply')).not.toBeInTheDocument();
   });
 });
