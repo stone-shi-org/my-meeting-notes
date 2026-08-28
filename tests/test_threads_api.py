@@ -756,3 +756,36 @@ def test_summarise_ignores_an_id_from_another_thread(user_client, isolated_setti
     ).json()
 
     assert result["requested"] == 0, "the thread_id filter is in the query"
+
+
+def test_summarisable_is_decided_by_the_server_not_the_client(user_client, isolated_settings):
+    """The card offered "Summarise 3 messages" for bodies the server then
+    declined, because it filtered on has_body && !ai_summary and omitted the
+    minimum-length rule. The flag is computed with the same predicate
+    `pending_summaries` uses, so the offer and the action cannot disagree."""
+    from app.services import email_bodies as eb
+
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<long>",
+                  body="word " * 400, body_fetched_at="2026-08-27T10:00:00+00:00")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<short>",
+                  body="too short", body_fetched_at="2026-08-27T10:00:00+00:00")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<done>",
+                  body="word " * 400, body_fetched_at="2026-08-27T10:00:00+00:00",
+                  ai_summary="already summarised")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<nobody>")
+
+    emails = {e["message_id"]: e for e in
+              user_client.get(f"/api/threads/{t['id']}/emails").json()}
+
+    assert emails["<long>"]["summarisable"] is True
+    assert emails["<short>"]["summarisable"] is False
+    assert emails["<done>"]["summarisable"] is False
+    assert emails["<nobody>"]["summarisable"] is False
+
+    # ...and the flag agrees with what a summarise request actually picks up.
+    flagged = sum(1 for e in emails.values() if e["summarisable"])
+    assert user_client.post(
+        f"/api/threads/{t['id']}/emails/summarise"
+    ).json()["requested"] == flagged
+    assert flagged == 1

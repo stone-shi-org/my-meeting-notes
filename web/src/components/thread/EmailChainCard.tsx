@@ -127,6 +127,9 @@ function EmailMessageRow({
   const rowId = typeof email.id === 'number' ? email.id : null;
   const link = emailLink(email);
   const unread = Boolean(email.unread);
+  // Same precedence as the chain header's own preview: the summary says more
+  // than the provider's first 200 characters where there is one.
+  const preview = email.ai_summary || email.snippet || null;
 
   const body = useQuery({
     queryKey: ['email-body', threadId, rowId],
@@ -246,6 +249,15 @@ function EmailMessageRow({
         </p>
       ) : null}
 
+      {/* A collapsed message needs to say what is in it. Without this the row is
+          a sender and a date over empty space, which reads as content that
+          failed to load rather than as something folded away -- and it is
+          inconsistent with a single-message chain, which does show its preview
+          while collapsed. */}
+      {!open && preview ? (
+        <p className="mt-0.5 line-clamp-1 text-xs text-fg-muted">{preview}</p>
+      ) : null}
+
       <div id={bodyId} hidden={!open}>
         {open ? (
           <EmailBody
@@ -292,11 +304,12 @@ export function EmailChainCard({
   const preview = newest?.ai_summary || newest?.snippet || null;
   const soleId = single && typeof newest?.id === 'number' ? newest.id : null;
 
-  // Messages on this conversation that have text but no summary yet. Summarising
-  // is one LLM call each, so it is asked for per conversation rather than
-  // happening to the whole thread on open.
+  // Messages a summarise request would actually pick up. The server decides
+  // that -- `has_body && !ai_summary` looks equivalent but omits the minimum
+  // length, so the button offered work the server then declined, came back
+  // `requested: 0`, and left itself sitting there unchanged.
   const summarisableIds = chain.messages
-    .filter((m) => m.has_body && !m.ai_summary && typeof m.id === 'number')
+    .filter((m) => m.summarisable && typeof m.id === 'number')
     .map((m) => m.id as number);
 
   const summarise = useMutation({

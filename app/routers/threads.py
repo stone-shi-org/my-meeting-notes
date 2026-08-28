@@ -275,6 +275,10 @@ def _row_to_email(row: sqlite3.Row) -> dict:
         # needs: not fetched yet, fetched, or asked-and-this-account-cannot.
         # The body itself is deliberately absent -- see EMAIL_COLUMNS.
         "has_body": bool(_optional(row, "has_body")),
+        # Whether a summarise request would actually pick this row up. The
+        # length threshold behind it is the server's, so the SPA must not try to
+        # work it out for itself.
+        "summarisable": bool(_optional(row, "summarisable")),
         "body_fetched_at": _optional(row, "body_fetched_at"),
         **_unread(row),
     }

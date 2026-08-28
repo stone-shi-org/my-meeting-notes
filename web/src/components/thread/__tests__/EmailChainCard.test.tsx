@@ -29,6 +29,7 @@ function email(over: Partial<Email> = {}): Email {
     direction: 'inbound',
     has_body: false,
     body_fetched_at: null,
+    summarisable: false,
     ...over,
   };
 }
@@ -343,9 +344,9 @@ describe('opt-in summaries', () => {
     renderCard(
       chain({
         messages: [
-          email({ id: 1, has_body: true, ai_summary: 'already done' }),
-          email({ id: 2, message_id: 'm2', has_body: true, ai_summary: null }),
-          email({ id: 3, message_id: 'm3', has_body: false, ai_summary: null }),
+          email({ id: 1, has_body: true, ai_summary: 'already done', summarisable: false }),
+          email({ id: 2, message_id: 'm2', has_body: true, summarisable: true }),
+          email({ id: 3, message_id: 'm3', has_body: false, summarisable: false }),
         ],
       }),
     );
@@ -358,8 +359,8 @@ describe('opt-in summaries', () => {
     renderCard(
       chain({
         messages: [
-          email({ id: 1, has_body: true }),
-          email({ id: 2, message_id: 'm2', has_body: true }),
+          email({ id: 1, has_body: true, summarisable: true }),
+          email({ id: 2, message_id: 'm2', has_body: true, summarisable: true }),
         ],
       }),
     );
@@ -372,8 +373,8 @@ describe('opt-in summaries', () => {
     renderCard(
       chain({
         messages: [
-          email({ id: 11, has_body: true, ai_summary: 'done' }),
-          email({ id: 22, message_id: 'm2', has_body: true, ai_summary: null }),
+          email({ id: 11, has_body: true, ai_summary: 'done', summarisable: false }),
+          email({ id: 22, message_id: 'm2', has_body: true, summarisable: true }),
         ],
       }),
     );
@@ -399,7 +400,7 @@ describe('opt-in summaries', () => {
   it('surfaces a failure so the retry is discoverable', async () => {
     const user = userEvent.setup();
     vi.mocked(api.post).mockRejectedValue(new Error('llm down'));
-    renderCard(chain({ messages: [email({ has_body: true, ai_summary: null })] }));
+    renderCard(chain({ messages: [email({ has_body: true, summarisable: true })] }));
 
     await user.click(screen.getByRole('button', { name: /Summarise/ }));
 
@@ -428,5 +429,97 @@ describe('bulk hydration in flight', () => {
     await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
 
     expect(screen.getByRole('button', { name: /Load full message/ })).toBeInTheDocument();
+  });
+});
+
+describe('collapsed messages inside an expanded chain', () => {
+  it('shows a one-line preview rather than an empty row', async () => {
+    // Found in a browser: a collapsed message rendered as a sender and a date
+    // over blank space, which reads as content that failed to load. A
+    // single-message chain already showed its preview while collapsed, so the
+    // two were inconsistent as well.
+    const user = userEvent.setup();
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, snippet: 'The older message preview', date: '2026-08-19T09:00:00+00:00' }),
+          email({ id: 2, message_id: 'm2', snippet: 'The newest one', date: '2026-08-20T09:00:00+00:00' }),
+        ],
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
+
+    expect(screen.getByText('The older message preview')).toBeInTheDocument();
+  });
+
+  it('prefers the summary over the snippet in that preview', async () => {
+    const user = userEvent.setup();
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, snippet: 'raw snippet', ai_summary: 'the summary', date: '2026-08-19T09:00:00+00:00' }),
+          email({ id: 2, message_id: 'm2', date: '2026-08-20T09:00:00+00:00' }),
+        ],
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
+
+    expect(screen.getByText('the summary')).toBeInTheDocument();
+    expect(screen.queryByText('raw snippet')).not.toBeInTheDocument();
+  });
+
+  it('replaces the preview with the real body once that message is opened', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.get).mockResolvedValue({
+      id: 1, body: 'The full text of the older message.',
+      body_fetched_at: 'x', has_body: true, ai_summary: null, ai_summary_model: null,
+    });
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, snippet: 'Only shown while folded', has_body: true,
+                  date: '2026-08-19T09:00:00+00:00' }),
+          email({ id: 2, message_id: 'm2', date: '2026-08-20T09:00:00+00:00' }),
+        ],
+      }),
+    );
+    await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
+    expect(screen.getByText('Only shown while folded')).toBeInTheDocument();
+
+    await user.click(screen.getAllByRole('button', { expanded: false })[0]);
+
+    await waitFor(() =>
+      expect(screen.getByText('The full text of the older message.')).toBeInTheDocument(),
+    );
+    expect(screen.queryByText('Only shown while folded')).not.toBeInTheDocument();
+  });
+});
+
+
+describe('the summarise offer matches what the server will do', () => {
+  it('offers nothing for a body the server considers too short', async () => {
+    // Found in a browser: the card filtered on has_body && !ai_summary, which
+    // omits the minimum-length rule. It offered "Summarise 3 messages", the
+    // request came back `requested: 0`, and nothing changed. Only the server
+    // knows the threshold, so only the server decides.
+    renderCard(
+      chain({
+        messages: [email({ has_body: true, ai_summary: null, summarisable: false })],
+      }),
+    );
+    expect(screen.queryByRole('button', { name: /Summarise/ })).not.toBeInTheDocument();
+  });
+
+  it('counts only the messages the server flagged', async () => {
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, has_body: true, summarisable: true }),
+          email({ id: 2, message_id: 'm2', has_body: true, summarisable: false }),
+          email({ id: 3, message_id: 'm3', has_body: true, summarisable: true }),
+        ],
+      }),
+    );
+    expect(screen.getByRole('button', { name: /Summarise 2 messages/ })).toBeInTheDocument();
   });
 });

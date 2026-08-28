@@ -452,6 +452,10 @@ export interface Email extends Attached {
   /** Whether a body is stored. Never the body itself: the list stays light
    *  because SQLite reads whole rows. */
   has_body?: boolean;
+  /** Whether a summarise request would pick this row up. Server-computed: the
+   *  minimum-length rule behind it is a server constant, and a client that
+   *  re-derived it offered work the server then declined. */
+  summarisable?: boolean;
   /**
    * When a body fetch was last *attempted*. Set while `has_body` is false means
    * the account cannot supply one -- terminal, not "try again".

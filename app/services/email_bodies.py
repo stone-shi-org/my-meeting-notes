@@ -79,7 +79,15 @@ ROW_COLUMNS = (
     "auto_attached, seen_at, folder_id, conversation_id, in_reply_to, "
     "references_json, to_recipients, cc_recipients, direction, "
     "body_fetched_at, ai_summary, ai_summary_model, integration_id, "
-    "(body IS NOT NULL) AS has_body"
+    "(body IS NOT NULL) AS has_body, "
+    # Whether *this* row would be picked up by a summarise request. Computed
+    # here rather than re-derived in the SPA from has_body and ai_summary: the
+    # length threshold is a server constant, and a client that guessed at it
+    # offered a "Summarise 3 messages" button whose request came back
+    # `requested: 0` and changed nothing. Same rule as `pending_summaries`, and
+    # it must stay the same rule.
+    f"(body IS NOT NULL AND ai_summary IS NULL "
+    f"AND length(body) >= {AI_SUMMARY_MIN_CHARS}) AS summarisable"
 )
 
 
