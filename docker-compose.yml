@@ -1,3 +1,4 @@
+name: my-meeting-notes
 services:
   my-meeting-notes:
     # Matches build.sh's default local tag (no -r/MMN_REGISTRY): `./build.sh`
