@@ -84,12 +84,28 @@ def _render_related_context(context: dict) -> str:
 
     for m in emails:
         when = (m.get("date") or "")[:10]
-        meta = ", ".join(b for b in (m.get("sender"), when) if b)
+        # Direction, so "the organiser asked for this" is not confused with "the
+        # user themselves asked for it". The email search returns sent mail too.
+        direction = m.get("direction")
+        if direction == "outbound":
+            who = "sent by the meeting owner"
+        elif direction == "inbound":
+            who = f"from {m.get('sender')}" if m.get("sender") else "received"
+        else:
+            who = m.get("sender") or ""
+        meta = ", ".join(b for b in (who, when) if b)
         header = f"[Email] {m.get('subject') or '(no subject)'}"
         if meta:
             header += f" ({meta})"
         lines.append(header)
-        if m.get("snippet"):
+        # The AI summary in preference to the snippet: it is a whole sentence
+        # about the message rather than its first 200 characters. Labelled, and
+        # bounded the same way -- an unbounded body here would change what the
+        # minutes get written from.
+        detail = (m.get("ai_summary") or "").strip()
+        if detail:
+            lines.append(f"  Summary: {detail[:CONTEXT_SNIPPET_LIMIT]}")
+        elif m.get("snippet"):
             lines.append(f"  {m['snippet'][:CONTEXT_SNIPPET_LIMIT].strip()}")
 
     return "\n".join(lines)

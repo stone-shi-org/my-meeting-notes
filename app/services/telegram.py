@@ -245,6 +245,12 @@ def notify_new_attachments(
             lines.append(f"\U0001f4e7 {len(emails)} new email(s)")
         for item in (events + emails)[:MAX_ITEMS_LISTED]:
             label = item.get("summary") or item.get("subject") or "(untitled)"
+            # An email the owner wrote themselves, announced as "new email", is
+            # misleading -- the sweep does attach sent mail, because the search
+            # covers it. Only said for outbound: "received" is the default
+            # reading anyway, and NULL must not become a claim either way.
+            if item.get("direction") == "outbound":
+                label = f"{label} (you sent this)"
             lines.append(f"• {_escape(str(label))}")
         link = _thread_link(cfg["base_url"], thread_id)
         if link:

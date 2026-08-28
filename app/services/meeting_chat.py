@@ -74,9 +74,24 @@ def _format_meeting_attachments(conn: sqlite3.Connection, meeting_id: int) -> st
     if context["emails"]:
         lines.append("### Emails")
         for m in context["emails"]:
-            meta = ", ".join(b for b in (m["sender"], (m["date"] or "")[:10]) if b)
+            # Direction, for the same reason as the thread chat: an email the
+            # user wrote reads as an incoming request without it. NULL stays
+            # visibly unknown rather than defaulting to received.
+            direction = m.get("direction")
+            if direction == "outbound":
+                who = "you sent"
+            elif direction == "inbound":
+                who = f"from {m['sender']}" if m["sender"] else "received"
+            else:
+                who = m["sender"] or ""
+            meta = ", ".join(b for b in (who, (m["date"] or "")[:10]) if b)
             lines.append(f"- {m['subject'] or '(no subject)'}" + (f" ({meta})" if meta else ""))
-            if m["snippet"]:
+            # The labelled AI summary in preference to the snippet -- one whole
+            # sentence about the message rather than its first 200 characters.
+            detail = (m.get("ai_summary") or "").strip()
+            if detail:
+                lines.append(f"  Summary: {detail}")
+            elif m["snippet"]:
                 lines.append(f"  {m['snippet'].strip()}")
 
     if notes:

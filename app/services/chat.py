@@ -22,6 +22,7 @@ from app.db import get_conn, utcnow
 from app.errors import AppError, NoIntegrationsError, NotFoundError
 from app.logging_config import get_logger
 from app.services import chat_followups as chat_followups_svc
+from app.services import email_chains as email_chains_svc
 from app.services import llm as llm_svc
 from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
@@ -50,6 +51,15 @@ EMAIL_BODY_LIMIT = 8000
 # match_max_candidates, since these are read back into a chat reply rather
 # than rendered as a picker.
 SEARCH_MAX_CANDIDATES = 10
+# The most of the digest's token budget the attachments block may take, leaving
+# the rest for meetings. A share rather than "whatever it wants": attachments now
+# carry full email bodies, and the meeting summaries are what most questions are
+# actually answered from.
+ATTACHMENT_BUDGET_SHARE = 0.5
+# Per-message body allowance inside the digest. Well under EMAIL_BODY_LIMIT --
+# that one bounds a single body the model explicitly asked for, this one bounds
+# every message in every chain on the thread at once.
+DIGEST_BODY_LIMIT = 1200
 
 TOOL_RE = re.compile(
     r"^\s*TOOL:\s*(get_transcript|search_context|get_email|attach_email|attach_event|web_search)"
@@ -116,15 +126,139 @@ def _format_meeting_block(conn: sqlite3.Connection, meeting: sqlite3.Row) -> str
     return "\n".join(lines)
 
 
-def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
+def _account_addresses(conn: sqlite3.Connection, thread_id: int) -> list[str]:
+    """The owner's own addresses, so chaining can subtract them.
+
+    Every message in your own mailbox shares you as a participant, so without
+    this the participant-overlap tier merges every subject-matched thread.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT i.account_label AS a FROM integrations i "
+        "JOIN threads t ON t.owner_id = i.user_id WHERE t.id = ? "
+        "UNION SELECT DISTINCT account AS a FROM thread_emails WHERE thread_id = ?",
+        (thread_id, thread_id),
+    ).fetchall()
+    return [r["a"] for r in rows if r["a"]]
+
+
+# How a message's direction reads in the digest. Spelled out rather than a bare
+# arrow because the model has to reason about who owes whom a reply, and NULL has
+# to be visibly *unknown* rather than quietly defaulting to received.
+_DIRECTION_LABEL = {
+    "outbound": "you sent",
+    "inbound": "received",
+}
+
+
+def _format_chain(chain: dict) -> str:
+    """One email conversation, chronological, with who sent what.
+
+    The status line is the point of this whole rendering: "you replied last, they
+    have not answered" is what stops the model suggesting a message the user has
+    already sent.
+    """
+    header = f"- Conversation: {chain['subject'] or '(no subject)'}"
+    with_whom = ", ".join(chain["participants"][:4])
+    if with_whom:
+        header += f" (with {with_whom})"
+    if chain["message_count"] > 1:
+        header += f" -- {chain['message_count']} messages"
+
+    lines = [header]
+
+    if chain["awaiting"] == "you":
+        lines.append(
+            "  Status: they wrote last and you have not replied yet."
+        )
+    elif chain["awaiting"] == "them":
+        lines.append(
+            "  Status: YOU wrote last -- you have already replied, and they have "
+            "not come back yet. Do not suggest sending this message again."
+        )
+    else:
+        lines.append(
+            "  Status: unknown -- it is not recorded who sent the most recent "
+            "message, so do not assume either side is waiting."
+        )
+
+    # Newest last, and the newest gets the fullest treatment: it is what the
+    # thread is actually waiting on.
+    total = len(chain["messages"])
+    for index, message in enumerate(chain["messages"]):
+        who = _DIRECTION_LABEL.get(message.get("direction") or "")
+        sender = message.get("sender") or "unknown sender"
+        stamp = (message.get("date") or "")[:10]
+        if who == "you sent":
+            attribution = f"you sent, {stamp}" if stamp else "you sent"
+        elif who == "received":
+            attribution = f"from {sender}, {stamp}" if stamp else f"from {sender}"
+        else:
+            attribution = (
+                f"{sender}, {stamp}, direction unknown"
+                if stamp
+                else f"{sender}, direction unknown"
+            )
+
+        lines.append(
+            f"  - [{attribution}] {message.get('subject') or '(no subject)'}"
+            f" [email_id: {message.get('message_id')}]"
+        )
+
+        # Newest message: full body if we have it. Older ones: the AI summary,
+        # then the snippet. A long thread otherwise spends the whole budget on
+        # history nobody asked about.
+        newest = index == total - 1
+        body = (message.get("body") or "").strip()
+        if newest and body:
+            shown = body[:DIGEST_BODY_LIMIT]
+            if len(body) > DIGEST_BODY_LIMIT:
+                shown += "\n(body truncated)"
+            lines.append(f"    {_indent(shown, 4)}")
+            continue
+
+        detail = (message.get("ai_summary") or "").strip()
+        if detail:
+            # Said to be a summary, not quoted as the sender's words.
+            lines.append(f"    Summary: {detail}")
+        elif message.get("snippet"):
+            lines.append(f"    {message['snippet'].strip()}")
+
+    return "\n".join(lines)
+
+
+def _budgeted(blocks: list[str], budget: int, label: str) -> list[str]:
+    """Emit blocks until the token budget runs out, then say what was dropped.
+
+    A silent cap reads as "you were shown everything" when you were not, which is
+    the same reasoning the sweep's overflow log follows.
+    """
+    out: list[str] = []
+    used = 0
+    for index, block in enumerate(blocks):
+        cost = llm_svc.estimate_tokens(block)
+        # Always emit at least one, or a single oversized item would produce a
+        # section containing nothing but an apology.
+        if out and used + cost > budget:
+            out.append(f"({len(blocks) - index} more {label} not shown -- context limit.)")
+            break
+        out.append(block)
+        used += cost
+    return out
+
+
+def _format_attachments(
+    conn: sqlite3.Connection, thread_id: int, *, budget: int | None = None
+) -> str:
     events = conn.execute(
         "SELECT summary, start_at, location, calendar_name, description "
         "FROM thread_calendar_events WHERE thread_id = ? ORDER BY start_at",
         (thread_id,),
     ).fetchall()
     emails = conn.execute(
-        "SELECT message_id, subject, sender, date, snippet FROM thread_emails "
-        "WHERE thread_id = ? ORDER BY date",
+        "SELECT id, message_id, subject, sender, date, snippet, account, provider, "
+        "conversation_id, rfc_message_id, in_reply_to, references_json, "
+        "to_recipients, cc_recipients, direction, ai_summary, body "
+        "FROM thread_emails WHERE thread_id = ? ORDER BY date",
         (thread_id,),
     ).fetchall()
     notes = conn.execute(
@@ -133,30 +267,47 @@ def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
         (thread_id,),
     ).fetchall()
 
+    # Per-section budgets. Split rather than shared so one long email thread
+    # cannot squeeze out every note, and vice versa.
+    section_budget = (budget // 3) if budget else None
+
     lines: list[str] = []
     if events:
         lines.append("### Calendar events")
+        blocks = []
         for e in events:
             when = (e["start_at"] or "")[:16].replace("T", " ")
             where = e["location"] or e["calendar_name"] or ""
             bits = ", ".join(b for b in (when, where) if b)
-            lines.append(f"- {e['summary'] or 'Untitled'}" + (f" ({bits})" if bits else ""))
+            block = f"- {e['summary'] or 'Untitled'}" + (f" ({bits})" if bits else "")
             if e["description"]:
-                lines.append(f"  {e['description'].strip()}")
+                block += f"\n  {e['description'].strip()}"
+            blocks.append(block)
+        lines.extend(
+            _budgeted(blocks, section_budget, "calendar event(s)") if section_budget else blocks
+        )
 
     if emails:
-        lines.append("### Emails")
-        for m in emails:
-            meta = ", ".join(b for b in (m["sender"], (m["date"] or "")[:10]) if b)
-            lines.append(
-                f"- {m['subject'] or '(no subject)'}" + (f" ({meta})" if meta else "")
-                + f" [email_id: {m['message_id']}, ask for its full body if needed]"
+        lines.append("### Email conversations")
+        lines.append(
+            "Grouped into conversations, oldest message first within each. Most "
+            "already carry their text; ask for an email_id's full body only when "
+            "you need exact wording you cannot see here."
+        )
+        blocks = [
+            _format_chain(chain)
+            for chain in email_chains_svc.build_chains(
+                [dict(m) for m in emails],
+                account_addresses=_account_addresses(conn, thread_id),
             )
-            if m["snippet"]:
-                lines.append(f"  {m['snippet'].strip()}")
+        ]
+        lines.extend(
+            _budgeted(blocks, section_budget, "conversation(s)") if section_budget else blocks
+        )
 
     if notes:
         lines.append("### Notes")
+        blocks = []
         for n in notes:
             when = (n["created_at"] or "")[:10]
             # Whose words these are matters more here than for the other two:
@@ -164,43 +315,57 @@ def _format_attachments(conn: sqlite3.Connection, thread_id: int) -> str:
             # output, and treating it as evidence would be circular.
             origin = "saved from an AI answer" if n["source"] == "ai_chat" else "written by the user"
             bits = ", ".join(b for b in (when, origin) if b)
-            lines.append(f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else ""))
+            block = f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else "")
             body = (n["body"] or "").strip()
             if body:
                 shown = body[:NOTE_BODY_LIMIT]
                 if len(body) > NOTE_BODY_LIMIT:
                     shown += "\n(note truncated)"
-                lines.append(f"  {_indent(shown)}")
+                block += f"\n  {_indent(shown)}"
+            blocks.append(block)
+        lines.extend(
+            _budgeted(blocks, section_budget, "note(s)") if section_budget else blocks
+        )
 
     if not lines:
         return "(no calendar events, emails or notes attached to this thread)"
     return "\n".join(lines)
 
 
-def _indent(text: str) -> str:
-    """Keep a multi-line note body inside its bullet.
+def _indent(text: str, width: int = 2) -> str:
+    """Keep a multi-line note or email body inside its bullet.
 
-    Events and emails contribute one-line snippets; a note is markdown someone
-    wrote, and its own headings and bullets would otherwise read as part of the
-    digest's structure rather than as content nested under the note.
+    A note is markdown someone wrote and an email body is whatever the sender
+    typed; either one's own headings and bullets would otherwise read as part of
+    the digest's structure rather than as content nested under the item.
     """
-    return text.replace("\n", "\n  ")
+    return text.replace("\n", "\n" + " " * width)
 
 
 def build_thread_digest(conn: sqlite3.Connection, thread_id: int) -> tuple[str, bool]:
-    """Compose the context sent to the model. Returns ``(digest, truncated)``."""
+    """Compose the context sent to the model. Returns ``(digest, truncated)``.
+
+    Both halves are budgeted. The attachments block used to be added
+    unconditionally and only the meetings truncated -- harmless while an email
+    contributed a 200-character snippet, but a real bug now that it can carry
+    full bodies: one long email thread could produce an attachments-only digest
+    with a single meeting glued on the end. Attachments get a fixed share so
+    meetings always get the rest.
+    """
     meetings = conn.execute(
         "SELECT * FROM meetings WHERE thread_id = ? ORDER BY meeting_at DESC, id DESC",
         (thread_id,),
     ).fetchall()
 
+    budget = get_settings().summary_max_input_tokens
     parts = [
         "## Calendar events, emails and notes attached to this thread",
-        _format_attachments(conn, thread_id),
+        _format_attachments(
+            conn, thread_id, budget=int(budget * ATTACHMENT_BUDGET_SHARE)
+        ),
         "",
         "## Meetings (most recent first)",
     ]
-    budget = get_settings().summary_max_input_tokens
     used = llm_svc.estimate_tokens("\n".join(parts))
     truncated = False
     shown = 0
@@ -292,7 +457,20 @@ def _format_search_results(gathered: dict) -> str:
     if emails:
         lines.append("Emails found (not yet attached to this thread):")
         for m in emails:
-            meta = ", ".join(b for b in (m.get("sender"), (m.get("date") or "")[:10]) if b)
+            # Direction matters as much here as in the digest: a Gmail search
+            # returns the user's own sent mail too (`build_gmail_query` has no
+            # `-in:sent`), so without this the model reads a message the user
+            # wrote as an incoming request from someone else.
+            who = _DIRECTION_LABEL.get(m.get("direction") or "")
+            stamp = (m.get("date") or "")[:10]
+            if who == "you sent":
+                meta = ", ".join(b for b in ("you sent", stamp) if b)
+            elif who == "received":
+                meta = ", ".join(b for b in (f"from {m.get('sender')}", stamp) if b)
+            else:
+                meta = ", ".join(
+                    b for b in (m.get("sender"), stamp, "direction unknown") if b
+                )
             lines.append(
                 f"- {m.get('subject') or '(no subject)'}" + (f" ({meta})" if meta else "")
                 + f" [email_id: {m['message_id']}]"
@@ -371,24 +549,34 @@ def _resolve_email_ref(
             "integration_id": cached.get("integration_id"),
             "native_id": cached.get("id"),
             "folder_id": cached.get("folder_id"),
+            "body": None,
         }
 
     row = conn.execute(
-        "SELECT mcp_id, folder_id FROM thread_emails WHERE thread_id = ? AND message_id = ?",
+        "SELECT mcp_id, folder_id, integration_id, body FROM thread_emails "
+        "WHERE thread_id = ? AND message_id = ?",
         (thread_id, message_id),
     ).fetchone()
     if row is None:
         return None
 
-    # thread_emails has no integration_id column of its own; message_id's own
-    # composite shape (`{provider}:{integration_id}:{...}`) is the only place
-    # it's recorded once attached.
-    parts = message_id.split(":", 2)
-    integration_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+    integration_id = row["integration_id"]
+    if integration_id is None:
+        # Pre-migration fallback: recover it from the composite message_id shape
+        # (`{provider}:{integration_id}:{...}`), which used to be the only place
+        # it was recorded. This is also exactly why every MCP-sourced email was
+        # unfetchable -- the MCP adapter deliberately emits bare ids, so there is
+        # no composite to parse. The column above is the real fix.
+        parts = message_id.split(":", 2)
+        integration_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else None
+
     return {
         "integration_id": integration_id,
         "native_id": row["mcp_id"],
         "folder_id": row["folder_id"],
+        # Hydration may already have stored it, in which case there is no reason
+        # to spend a provider round trip.
+        "body": row["body"],
     }
 
 
@@ -400,7 +588,22 @@ async def _tool_get_email(
     found: dict[str, dict[str, dict]],
 ) -> str:
     ref = _resolve_email_ref(conn, thread_id, message_id, found)
-    if ref is None or ref["integration_id"] is None or not ref["native_id"]:
+    if ref is None:
+        return (
+            "[No such email in this thread's context. Run search_context first, "
+            "or use an email_id already shown in THREAD CONTEXT.]"
+        )
+
+    # Hydration already stored it, so answer from the database. Saves a provider
+    # round trip, and it is the only thing that works for an account that has
+    # since been disconnected or a provider with no fetch-by-id tool at all.
+    stored = (ref.get("body") or "").strip()
+    if stored:
+        if len(stored) > EMAIL_BODY_LIMIT:
+            stored = stored[:EMAIL_BODY_LIMIT] + "\n(email truncated)"
+        return f"[Email {message_id}]\n{stored}"
+
+    if ref["integration_id"] is None or not ref["native_id"]:
         return (
             "[No such email in this thread's context. Run search_context first, "
             "or use an email_id already shown in THREAD CONTEXT.]"

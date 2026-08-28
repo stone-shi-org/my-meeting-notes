@@ -1,6 +1,6 @@
 ---
 name: match_rank_prompt
-version: 1
+version: 2
 description: Rank calendar events and emails by how well they match a meeting.
 temperature: 0.1
 required_placeholders: [payload]
@@ -18,6 +18,13 @@ Judge relevance on: whether the timing lines up with the meeting, whether the pe
 involved match, and whether the subject matter is the same work. A calendar event at the
 same time on the same day as the recording is very strong evidence. An email merely sent
 in the same week is weak evidence on its own.
+
+An email candidate carries `direction`: `"outbound"` means the user wrote it, `"inbound"`
+means they received it, and `null` means it is not known. The email search covers sent mail
+as well as received, so both turn up. Use it as part of the people axis -- an email the user
+themselves wrote to the meeting's attendees is strong evidence, a bulk message they received
+from an unrelated sender is weak -- but do not treat `null` as either, and never score a
+candidate down merely for being outbound.
 
 You MUST return a single valid JSON object and nothing else:
 

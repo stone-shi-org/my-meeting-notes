@@ -17,6 +17,7 @@ import weakref
 from app.db import get_conn, utcnow
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
+from app.services import email_chains as email_chains_svc
 from app.services import prompts as prompts_svc
 from app.services import telegram as telegram_svc
 from app.services import threads as threads_svc
@@ -25,7 +26,8 @@ log = get_logger("next_step")
 
 RECENT_MEETINGS = 5
 RECENT_EVENTS = 8
-RECENT_EMAILS = 8
+# Conversations, not messages: a chain is the unit the suggestion reasons about.
+RECENT_EMAIL_CHAINS = 6
 RECENT_NOTES = 5
 
 # How many threads the list view will generate a next step for at once.
@@ -87,15 +89,20 @@ def _payload(conn: sqlite3.Connection, thread_id: int) -> dict:
         (thread_id, RECENT_EVENTS),
     ).fetchall()
 
+    # Every email on the thread, not the newest N: chaining is a whole-set
+    # operation, and taking a slice first would cut conversations in half and
+    # then report the remainder as if it were the whole exchange. The *chains*
+    # are capped below instead.
     emails = conn.execute(
         """
-        SELECT subject, sender, date, snippet
+        SELECT id, message_id, subject, sender, date, snippet, account, provider,
+               conversation_id, rfc_message_id, in_reply_to, references_json,
+               to_recipients, cc_recipients, direction, ai_summary
           FROM thread_emails
          WHERE thread_id = ?
-         ORDER BY date DESC
-         LIMIT ?
+         ORDER BY date
         """,
-        (thread_id, RECENT_EMAILS),
+        (thread_id,),
     ).fetchall()
 
     notes = conn.execute(
@@ -114,11 +121,67 @@ def _payload(conn: sqlite3.Connection, thread_id: int) -> dict:
         "thread_description": thread["description"] or "",
         "recent_meetings": [dict(r) for r in meetings],
         "recent_calendar_events": [dict(r) for r in events],
-        "recent_emails": [dict(r) for r in emails],
+        # Renamed from `recent_emails` deliberately, and in the same commit as
+        # the prompt bump: a stale prompt reading the old key would find nothing
+        # and quietly decide the thread has no email on it, which is a worse
+        # failure than an obvious one.
+        "email_chains": _chain_payload(conn, thread_id, emails),
         "recent_notes": [
             {**dict(r), "body": (r["body"] or "")[:NOTE_BODY_LIMIT]} for r in notes
         ],
     }
+
+
+def _chain_payload(
+    conn: sqlite3.Connection, thread_id: int, emails: list
+) -> list[dict]:
+    """Conversations, newest first, each saying who is being waited on.
+
+    Only what the suggestion needs: who it is with, how it stands, and enough of
+    the newest message to name a specific. The full bodies stay out -- this
+    payload is one JSON blob in one prompt, and a thread with four long threads
+    on it would otherwise be mostly quoted history.
+    """
+    account_addresses = [
+        r["a"]
+        for r in conn.execute(
+            "SELECT DISTINCT i.account_label AS a FROM integrations i "
+            "JOIN threads t ON t.owner_id = i.user_id WHERE t.id = ? "
+            "UNION SELECT DISTINCT account AS a FROM thread_emails WHERE thread_id = ?",
+            (thread_id, thread_id),
+        ).fetchall()
+        if r["a"]
+    ]
+
+    chains = email_chains_svc.build_chains(
+        [dict(r) for r in emails], account_addresses=account_addresses
+    )
+
+    out = []
+    for chain in chains[:RECENT_EMAIL_CHAINS]:
+        newest = chain["messages"][-1]
+        out.append(
+            {
+                "subject": chain["subject"],
+                "with": chain["participants"][:4],
+                "message_count": chain["message_count"],
+                "last_message_at": chain["last_message_at"],
+                # "you" | "them" | None. None means the direction was never
+                # recorded, and the prompt is told not to guess from it.
+                "last_message_from": chain["last_message_from"],
+                "awaiting": chain["awaiting"],
+                "newest_message": {
+                    "from": "you" if newest.get("direction") == "outbound"
+                    else newest.get("sender"),
+                    "date": newest.get("date"),
+                    # The AI summary where there is one, else the provider's
+                    # snippet. Labelled either way so the model knows which it is.
+                    "summary": newest.get("ai_summary"),
+                    "snippet": None if newest.get("ai_summary") else newest.get("snippet"),
+                },
+            }
+        )
+    return out
 
 
 def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:

@@ -172,6 +172,73 @@ class TestStaleness:
     def test_no_stored_fingerprint_is_always_stale(self, conn):
         assert threads_svc.is_next_step_stale(conn, 999, None) is True
 
+    def test_hydrating_an_email_body_makes_a_cached_suggestion_stale(
+        self, user_client, meeting, mock_llm
+    ):
+        """The easy one to get wrong.
+
+        An email's content is immutable, so the row looks like a calendar event
+        -- but it is filled in lazily, and the body and AI summary hydration adds
+        are what the suggestion actually reads. Keyed on the id alone, a thread's
+        first hydration would silently refresh nothing and the cached suggestion
+        would keep describing a thread it had only seen the snippets of.
+        """
+        thread_id = meeting["thread_id"]
+        with get_conn() as conn:
+            matching_svc.attach_email(
+                conn,
+                thread_id=thread_id,
+                meeting_id=None,
+                email={
+                    "id": "g9",
+                    "message_id": "<hydrate-me@x>",
+                    "subject": "Long thread",
+                    "sender": "a@b.com",
+                    "date": "2026-07-29T00:00:00+00:00",
+                },
+                user_id=meeting["owner_id"],
+            )
+
+        refresh(user_client, thread_id)
+        assert thread_of(user_client, thread_id)["next_step_stale"] is False
+
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE thread_emails SET body = ?, body_fetched_at = ? "
+                "WHERE message_id = '<hydrate-me@x>'",
+                ("the full body, finally", "2026-08-27T10:00:00+00:00"),
+            )
+
+        assert thread_of(user_client, thread_id)["next_step_stale"] is True
+
+    def test_a_failed_hydration_also_makes_it_stale_only_once(self, conn):
+        """`body_fetched_at` is stamped on every attempt, so a provider that
+        cannot supply a body moves the fingerprint once and then stops -- it does
+        not re-trigger a refresh on every poll."""
+        from app.db import utcnow
+
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, password_salt, "
+            "created_at, updated_at) VALUES (1, 'one', 'h', 's', ?, ?)",
+            (utcnow(), utcnow()),
+        )
+        thread = threads_svc.create_thread(conn, owner_id=1, title="Atlas")
+        matching_svc.attach_email(
+            conn, thread_id=thread["id"], meeting_id=None, user_id=1,
+            email={"message_id": "m-1", "subject": "S"},
+        )
+
+        before = threads_svc.compute_next_step_fingerprint(conn, thread["id"])
+        conn.execute(
+            "UPDATE thread_emails SET body_fetched_at = '2026-08-27T10:00:00+00:00' "
+            "WHERE message_id = 'm-1'"
+        )
+        after = threads_svc.compute_next_step_fingerprint(conn, thread["id"])
+        assert after != before
+
+        # Nothing else changed, so it must now be stable.
+        assert threads_svc.compute_next_step_fingerprint(conn, thread["id"]) == after
+
 
 class TestListAutoRefresh:
     """GET /api/threads doubles as "generate what's missing" for the page it
@@ -313,3 +380,130 @@ async def test_list_refresh_concurrency_is_shared_across_requests(monkeypatch):
         next_step_svc.refresh_many(None, list(range(10, 20))),
     )
     assert maximum == next_step_svc.LIST_REFRESH_CONCURRENCY
+
+
+class TestChainAwarePayload:
+    """The suggestion has to be able to tell "they are waiting on me" from
+    "I already replied" -- the whole reason for this refactor."""
+
+    def _payload_sent(self, router) -> dict:
+        body = json.loads(router.calls[-1].request.content)
+        return json.loads(body["messages"][-1]["content"])
+
+    def _attach(self, thread_id, owner_id, **fields):
+        with get_conn() as conn:
+            matching_svc.attach_email(
+                conn, thread_id=thread_id, meeting_id=None, user_id=owner_id,
+                email=fields,
+            )
+
+    def test_the_payload_carries_chains_not_a_flat_email_list(
+        self, user_client, meeting, mock_llm
+    ):
+        """Renamed deliberately: a stale prompt reading `recent_emails` would
+        find nothing and quietly decide the thread has no email on it."""
+        self._attach(
+            meeting["thread_id"], meeting["owner_id"],
+            message_id="google:5:m1", id="m1", subject="Atlas cutover",
+            sender="priya@acme.com", date="2026-07-20T09:00:00+00:00",
+            direction="inbound", integration_id=5,
+        )
+        refresh(user_client, meeting["thread_id"])
+
+        payload = self._payload_sent(mock_llm)
+        assert "email_chains" in payload
+        assert "recent_emails" not in payload
+
+    def test_the_payload_says_the_ball_is_with_them_when_i_replied_last(
+        self, user_client, meeting, mock_llm
+    ):
+        tid, oid = meeting["thread_id"], meeting["owner_id"]
+        self._attach(tid, oid, message_id="google:5:m1", id="m1",
+                     rfc_message_id="<a@x>", subject="Atlas cutover",
+                     sender="priya@acme.com", to_recipients="me@acme.com",
+                     date="2026-07-20T09:00:00+00:00", direction="inbound",
+                     integration_id=5)
+        self._attach(tid, oid, message_id="google:5:m2", id="m2",
+                     rfc_message_id="<b@x>", in_reply_to="<a@x>",
+                     subject="Re: Atlas cutover", sender="me@acme.com",
+                     to_recipients="priya@acme.com",
+                     date="2026-07-21T09:00:00+00:00", direction="outbound",
+                     integration_id=5)
+        refresh(user_client, tid)
+
+        [chain] = self._payload_sent(mock_llm)["email_chains"]
+        assert chain["message_count"] == 2
+        assert chain["last_message_from"] == "you"
+        assert chain["awaiting"] == "them"
+
+    def test_the_payload_says_the_ball_is_with_me_when_they_replied_last(
+        self, user_client, meeting, mock_llm
+    ):
+        self._attach(
+            meeting["thread_id"], meeting["owner_id"],
+            message_id="google:5:m1", id="m1", subject="Atlas cutover",
+            sender="priya@acme.com", to_recipients="me@acme.com",
+            date="2026-07-20T09:00:00+00:00", direction="inbound",
+            integration_id=5,
+        )
+        refresh(user_client, meeting["thread_id"])
+
+        [chain] = self._payload_sent(mock_llm)["email_chains"]
+        assert chain["awaiting"] == "you"
+
+    def test_an_unknown_direction_is_not_guessed_in_the_payload(
+        self, user_client, meeting, mock_llm
+    ):
+        self._attach(
+            meeting["thread_id"], meeting["owner_id"],
+            message_id="bare-mcp-1", id="x1", subject="No direction recorded",
+            sender="someone@else.example", date="2026-07-20T09:00:00+00:00",
+            integration_id=5,
+        )
+        refresh(user_client, meeting["thread_id"])
+
+        [chain] = self._payload_sent(mock_llm)["email_chains"]
+        assert chain["awaiting"] is None
+        assert chain["last_message_from"] is None
+
+    def test_the_payload_never_carries_a_full_body(
+        self, user_client, meeting, mock_llm
+    ):
+        """One JSON blob in one prompt: a thread with four long conversations on
+        it would otherwise be mostly quoted history."""
+        tid, oid = meeting["thread_id"], meeting["owner_id"]
+        self._attach(tid, oid, message_id="google:5:m1", id="m1",
+                     subject="Atlas", sender="priya@acme.com",
+                     date="2026-07-20T09:00:00+00:00", direction="inbound",
+                     integration_id=5)
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE thread_emails SET body = ?, ai_summary = ? WHERE mcp_id = 'm1'",
+                ("SECRET-FULL-BODY-MARKER", "Priya confirms Friday"),
+            )
+        refresh(user_client, tid)
+
+        raw = mock_llm.calls[-1].request.content.decode()
+        assert "SECRET-FULL-BODY-MARKER" not in raw
+        # ...but the summary does go, so the suggestion can name a specific.
+        assert "Priya confirms Friday" in raw
+
+    def test_chains_are_capped_but_never_split_mid_conversation(
+        self, user_client, meeting, mock_llm
+    ):
+        """Slicing the *emails* first would cut conversations in half and report
+        the remainder as if it were the whole exchange, so the cap is on chains."""
+        from app.services import next_step as next_step_svc
+
+        tid, oid = meeting["thread_id"], meeting["owner_id"]
+        for i in range(next_step_svc.RECENT_EMAIL_CHAINS + 4):
+            self._attach(tid, oid, message_id=f"google:5:c{i}", id=f"c{i}",
+                         subject=f"Distinct conversation {i}",
+                         sender=f"p{i}@acme.example",
+                         date=f"2026-07-{i + 1:02d}T09:00:00+00:00",
+                         direction="inbound", integration_id=5)
+        refresh(user_client, tid)
+
+        chains = self._payload_sent(mock_llm)["email_chains"]
+        assert len(chains) == next_step_svc.RECENT_EMAIL_CHAINS
+        assert all(c["message_count"] >= 1 for c in chains)

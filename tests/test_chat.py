@@ -754,3 +754,234 @@ def test_web_search_tool_hop_answers_from_real_results(user_client, isolated_set
 
     tool_call = next(d for e, d in frames if e == "tool_call")
     assert tool_call["tool"] == "web_search"
+
+
+# --------------------------------------------------------------------------- #
+# The digest: conversations, direction, and the attachment budget
+# --------------------------------------------------------------------------- #
+
+
+def _thread_only(db_path):
+    now = utcnow()
+    with get_conn(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (id, username, password_hash, password_salt, "
+            "created_at, updated_at) VALUES (1, 'u', 'h', 's', ?, ?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO threads (id, owner_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 'Atlas', ?, ?)", (now, now),
+        )
+        conn.execute(
+            "INSERT INTO integrations (id, user_id, provider, account_key, "
+            "account_label, calendar_enabled, email_enabled, auth_type, "
+            "config_json, created_at, updated_at) "
+            "VALUES (5, 1, 'google', 'k', 'me@acme.com', 0, 1, 'oauth', '{}', ?, ?)",
+            (now, now),
+        )
+    return db_path
+
+
+def _add(db_path, **fields):
+    from app.services import matching as matching_svc
+
+    with get_conn(db_path) as conn:
+        matching_svc.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1, email=fields
+        )
+
+
+def _attachments(db_path, budget=None):
+    with get_conn(db_path) as conn:
+        return chat_svc._format_attachments(conn, 1, budget=budget)
+
+
+def test_the_digest_groups_emails_into_conversations(initialised_db):
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', rfc_message_id='<a@x>',
+         subject='Atlas cutover', sender='me@acme.com', to_recipients='priya@acme.com',
+         date='2026-03-16T09:00:00+00:00', direction='outbound', integration_id=5)
+    _add(db, message_id='google:5:m2', id='m2', rfc_message_id='<b@x>',
+         in_reply_to='<a@x>', subject='Re: Atlas cutover', sender='priya@acme.com',
+         to_recipients='me@acme.com', date='2026-03-17T09:00:00+00:00',
+         direction='inbound', integration_id=5, snippet='Friday works.')
+
+    text = _attachments(db)
+
+    assert 'Conversation: Atlas cutover' in text
+    assert '2 messages' in text
+    # One block, not two independent bullets.
+    assert text.count('Conversation:') == 1
+
+
+def test_the_digest_says_who_sent_each_message(initialised_db):
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', subject='Atlas',
+         sender='me@acme.com', date='2026-03-16T09:00:00+00:00',
+         direction='outbound', integration_id=5)
+
+    text = _attachments(db)
+    assert 'you sent' in text
+
+
+def test_the_digest_tells_the_model_not_to_resend_a_reply_already_sent(initialised_db):
+    """The whole point of the feature.
+
+    The user wrote last, so a suggestion to "reply to Priya" is describing
+    something already done.
+    """
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', rfc_message_id='<a@x>',
+         subject='Atlas cutover', sender='priya@acme.com', to_recipients='me@acme.com',
+         date='2026-03-16T09:00:00+00:00', direction='inbound', integration_id=5)
+    _add(db, message_id='google:5:m2', id='m2', rfc_message_id='<b@x>',
+         in_reply_to='<a@x>', subject='Re: Atlas cutover', sender='me@acme.com',
+         to_recipients='priya@acme.com', date='2026-03-17T09:00:00+00:00',
+         direction='outbound', integration_id=5)
+
+    text = _attachments(db)
+
+    assert 'YOU wrote last' in text
+    assert 'Do not suggest sending this message again' in text
+
+
+def test_the_digest_says_the_other_way_round_too(initialised_db):
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', subject='Atlas',
+         sender='priya@acme.com', date='2026-03-16T09:00:00+00:00',
+         direction='inbound', integration_id=5)
+
+    assert 'you have not replied yet' in _attachments(db)
+
+
+def test_an_unknown_direction_is_stated_as_unknown_not_guessed(initialised_db):
+    """A NULL rendered as received is what tells the model someone else asked a
+    question the user asked themselves."""
+    db = _thread_only(initialised_db)
+    _add(db, message_id='bare-mcp-1', id='x1', subject='No direction',
+         sender='someone@else.example', date='2026-03-16T09:00:00+00:00',
+         integration_id=5)
+
+    text = _attachments(db)
+
+    assert 'Status: unknown' in text
+    assert 'direction unknown' in text
+    assert 'you sent' not in text
+
+
+def test_the_newest_message_carries_its_full_body(initialised_db):
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', subject='Atlas',
+         sender='priya@acme.com', date='2026-03-16T09:00:00+00:00',
+         direction='inbound', integration_id=5)
+    with get_conn(db) as conn:
+        conn.execute(
+            "UPDATE thread_emails SET body = ? WHERE mcp_id = 'm1'",
+            ("Sam owns the DNS cutover and the window is confirmed for Friday.",),
+        )
+
+    assert 'Sam owns the DNS cutover' in _attachments(db)
+
+
+def test_an_older_message_degrades_to_its_ai_summary(initialised_db):
+    """A long thread otherwise spends the whole budget on history nobody asked
+    about -- and the summary is labelled, never quoted as the sender."""
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', rfc_message_id='<a@x>',
+         subject='Atlas', sender='priya@acme.com', date='2026-03-16T09:00:00+00:00',
+         direction='inbound', integration_id=5)
+    _add(db, message_id='google:5:m2', id='m2', rfc_message_id='<b@x>',
+         in_reply_to='<a@x>', subject='Re: Atlas', sender='me@acme.com',
+         date='2026-03-17T09:00:00+00:00', direction='outbound', integration_id=5)
+    with get_conn(db) as conn:
+        conn.execute(
+            "UPDATE thread_emails SET body = ?, ai_summary = ? WHERE mcp_id = 'm1'",
+            ("the older full body text", "Priya asks about the window"),
+        )
+
+    text = _attachments(db)
+
+    assert 'Summary: Priya asks about the window' in text
+    assert 'the older full body text' not in text
+
+
+def test_the_digest_budgets_attachments_and_says_what_it_dropped(initialised_db):
+    """The pre-existing bug: attachments used to be added unconditionally, so
+    with real bodies one thread could crowd out every meeting. A silent cap also
+    reads as "you saw everything" when you did not."""
+    db = _thread_only(initialised_db)
+    for i in range(30):
+        _add(db, message_id=f'google:5:m{i}', id=f'm{i}',
+             subject=f'Distinct subject {i}', sender=f'p{i}@acme.example',
+             date=f'2026-03-{i + 1:02d}T09:00:00+00:00', direction='inbound',
+             integration_id=5, snippet='x' * 400)
+
+    text = _attachments(db, budget=600)
+
+    assert 'not shown -- context limit' in text
+    assert text.count('Conversation:') < 30
+
+
+def test_the_digest_reserves_room_for_meetings(seeded, monkeypatch):
+    """Attachments get a share, not whatever they want."""
+    monkeypatch.setattr(chat_svc, 'ATTACHMENT_BUDGET_SHARE', 0.5)
+    digest, _ = chat_svc.build_thread_digest(seeded, thread_id=1)
+    assert '## Meetings (most recent first)' in digest
+    # At least one meeting block survived the attachments block.
+    assert 'Meeting 1' in digest or '### Meeting' in digest
+
+
+def test_get_email_answers_from_a_stored_body_without_a_provider_call(initialised_db):
+    """Saves a round trip, and it is the only thing that works for an account
+    that has since been disconnected."""
+    import asyncio
+
+    db = _thread_only(initialised_db)
+    _add(db, message_id='google:5:m1', id='m1', subject='Atlas',
+         sender='priya@acme.com', date='2026-03-16T09:00:00+00:00',
+         direction='inbound', integration_id=5)
+    with get_conn(db) as conn:
+        conn.execute(
+            "UPDATE thread_emails SET body = ? WHERE mcp_id = 'm1'",
+            ("The stored verbatim body.",),
+        )
+
+    found = {"events": {}, "emails": {}}
+    with get_conn(db) as conn:
+        out = asyncio.run(
+            chat_svc._tool_get_email(conn, 1, 1, 'google:5:m1', found)
+        )
+
+    assert 'The stored verbatim body.' in out
+    # respx is not even mocked here: a provider call would have raised.
+
+
+def test_get_email_reports_a_missing_id_rather_than_guessing(initialised_db):
+    import asyncio
+
+    db = _thread_only(initialised_db)
+    found = {"events": {}, "emails": {}}
+    with get_conn(db) as conn:
+        out = asyncio.run(chat_svc._tool_get_email(conn, 1, 1, 'nope', found))
+    assert 'No such email' in out
+
+
+def test_search_results_mark_the_users_own_sent_mail(initialised_db):
+    """Gmail's query has no `-in:sent`, so a search does return the user's own
+    mail -- and unmarked, the model reads it as an incoming request."""
+    gathered = {
+        "events": [],
+        "emails": [
+            {"message_id": "google:5:s1", "subject": "Atlas", "sender": "me@acme.com",
+             "date": "2026-03-16T09:00:00+00:00", "direction": "outbound"},
+            {"message_id": "google:5:s2", "subject": "Atlas", "sender": "p@acme.com",
+             "date": "2026-03-17T09:00:00+00:00", "direction": "inbound"},
+            {"message_id": "bare-3", "subject": "Atlas", "sender": "q@acme.com",
+             "date": "2026-03-18T09:00:00+00:00"},
+        ],
+    }
+    text = chat_svc._format_search_results(gathered)
+
+    assert 'you sent' in text
+    assert 'from p@acme.com' in text
+    assert 'direction unknown' in text
