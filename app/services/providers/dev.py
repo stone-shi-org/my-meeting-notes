@@ -106,6 +106,19 @@ def resolve_when(row, *, now: datetime, anchor_at: str | None) -> datetime | Non
     return now + offset
 
 
+def _optional(row: sqlite3.Row, column: str):
+    """A late-added column's value, or None if this row predates it.
+
+    ``sqlite3.Row`` raises IndexError rather than returning None for a column the
+    query never selected, so a LATE_COLUMN cannot be read directly on a row that
+    came from an older database.
+    """
+    try:
+        return row[column]
+    except (IndexError, KeyError):
+        return None
+
+
 def _matches(keywords: list[str], *fields: str | None) -> bool:
     """Case-insensitive substring match on any keyword.
 
@@ -153,22 +166,40 @@ class DevProvider(BaseProvider):
 
     def _to_email(self, row: sqlite3.Row, when: datetime) -> EmailCandidate:
         native = f"email-{row['id']}"
+        outbound = bool(_optional(row, "outbound"))
+        account = row["account"] or self.ref.display
+        # An authored reply names its parent by that parent's *row id*, which is
+        # friendlier to write in the UI than a full message-id, so it is expanded
+        # into the same "<email-N@dev.local>" shape emitted above.
+        parent = _optional(row, "in_reply_to")
+        in_reply_to = f"<email-{parent}@dev.local>" if parent else None
+        conversation = _optional(row, "conversation_id")
         return EmailCandidate(
             message_id=self.uid_for(native),
             rfc_message_id=f"<{native}@dev.local>",
             id=native,
-            sender=row["sender"],
+            sender=account if outbound else row["sender"],
             subject=row["subject"],
             # RFC 2822 on request: stored raw those sort lexically above every
             # ISO date, which is the trap normalize_timestamp exists for.
             date=format_datetime(when) if row["rfc2822_date"] else when.isoformat(),
             snippet=row["snippet"],
-            account=row["account"] or self.ref.display,
+            account=account,
             url=None,
             # triage_level/tag/reason/score stay None. Only the email-triage MCP
             # server supplies those, and a synthesised triage level reads as real.
             provider=self.provider_id,
             integration_id=self.ref.id,
+            # Namespaced like a real provider's would be, so the two-accounts
+            # test case is reproducible offline.
+            conversation_id=self.uid_for(conversation) if conversation else None,
+            in_reply_to=in_reply_to,
+            references=(in_reply_to,) if in_reply_to else (),
+            # An outbound fixture is addressed to whoever the row names as
+            # sender: it is the same conversation seen from the other side.
+            to_recipients=row["sender"] if outbound else account,
+            cc_recipients=None,
+            direction="outbound" if outbound else "inbound",
         )
 
     async def get_email_body(

@@ -336,3 +336,109 @@ def test_a_dev_row_goes_inert_when_disabled(seeded, monkeypatch):
         monkeypatch.setenv("MMN_DEV_PROVIDER_ENABLED", "0")
         reset_settings_cache()
         assert loader.build_provider(conn, row) is None
+
+
+# --------------------------------------------------------------------------- #
+# Threading and direction, offline
+# --------------------------------------------------------------------------- #
+
+
+class TestDevThreading:
+    """Authoring a reply chain and an outbound message without a real account.
+
+    This is the whole reason the dev provider is a provider and not a test
+    double: the chaining and direction fixtures run through the *real*
+    provider -> candidate -> attach -> build_chains path.
+    """
+
+    async def test_an_outbound_fixture_is_addressed_from_the_account(self, seeded):
+        add_email(seeded, subject="Atlas cutover window", sender="jane@example.com",
+                  outbound=1, offset_minutes=-2880)
+
+        [mail] = await provider().search_emails(
+            keywords=["atlas"], start=WIDE_START, end=WIDE_END
+        )
+
+        assert mail.direction == "outbound"
+        # Seen from the other side: the account sent it, to whoever the row names.
+        assert mail.sender == "Fixtures"
+        assert mail.to_recipients == "jane@example.com"
+
+    async def test_an_inbound_fixture_keeps_its_sender(self, seeded):
+        add_email(seeded, subject="Atlas cutover window", sender="jane@example.com")
+
+        [mail] = await provider().search_emails(
+            keywords=["atlas"], start=WIDE_START, end=WIDE_END
+        )
+
+        assert mail.direction == "inbound"
+        assert mail.sender == "jane@example.com"
+        assert mail.to_recipients == "Fixtures"
+
+    async def test_a_reply_names_its_parent_by_row_id(self, seeded):
+        """`in_reply_to` is another dev_emails row id, expanded into the same
+        message-id shape the provider emits -- friendlier to type in the UI."""
+        add_email(seeded, subject="Atlas cutover window", offset_minutes=-2880)
+        add_email(seeded, subject="Re: Atlas cutover window", in_reply_to=1,
+                  offset_minutes=-1440)
+
+        mails = await provider().search_emails(
+            keywords=["atlas"], start=WIDE_START, end=WIDE_END
+        )
+        reply = next(m for m in mails if m.subject.startswith("Re:"))
+        parent = next(m for m in mails if not m.subject.startswith("Re:"))
+
+        assert reply.in_reply_to == parent.rfc_message_id
+        assert reply.references == (parent.rfc_message_id,)
+
+    async def test_an_authored_chain_groups_and_says_who_is_awaited(self, seeded):
+        """End-to-end offline: provider -> candidates -> attach -> build_chains.
+
+        The case that matters is the last assertion. You emailed Jane, she
+        replied, so the ball is in *your* court -- and a suggestion engine that
+        cannot see that is the one that tells you to send a mail you already sent.
+        """
+        from app.services import matching as m
+        from app.services.email_chains import build_chains
+
+        add_email(seeded, subject="Atlas cutover window", sender="jane@example.com",
+                  outbound=1, offset_minutes=-2880)
+        add_email(seeded, subject="Re: Atlas cutover window",
+                  sender="jane@example.com", in_reply_to=1, offset_minutes=-1440)
+        add_email(seeded, subject="Unrelated vendor invoice",
+                  sender="billing@vendor.example", offset_minutes=-4320)
+
+        mails = await provider().search_emails(
+            keywords=[], start=WIDE_START, end=WIDE_END
+        )
+        assert len(mails) == 3
+
+        with get_conn(seeded) as conn:
+            for mail in mails:
+                m.attach_email(
+                    conn, thread_id=1, meeting_id=None, user_id=1, email=mail.to_dict()
+                )
+            rows = [dict(r) for r in conn.execute(
+                "SELECT * FROM thread_emails WHERE thread_id = 1"
+            )]
+
+        chains = build_chains(rows, account_addresses=["Fixtures"])
+        by_size = sorted(chains, key=lambda c: c["message_count"])
+
+        assert [c["message_count"] for c in by_size] == [1, 2]
+        conversation = by_size[-1]
+        assert conversation["subject"] == "Atlas cutover window"
+        assert conversation["last_message_from"] == "them"
+        assert conversation["awaiting"] == "you"
+
+    async def test_two_dev_accounts_sharing_a_conversation_id_stay_distinct(self, seeded):
+        """The namespacing guard, reproducible offline.
+
+        A bare conversation id would merge these; `uid_for` keeps them apart.
+        """
+        add_email(seeded, subject="Atlas one", conversation_id="shared-thread")
+
+        [mail] = await provider().search_emails(
+            keywords=["atlas"], start=WIDE_START, end=WIDE_END
+        )
+        assert mail.conversation_id == "dev:7:shared-thread"

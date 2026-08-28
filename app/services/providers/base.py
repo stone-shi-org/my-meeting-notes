@@ -28,9 +28,21 @@ from typing import Iterable, Protocol, runtime_checkable
 # and the whole list would otherwise be persisted three times per match run.
 MAX_ATTENDEES = 24
 
+# Bounded for the same reason MAX_ATTENDEES is: a mailing-list `References`
+# header carries dozens of ids and the whole candidate is persisted three times
+# per match run. The *tail* is kept rather than the head -- chaining only ever
+# needs the nearest ancestors, and the oldest ids in a long thread are the ones
+# no attached message will ever cite.
+MAX_REFERENCES = 20
+
 # Only these are unpacked from an address local part. "jsmith" is not improved by
 # becoming "Jsmith", but "jane.doe" genuinely is "Jane Doe".
 _LOCAL_PART_SEPARATORS = re.compile(r"[._-]+")
+
+# `parseaddr` returns ('', '') on some malformed headers rather than raising, so
+# a bare "<a@b.com>" or a header with a stray quote falls through to this.
+_ANGLE_ADDRESS = re.compile(r"<([^<>@\s]+@[^<>@\s]+)>")
+_BARE_ADDRESS = re.compile(r"([^<>@\s,;]+@[^<>@\s,;]+)")
 
 
 def make_uid(provider: str, integration_id: int, native_instance_key: str) -> str:
@@ -66,6 +78,50 @@ def attendee_label(display_name: str | None, email: str | None) -> str | None:
     if not _LOCAL_PART_SEPARATORS.search(local):
         return address
     return _LOCAL_PART_SEPARATORS.sub(" ", local).strip().title() or address
+
+
+def normalize_address(value: str | None) -> str | None:
+    """The bare mailbox out of a From/To header, casefolded, or None.
+
+    Deliberately *not* ``attendee_label``, which returns a display name:
+    comparing "Priya Raman" against a connected account tells you nothing, and
+    that is exactly the comparison ``direction`` depends on.
+
+    ``+tag`` suffixes are kept. ``sales@`` and ``sales+eu@`` are different
+    mailboxes, and collapsing them would over-merge conversations whose only
+    shared participant is a tagged alias.
+    """
+    text = (value or "").strip()
+    if not text:
+        return None
+
+    _, address = parseaddr(text)
+    address = address.strip()
+    if "@" not in address:
+        match = _ANGLE_ADDRESS.search(text) or _BARE_ADDRESS.search(text)
+        address = match.group(1) if match else ""
+
+    address = address.strip().strip("<>").casefold()
+    return address or None
+
+
+def truncate_references(raw: object) -> tuple[str, ...]:
+    """The newest ``MAX_REFERENCES`` message-ids out of a References header.
+
+    Accepts the raw header text or an already-split sequence, because a
+    candidate that has been through a ``raw_json`` round trip arrives as a list
+    while a provider hands over a header string.
+    """
+    if raw is None:
+        return ()
+
+    if isinstance(raw, (list, tuple)):
+        items = [str(item) for item in raw]
+    else:
+        items = re.findall(r"<[^<>]+>", str(raw)) or str(raw).split()
+
+    out = [item.strip() for item in items if item and item.strip()]
+    return tuple(out[-MAX_REFERENCES:])
 
 
 def clean_attendees(labels: Iterable[str | None]) -> tuple[str, ...]:
@@ -183,9 +239,87 @@ class EmailCandidate:
     # None. Snapshotted through to `thread_emails.folder_id` on attach so a
     # later full-body fetch can still reach it without re-searching.
     folder_id: str | None = None
+    # The provider's own conversation identity, namespaced through `uid_for` --
+    # Gmail's threadId is unique per *mailbox*, so two connected accounts that
+    # both hold one conversation would otherwise collapse into a single chain.
+    # NULL where the provider has no such concept; never synthesised, the same
+    # rule as the triage fields above.
+    conversation_id: str | None = None
+    # RFC 2822 threading headers -- the provider-independent reply graph, and the
+    # only tier of chaining that works across two accounts or two providers.
+    # `references` is bounded to the newest MAX_REFERENCES ids because this
+    # dataclass is persisted three times per match run.
+    in_reply_to: str | None = None
+    references: tuple[str, ...] = ()
+    # Verbatim header text, not a parsed list, so a shape we did not anticipate
+    # loses nothing. `sender` describes an inbound message and says nothing at
+    # all about an outbound one, which is why these are needed to know who a
+    # conversation is actually *with*.
+    to_recipients: str | None = None
+    cc_recipients: str | None = None
+    # 'outbound' | 'inbound' | None. Spelled identically to
+    # `thread_emails.direction` so `attach_email` copies it verbatim rather than
+    # translating -- a boolean here and a string there is how the two drift. Three
+    # states, not two: Gmail's SENT label is authoritative, an address comparison
+    # is a good guess, and MCP and dev offer neither.
+    direction: str | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+# Deliberately no `body` field on EmailCandidate. Two reasons, and the second is
+# the one that matters: candidates are persisted three times per match run (see
+# the module docstring) and nothing prunes `match_runs`; and *no* provider has a
+# body at search time anyway -- Gmail searches with `format=metadata`, IMAP
+# fetches header fields only, Zoho's search payload carries no content and the
+# email MCP server has no body in its results. A body only ever exists after a
+# second per-message request, which is what `get_email_message` below is for, so
+# the field would be permanently None on every path.
+@dataclass(frozen=True, slots=True)
+class FetchedEmail:
+    """One email's body, plus whatever headers the fetch happened to return.
+
+    A separate type from ``EmailCandidate`` because it answers a different
+    question: a candidate is "something a search found", this is "the message
+    itself". The header fields are all optional because only some providers can
+    supply them -- Gmail's ``format=full`` and an IMAP ``FETCH BODY.PEEK[]`` both
+    return the whole message, so hydration can backfill threading columns for
+    free, while Zoho's content endpoint and the MCP adapter return content alone.
+    """
+
+    body: str | None = None
+    conversation_id: str | None = None
+    rfc_message_id: str | None = None
+    in_reply_to: str | None = None
+    references: tuple[str, ...] = ()
+    to_recipients: str | None = None
+    cc_recipients: str | None = None
+    sender: str | None = None
+    direction: str | None = None
+
+    def header_updates(self) -> dict:
+        """Only the header fields that are actually populated.
+
+        Hydration writes these with COALESCE semantics, so an absent field must
+        not appear here at all -- a provider that cannot supply headers must
+        never blank ones a search already stored.
+        """
+        out: dict = {}
+        for name in (
+            "conversation_id",
+            "rfc_message_id",
+            "in_reply_to",
+            "to_recipients",
+            "cc_recipients",
+            "direction",
+        ):
+            value = getattr(self, name)
+            if value:
+                out[name] = value
+        if self.references:
+            out["references"] = tuple(self.references)
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +406,28 @@ class BaseProvider:
         already has a snippet to fall back to.
         """
         return None
+
+    async def get_email_message(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> FetchedEmail | None:
+        """One email's body *and* whatever headers came back with it.
+
+        A sibling of ``get_email_body`` rather than a widening of it, because
+        only Gmail and IMAP can honour the header half: Gmail's ``format=full``
+        and ``FETCH BODY.PEEK[]`` both return the whole message, while Zoho's
+        content endpoint and the MCP adapter return content alone. Widening
+        ``get_email_body``'s ``-> str | None`` contract in place would make it a
+        promise three of the five providers cannot keep.
+
+        The default delegates, so a provider that only implements the older
+        method still hydrates a body -- it simply backfills no threading. That
+        asymmetry is deliberate and visible: it is why hydration is the
+        threading backfill for Gmail and Apple only.
+        """
+        body = await self.get_email_body(native_id=native_id, folder_id=folder_id)
+        if body is None:
+            return None
+        return FetchedEmail(body=body)
 
     async def test(self) -> dict:
         raise NotImplementedError

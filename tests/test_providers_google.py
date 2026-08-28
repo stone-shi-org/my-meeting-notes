@@ -358,6 +358,131 @@ class TestGmail:
         assert email.subject == "S"
 
 
+def _gmail_message(**overrides) -> dict:
+    body = {
+        "id": "m1",
+        "threadId": "tABC",
+        "labelIds": ["INBOX"],
+        "snippet": "s",
+        "payload": {
+            "headers": [
+                {"name": "Subject", "value": "Re: cutover window"},
+                {"name": "From", "value": "priya@acme.com"},
+                {"name": "To", "value": "me@acme.com"},
+                {"name": "Cc", "value": "ops@acme.com"},
+                {"name": "Date", "value": "Tue, 17 Mar 2026 17:42:00 +0000"},
+                {"name": "Message-ID", "value": "<cutover@acme.com>"},
+                {"name": "In-Reply-To", "value": "<orig@acme.com>"},
+                {"name": "References", "value": "<root@acme.com> <orig@acme.com>"},
+            ]
+        },
+    }
+    body.update(overrides)
+    return body
+
+
+class TestGmailThreading:
+    """The threading and direction fields, all free in the existing request."""
+
+    @respx.mock
+    async def _one(self, provider, message: dict):
+        respx.get(GMAIL_LIST).mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "m1"}]})
+        )
+        respx.get(f"{GMAIL_LIST}/m1").mock(return_value=httpx.Response(200, json=message))
+        return await provider.search_emails(keywords=["x"], start=START, end=END)
+
+    @respx.mock
+    async def test_the_request_asks_for_the_threading_headers_and_labels(self, provider):
+        """Cheap, and it catches a silent revert of the mask.
+
+        These headers are only available at search time -- recovering them later
+        means re-downloading every message -- so losing them here is expensive
+        and invisible.
+        """
+        respx.get(GMAIL_LIST).mock(
+            return_value=httpx.Response(200, json={"messages": [{"id": "m1"}]})
+        )
+        route = respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(200, json=_gmail_message())
+        )
+
+        await provider.search_emails(keywords=["x"], start=START, end=END)
+
+        params = route.calls[0].request.url.params
+        headers = set(params.get_list("metadataHeaders"))
+        assert {"Subject", "From", "Date", "Message-ID", "To", "Cc",
+                "In-Reply-To", "References"} <= headers
+        assert "labelIds" in params["fields"]
+        assert "threadId" in params["fields"]
+
+    async def test_the_thread_id_becomes_a_namespaced_conversation_id(self, provider):
+        [email] = await self._one(provider, _gmail_message())
+        # Namespaced, not the bare "tABC": a threadId is unique per mailbox, so
+        # two connected accounts holding one conversation would collide.
+        assert email.conversation_id == "google:7:tABC"
+
+    async def test_the_threading_headers_are_mapped(self, provider):
+        [email] = await self._one(provider, _gmail_message())
+
+        assert email.in_reply_to == "<orig@acme.com>"
+        assert email.references == ("<root@acme.com>", "<orig@acme.com>")
+        assert email.to_recipients == "me@acme.com"
+        assert email.cc_recipients == "ops@acme.com"
+
+    async def test_the_sent_label_makes_a_message_outbound(self, provider):
+        [email] = await self._one(provider, _gmail_message(labelIds=["SENT"]))
+        assert email.direction == "outbound"
+
+    async def test_a_message_without_the_sent_label_is_inbound(self, provider):
+        [email] = await self._one(provider, _gmail_message(labelIds=["INBOX"]))
+        assert email.direction == "inbound"
+
+    async def test_an_archived_message_is_still_inbound(self, provider):
+        """No INBOX label either -- SENT's absence is what makes it inbound."""
+        [email] = await self._one(provider, _gmail_message(labelIds=["IMPORTANT"]))
+        assert email.direction == "inbound"
+
+    async def test_an_absent_label_list_is_unknown_rather_than_inbound(self, provider):
+        """"We did not ask" is not "not sent".
+
+        Guessing here is what the NULL state exists to prevent: a NULL read as
+        inbound tells the summarizer someone else asked a question the user
+        asked themselves.
+        """
+        message = _gmail_message()
+        del message["labelIds"]
+        [email] = await self._one(provider, message)
+        assert email.direction is None
+
+    async def test_a_draft_is_dropped_rather_than_mapped(self, provider):
+        """A draft is not correspondence.
+
+        As inbound it invents an incoming request; as outbound it claims you
+        replied when the whole point of a draft is that you have not.
+        """
+        assert await self._one(provider, _gmail_message(labelIds=["DRAFT", "SENT"])) == []
+
+    async def test_a_missing_thread_id_leaves_the_conversation_id_none(self, provider):
+        message = _gmail_message()
+        del message["threadId"]
+        [email] = await self._one(provider, message)
+        assert email.conversation_id is None
+
+    async def test_a_long_references_header_keeps_the_newest_ids(self, provider):
+        from app.services.providers.base import MAX_REFERENCES
+
+        ids = [f"<r{i}@acme.com>" for i in range(MAX_REFERENCES + 5)]
+        message = _gmail_message()
+        message["payload"]["headers"].append(
+            {"name": "References", "value": " ".join(ids)}
+        )
+        [email] = await self._one(provider, message)
+
+        assert len(email.references) == MAX_REFERENCES
+        assert email.references[-1] == ids[-1]
+
+
 def _b64url(text: str) -> str:
     return base64.urlsafe_b64encode(text.encode()).decode()
 
@@ -413,6 +538,48 @@ class TestGmailBody:
             return_value=httpx.Response(200, json={"id": "m1", "payload": {}})
         )
         assert await provider.get_email_body(native_id="m1") is None
+
+    @respx.mock
+    async def test_get_email_message_backfills_threading_from_format_full(self, provider):
+        """Which is what makes hydration the threading backfill for Gmail.
+
+        A row attached before the metadata mask asked for these headers gets its
+        conversation id, reply pointers and recipients filled in the first time
+        someone opens it -- from the same request that fetches the body.
+        """
+        text = "The rollback rehearsal is booked."
+        message = _gmail_message(
+            payload={"mimeType": "text/plain", "body": {"data": _b64url(text)}}
+        )
+        message["payload"]["headers"] = _gmail_message()["payload"]["headers"]
+        respx.get(f"{GMAIL_LIST}/m1").mock(return_value=httpx.Response(200, json=message))
+
+        fetched = await provider.get_email_message(native_id="m1")
+
+        assert fetched.body == text
+        assert fetched.conversation_id == "google:7:tABC"
+        assert fetched.rfc_message_id == "<cutover@acme.com>"
+        assert fetched.in_reply_to == "<orig@acme.com>"
+        assert fetched.to_recipients == "me@acme.com"
+        assert fetched.direction == "inbound"
+        # Only populated fields are offered for write-back, so a provider that
+        # cannot supply headers never blanks ones a search already stored.
+        assert "cc_recipients" in fetched.header_updates()
+
+    @respx.mock
+    async def test_get_email_body_still_returns_just_the_text(self, provider):
+        """The older contract is unchanged -- three providers still only have it."""
+        text = "plain"
+        respx.get(f"{GMAIL_LIST}/m1").mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "id": "m1",
+                    "payload": {"mimeType": "text/plain", "body": {"data": _b64url(text)}},
+                },
+            )
+        )
+        assert await provider.get_email_body(native_id="m1") == text
 
 
 class TestAuthFailure:

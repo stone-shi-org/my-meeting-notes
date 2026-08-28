@@ -35,6 +35,13 @@ EMAIL_FIELDS = (
     "subject", "sender", "snippet", "account",
     "date_mode", "at", "offset_minutes", "anchor_meeting_id",
     "rfc2822_date", "expected_relevant",
+    # Authoring a reply chain and an outbound message offline. `in_reply_to` is
+    # another dev_emails *row id*, not a message-id -- friendlier to type, and
+    # the provider expands it into the same "<email-N@dev.local>" shape it emits
+    # for rfc_message_id. `outbound` is what makes a fixture read as something
+    # you sent, which is the case that exercises `awaiting` and the whole
+    # "don't tell me to reply to something I already answered" behaviour.
+    "in_reply_to", "conversation_id", "to_recipients", "outbound",
 )
 EVENT_FIELDS = (
     "summary", "description", "location", "attendees_json", "calendar_name",
@@ -62,7 +69,7 @@ def row_to_dict(kind: str, row: sqlite3.Row) -> dict:
     out = {"id": row["id"], "integration_id": row["integration_id"]}
     for field in fields:
         value = row[field]
-        if field in ("rfc2822_date", "all_day", "expected_relevant"):
+        if field in ("rfc2822_date", "all_day", "expected_relevant", "outbound"):
             value = bool(value)
         out[field] = value
     if kind == "events":
@@ -104,7 +111,7 @@ def _clean(kind: str, payload: dict) -> dict:
             raise ValidationError("attendees must be a list of names")
         values["attendees_json"] = json.dumps([str(a) for a in attendees][:24])
 
-    for key in ("rfc2822_date", "all_day", "expected_relevant"):
+    for key in ("rfc2822_date", "all_day", "expected_relevant", "outbound"):
         if key in values:
             values[key] = int(bool(values[key]))
 

@@ -177,4 +177,21 @@ class McpEmailProvider(_McpBase):
             score=item.get("score"),
             provider=self.provider_id,
             integration_id=self.ref.id,
+            # Every threading field stays None. The `search_emails` payload has
+            # no conversation id, no To/Cc and no In-Reply-To/References, and
+            # `fetch_full_email` returns a body alone -- so there is no
+            # hydration backfill here either.
+            #
+            # Note this is NOT the same rule as `message_id`/`rfc_message_id`
+            # above, which are deliberately emitted verbatim for back-compat.
+            # There is no back-compat hazard here because nothing was ever
+            # stored: synthesising a conversation id from the bare native id
+            # would invent an authoritative-tier link out of nothing, which is
+            # the same reason the triage fields are never synthesised either.
+            conversation_id=None,
+            in_reply_to=None,
+            references=(),
+            to_recipients=None,
+            cc_recipients=None,
+            direction=None,
         )

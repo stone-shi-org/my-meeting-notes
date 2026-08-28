@@ -501,6 +501,51 @@ class TestEmailPresentation:
         assert mail.url.startswith("https://mail.zoho.eu/")
 
 
+class TestZohoThreading:
+    def _provider(self):
+        ref = IntegrationRef(id=4, provider="zoho", account_label="me@zoho.com",
+                             email_enabled=True)
+        return ZohoProvider(ref, {"dc": "com"}, {"access_token": "at"})
+
+    def test_threading_fields_stay_none_when_the_payload_has_none(self):
+        """Zoho's search payload carries no conversation id and no RFC headers,
+        and its content endpoint returns content alone -- so there is no
+        hydration backfill either. Left NULL rather than synthesised."""
+        mail = self._provider()._to_email({"messageId": "1", "subject": "S"})
+
+        assert mail.conversation_id is None
+        assert mail.in_reply_to is None
+        assert mail.references == ()
+
+    def test_recipients_are_mapped_and_decoded_when_present(self):
+        mail = self._provider()._to_email(
+            {
+                "messageId": "1",
+                "subject": "S",
+                "toAddress": "&quot;Ada&quot;&lt;ada@example.com&gt;",
+                "ccAddress": "ops@example.com",
+            }
+        )
+        assert mail.to_recipients == '"Ada"<ada@example.com>'
+        assert mail.cc_recipients == "ops@example.com"
+
+    def test_my_own_address_as_sender_is_outbound(self):
+        mail = self._provider()._to_email(
+            {"messageId": "1", "subject": "S", "fromAddress": "me@zoho.com"}
+        )
+        assert mail.direction == "outbound"
+
+    def test_someone_elses_address_is_inbound(self):
+        mail = self._provider()._to_email(
+            {"messageId": "1", "subject": "S", "fromAddress": "Ada <ada@example.com>"}
+        )
+        assert mail.direction == "inbound"
+
+    def test_an_absent_sender_is_unknown_rather_than_inbound(self):
+        mail = self._provider()._to_email({"messageId": "1", "subject": "S"})
+        assert mail.direction is None
+
+
 class TestMessageUrlShape:
     """Pinned against a URL copied from a real Zoho webmail address bar:
     /zm/#mail/folder/inbox/p/<messageId> -- note the /p/ segment,

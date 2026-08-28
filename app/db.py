@@ -726,6 +726,87 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("users", "telegram_notify_next_steps", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_ready", "INTEGER NOT NULL DEFAULT 0"),
     ("users", "telegram_notify_transcript_failed", "INTEGER NOT NULL DEFAULT 0"),
+    # ------------------------------------------------------- email threading
+    # The provider's own conversation identity, namespaced through
+    # providers.base.make_uid for exactly the reason `message_id` is: Gmail's
+    # threadId is unique per *mailbox*, so two connected accounts that both hold
+    # one conversation would collide and merge into a single chain. NULL wherever
+    # the provider has no such concept (IMAP, Zoho's search payload, MCP) -- the
+    # RFC header graph below is the fallback, not this. Never synthesised: a
+    # made-up conversation id merges threads that only look alike.
+    ("thread_emails", "conversation_id", "TEXT"),
+    # The RFC 2822 In-Reply-To and References headers -- the provider-independent
+    # way to reconstruct a reply chain, and the only one that works across two
+    # accounts or two providers. Stored rather than re-derived because they are
+    # only available at search time: recovering them later means re-downloading
+    # the message, which most providers cannot do by id at all.
+    ("thread_emails", "in_reply_to", "TEXT"),
+    # A JSON array, bounded to the newest providers.base.MAX_REFERENCES entries.
+    # A mailing-list thread carries dozens, and this field rides on the
+    # candidate, which is persisted three times per match run. The *tail* is
+    # kept, not the head: chaining only ever needs the nearest ancestors.
+    ("thread_emails", "references_json", "TEXT"),
+    # Recipients as they appeared on the wire -- verbatim header text, not a
+    # parsed list, so a shape we did not anticipate loses nothing. Needed to say
+    # who a conversation is *with*: `sender` describes an inbound message and
+    # says nothing at all about an outbound one.
+    ("thread_emails", "to_recipients", "TEXT"),
+    ("thread_emails", "cc_recipients", "TEXT"),
+    # 'outbound' | 'inbound', or NULL for "we could not tell". Three states, not
+    # a boolean: Gmail's SENT label is authoritative, comparing the sender
+    # address against the account is a good guess, and the MCP and dev providers
+    # offer neither. NULL must render as unknown everywhere -- a NULL read as
+    # 'inbound' tells the summarizer someone else asked a question the user
+    # asked themselves, which is the whole bug this column exists to fix.
+    ("thread_emails", "direction", "TEXT"),
+    # ------------------------------- lazily hydrated body and its AI summary
+    # Plain text, converted from HTML at fetch time and bounded to
+    # email_bodies.MAX_BODY_CHARS. Never raw markup, for two reasons: the SPA
+    # would need an HTML sanitizer, and SQLite reads whole rows -- a 300KB body
+    # would be pulled off disk by every thread_timeline and email-list read,
+    # neither of which shows a body. Those two read paths project columns
+    # explicitly to exclude this one.
+    ("thread_emails", "body", "TEXT"),
+    # Stamped on every hydration *attempt*, success or failure -- the same split
+    # as threads.next_step_checked_at vs next_step_generated_at above, and for
+    # the same reason. `body IS NULL AND body_fetched_at IS NOT NULL` therefore
+    # means "asked, and this account cannot supply one", which is what stops a
+    # provider with no fetch-by-id tool being re-asked on every page view.
+    ("thread_emails", "body_fetched_at", "TEXT"),
+    # One LLM sentence about this message. Deliberately NOT the `summary`
+    # column, which is the email-triage MCP server's own field: a triage field
+    # must never be synthesised. Generated once from the body and never
+    # regenerated -- the body is an immutable snapshot of something fetched --
+    # and NULL both for a body short enough to need none and for a generation
+    # that failed. `ai_summary_model` is what tells those apart, the same way
+    # thread_notes.title_model records that nothing generated a title.
+    ("thread_emails", "ai_summary", "TEXT"),
+    ("thread_emails", "ai_summary_model", "TEXT"),
+    # Which integration surfaced the row. `provider` is not enough to re-reach a
+    # message: a user can connect two Gmail accounts. Until now this was
+    # recovered by re-parsing the {provider}:{integration_id}:{native} composite
+    # out of `message_id`, which silently fails for the MCP adapter -- the one
+    # provider that deliberately emits bare ids -- so every MCP row was
+    # unfetchable. EmailCandidate has carried this all along; attach_email was
+    # simply dropping it.
+    #
+    # Deliberately a plain INTEGER and *not* a REFERENCES to integrations(id),
+    # unlike threads.group_id above. A group id comes from a live picker, but this
+    # one is copied out of a match run's persisted `ranked_json`, which can name
+    # an account the user disconnected between running the match and confirming
+    # it -- with PRAGMA foreign_keys=ON that is a hard IntegrityError, so a
+    # disconnected account would turn "attach these emails" into a 500. A
+    # dangling id is harmless instead: email_bodies looks the integration up
+    # owner-scoped, finds nothing, and takes the "this account cannot supply a
+    # body" path that already exists for MCP and Zoho.
+    ("thread_emails", "integration_id", "INTEGER"),
+    # The dev provider's fake inbox needs these to author a reply chain and an
+    # outbound message -- offline fixtures for chaining and direction are the
+    # whole reason it is a provider rather than a test double.
+    ("dev_emails", "in_reply_to", "TEXT"),
+    ("dev_emails", "conversation_id", "TEXT"),
+    ("dev_emails", "to_recipients", "TEXT"),
+    ("dev_emails", "outbound", "INTEGER NOT NULL DEFAULT 0"),
 )
 
 # The two built-in insight_types rows, seeded once on a genuinely empty table
@@ -1376,6 +1457,11 @@ LATE_INDEXES: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_threads_group ON threads(owner_id, group_id)",
     # The poller looks up the sender of every inbound message by chat id.
     "CREATE INDEX IF NOT EXISTS idx_users_telegram_chat_id ON users(telegram_chat_id)",
+    # Deliberately no index on thread_emails.conversation_id. It looks like it
+    # wants one, but it is never queried on its own: services/email_chains.py
+    # groups at read time over a whole thread's rows in Python, so the only
+    # lookup is by thread_id, which uq_thread_email(thread_id, message_id)
+    # already serves as its leading column.
 )
 
 

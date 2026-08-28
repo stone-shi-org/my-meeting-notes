@@ -24,8 +24,13 @@ from app.services.providers.query import imap_date
 log = get_logger("providers.imap")
 
 DEFAULT_PORT = 993
-# Header-only fetches; bodies are never downloaded.
-FETCH_PARTS = "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID)])"
+# Header-only fetches; bodies are never downloaded. TO/CC and the two threading
+# headers cost nothing extra -- it is the same round trip, and they are only
+# available here: recovering them later means re-downloading the whole message.
+FETCH_PARTS = (
+    "(BODY.PEEK[HEADER.FIELDS (SUBJECT FROM DATE MESSAGE-ID TO CC "
+    "IN-REPLY-TO REFERENCES)])"
+)
 # The whole message, for the one caller that does want the body.
 FETCH_BODY_PARTS = "(BODY.PEEK[])"
 
@@ -99,13 +104,29 @@ def _search_sync(client, criteria: list[str], limit: int, mailbox: str) -> list[
         out.append(
             {
                 "id": message_id.decode() if isinstance(message_id, bytes) else str(message_id),
-                "subject": _decode(parsed.get("Subject")),
-                "sender": _decode(parsed.get("From")),
-                "date": parsed.get("Date"),
-                "rfc_message_id": parsed.get("Message-ID"),
+                **_header_fields(parsed),
             }
         )
     return out
+
+
+def _header_fields(parsed: email.message.Message) -> dict:
+    """The header half of a message, in the shape both callers want.
+
+    Shared by the search and the body fetch so the two cannot drift: a
+    ``FETCH BODY.PEEK[]`` returns the whole RFC message, which is what makes
+    hydration the threading backfill for IMAP as well as Gmail.
+    """
+    return {
+        "subject": _decode(parsed.get("Subject")),
+        "sender": _decode(parsed.get("From")),
+        "date": parsed.get("Date"),
+        "rfc_message_id": parsed.get("Message-ID"),
+        "to_recipients": _decode(parsed.get("To")),
+        "cc_recipients": _decode(parsed.get("Cc")),
+        "in_reply_to": parsed.get("In-Reply-To"),
+        "references": parsed.get("References"),
+    }
 
 
 def _extract_plain_text(parsed: email.message.Message) -> str | None:
@@ -125,7 +146,8 @@ def _extract_plain_text(parsed: email.message.Message) -> str | None:
     return payload.decode(parsed.get_content_charset() or "utf-8", errors="replace")
 
 
-def _fetch_body_sync(client, native_id: str, mailbox: str) -> str | None:
+def _fetch_message_sync(client, native_id: str, mailbox: str) -> dict | None:
+    """The body *and* the headers, since FETCH BODY.PEEK[] returns both."""
     typ, _ = client.select(mailbox, readonly=True)
     if typ != "OK":
         raise ProviderError(f"Could not open mailbox {mailbox!r}", kind="email")
@@ -140,7 +162,12 @@ def _fetch_body_sync(client, native_id: str, mailbox: str) -> str | None:
     if raw is None:
         return None
     parsed = email.message_from_bytes(raw if isinstance(raw, bytes) else raw.encode())
-    return _extract_plain_text(parsed)
+    return {"body": _extract_plain_text(parsed), **_header_fields(parsed)}
+
+
+def _fetch_body_sync(client, native_id: str, mailbox: str) -> str | None:
+    message = _fetch_message_sync(client, native_id, mailbox)
+    return message["body"] if message else None
 
 
 async def search(
@@ -178,6 +205,37 @@ async def search(
     return await asyncio.to_thread(run)
 
 
+async def fetch_message(
+    *,
+    host: str,
+    username: str,
+    password: str,
+    native_id: str,
+    mailbox: str = "INBOX",
+    connect_fn=connect,
+) -> dict | None:
+    """Body plus headers for one message, by the UID a prior `search` returned."""
+
+    def run() -> dict | None:
+        client = connect_fn(host)
+        try:
+            try:
+                client.login(username, password)
+            except imaplib.IMAP4.error as exc:
+                raise IntegrationAuthError(
+                    "The mail server rejected the Apple ID or app-specific password. "
+                    "It must be an app-specific password, not your account password."
+                ) from exc
+            return _fetch_message_sync(client, native_id, mailbox)
+        finally:
+            try:
+                client.logout()
+            except Exception:  # noqa: BLE001 - a failed logout must not mask results
+                pass
+
+    return await asyncio.to_thread(run)
+
+
 async def fetch_body(
     *,
     host: str,
@@ -188,22 +246,12 @@ async def fetch_body(
     connect_fn=connect,
 ) -> str | None:
     """Full body of one message, by the UID a prior `search` returned."""
-
-    def run() -> str | None:
-        client = connect_fn(host)
-        try:
-            try:
-                client.login(username, password)
-            except imaplib.IMAP4.error as exc:
-                raise IntegrationAuthError(
-                    "The mail server rejected the Apple ID or app-specific password. "
-                    "It must be an app-specific password, not your account password."
-                ) from exc
-            return _fetch_body_sync(client, native_id, mailbox)
-        finally:
-            try:
-                client.logout()
-            except Exception:  # noqa: BLE001 - a failed logout must not mask results
-                pass
-
-    return await asyncio.to_thread(run)
+    message = await fetch_message(
+        host=host,
+        username=username,
+        password=password,
+        native_id=native_id,
+        mailbox=mailbox,
+        connect_fn=connect_fn,
+    )
+    return message["body"] if message else None

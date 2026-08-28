@@ -553,6 +553,168 @@ class TestAttachEmail:
         assert row["folder_id"] == "f-9"
 
 
+def _seed_thread(conn) -> None:
+    now = utcnow()
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, password_salt, "
+        "created_at, updated_at) VALUES (1, 'u', 'h', 's', ?, ?)", (now, now),
+    )
+    conn.execute(
+        "INSERT INTO threads (id, owner_id, title, created_at, updated_at) "
+        "VALUES (1, 1, 'T', ?, ?)", (now, now),
+    )
+
+
+def _row(conn, message_id: str = "google:5:m-1"):
+    return conn.execute(
+        "SELECT * FROM thread_emails WHERE thread_id = 1 AND message_id = ?",
+        (message_id,),
+    ).fetchone()
+
+
+FULL_EMAIL = {
+    "message_id": "google:5:m-1",
+    "subject": "Re: cutover",
+    "sender": "priya@acme.com",
+    "date": "Tue, 17 Mar 2026 17:42:00 +0000",
+    "conversation_id": "google:5:tABC",
+    "in_reply_to": "<orig@acme.com>",
+    "references": ["<root@acme.com>", "<orig@acme.com>"],
+    "to_recipients": "me@acme.com",
+    "cc_recipients": "ops@acme.com",
+    "direction": "inbound",
+    "integration_id": 5,
+    "rfc_message_id": "<cutover@acme.com>",
+}
+
+
+class TestAttachEmailThreadingColumns:
+    """`attach_email` is the single owner of this column list.
+
+    A column added to the INSERT and not to the values tuple -- or vice versa --
+    is how `attached_context` starts feeding the summarizer NULLs.
+    """
+
+    def test_attach_email_persists_every_new_column(self, conn):
+        _seed_thread(conn)
+        m.attach_email(conn, thread_id=1, meeting_id=None, user_id=1, email=FULL_EMAIL)
+
+        row = _row(conn)
+        assert row["conversation_id"] == "google:5:tABC"
+        assert row["in_reply_to"] == "<orig@acme.com>"
+        assert json.loads(row["references_json"]) == ["<root@acme.com>", "<orig@acme.com>"]
+        assert row["to_recipients"] == "me@acme.com"
+        assert row["cc_recipients"] == "ops@acme.com"
+        assert row["direction"] == "inbound"
+        assert row["integration_id"] == 5
+
+    def test_attach_email_records_the_integration_id(self, conn):
+        """It was always on the candidate and always dropped here, which is why
+        every MCP-sourced email was unfetchable: `_resolve_email_ref` recovered
+        the id by parsing the composite `message_id` MCP does not use."""
+        _seed_thread(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={"message_id": "msg-bare-1", "subject": "S", "integration_id": 9},
+        )
+        assert _row(conn, "msg-bare-1")["integration_id"] == 9
+
+    def test_hydration_columns_are_not_written_by_attach(self, conn):
+        """Body and summary belong to hydration. Writing NULLs for them here
+        would let a re-attach wipe a body someone already fetched."""
+        _seed_thread(conn)
+        m.attach_email(conn, thread_id=1, meeting_id=None, user_id=1, email=FULL_EMAIL)
+
+        row = _row(conn)
+        assert row["body"] is None
+        assert row["body_fetched_at"] is None
+        assert row["ai_summary"] is None
+
+    def test_reattaching_from_a_headerless_provider_does_not_erase_threading(self, conn):
+        """The single most dangerous line in the change.
+
+        Re-attaching is the only way a pre-migration row gets these columns, so
+        the conflict clause has to update them. But a bare `excluded.x` would let
+        a second attach from a provider that has no headers -- Zoho and MCP both
+        -- blank what the first attach stored. COALESCE keeps it write-once.
+        """
+        _seed_thread(conn)
+        m.attach_email(conn, thread_id=1, meeting_id=None, user_id=1, email=FULL_EMAIL)
+
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={
+                "message_id": "google:5:m-1",
+                "subject": "Re: cutover",
+                "relevance_score": 0.9,
+            },
+        )
+
+        row = _row(conn)
+        assert row["conversation_id"] == "google:5:tABC"
+        assert row["in_reply_to"] == "<orig@acme.com>"
+        assert json.loads(row["references_json"]) == ["<root@acme.com>", "<orig@acme.com>"]
+        assert row["to_recipients"] == "me@acme.com"
+        assert row["direction"] == "inbound"
+        assert row["integration_id"] == 5
+        assert row["rfc_message_id"] == "<cutover@acme.com>"
+        # ...while the fields the clause is *supposed* to refresh still refresh.
+        assert row["relevance_score"] == 0.9
+
+    def test_reattaching_backfills_a_row_that_had_no_threading(self, conn):
+        """The other half of the same clause: a pre-migration row must be able to
+        acquire these columns, which is the whole reason it updates them."""
+        _seed_thread(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={"message_id": "google:5:m-1", "subject": "Re: cutover"},
+        )
+        assert _row(conn)["conversation_id"] is None
+
+        m.attach_email(conn, thread_id=1, meeting_id=None, user_id=1, email=FULL_EMAIL)
+
+        assert _row(conn)["conversation_id"] == "google:5:tABC"
+        assert _row(conn)["direction"] == "inbound"
+
+    def test_no_references_stores_null_rather_than_an_empty_array(self, conn):
+        """So the COALESCE reads "this provider has none" as "leave it alone"
+        rather than overwriting a stored list with "[]"."""
+        _seed_thread(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={"message_id": "google:5:m-1", "subject": "S", "references": []},
+        )
+        assert _row(conn)["references_json"] is None
+
+    def test_an_integration_id_for_a_disconnected_account_still_attaches(self, conn):
+        """`integration_id` is deliberately not a foreign key.
+
+        It is copied out of a match run's persisted `ranked_json`, which can name
+        an account the user disconnected between running the match and confirming
+        it. With PRAGMA foreign_keys=ON a REFERENCES clause makes that a hard
+        IntegrityError, so one disconnected account would turn "attach these
+        emails" into a 500. A dangling id is harmless: the body fetch looks the
+        integration up owner-scoped, finds nothing, and reports that the account
+        cannot supply a body -- a path that already exists for MCP and Zoho.
+        """
+        _seed_thread(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={**FULL_EMAIL, "integration_id": 99999},
+        )
+        assert _row(conn)["integration_id"] == 99999
+
+    def test_a_references_tuple_survives_a_raw_json_round_trip(self, conn):
+        """A candidate that has been through `raw_json` arrives as a list, not a
+        tuple -- both have to serialise identically."""
+        _seed_thread(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=None, user_id=1,
+            email={**FULL_EMAIL, "references": ("<a@x>", "<b@x>")},
+        )
+        assert json.loads(_row(conn)["references_json"]) == ["<a@x>", "<b@x>"]
+
+
 class TestConfirm:
     def test_attaching_events_and_emails(self, user_client, meeting, mock_llm):
         run_match(user_client, meeting["id"])
@@ -680,7 +842,7 @@ class TestConfirm:
             f"/api/threads/{meeting['thread_id']}/timeline"
         ).json()
         kinds = [i["kind"] for i in timeline]
-        assert set(kinds) == {"meeting", "event", "email"}
+        assert set(kinds) == {"meeting", "event", "email_chain"}
         # Newest first.
         assert [i["at"] for i in timeline] == sorted(
             (i["at"] for i in timeline), reverse=True
@@ -701,8 +863,11 @@ class TestConfirm:
             f"/api/threads/{meeting['thread_id']}/timeline"
         ).json()
 
-        assert timeline[-1]["kind"] == "email"
+        assert timeline[-1]["kind"] == "email_chain"
+        # A chain is dated by its newest message, and the coercion happens on
+        # write -- so the chain's own last_message_at is ISO too.
         assert timeline[-1]["at"].startswith("2026-03-17T17:42")
+        assert timeline[-1]["payload"]["last_message_at"].startswith("2026-03-17T17:42")
         assert [i["kind"] for i in timeline[:2]] == ["meeting", "event"]
 
 
@@ -716,3 +881,89 @@ class TestOwnership:
         assert other_user_client.post(
             f"/api/meetings/{mid}/match/confirm", json={}
         ).status_code == 404
+
+
+class TestAttachedContextBoundaries:
+    """Two lines the next person will want to cross, both deliberate."""
+
+    def _seed(self, conn):
+        _seed_thread(conn)
+        conn.execute(
+            "INSERT INTO meetings (id, thread_id, owner_id, title, created_at, updated_at) "
+            "VALUES (1, 1, 1, 'Cutover', ?, ?)", (utcnow(), utcnow()),
+        )
+
+    def test_it_returns_direction_and_ai_summary(self, conn):
+        self._seed(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=1, user_id=1,
+            email={**FULL_EMAIL, "snippet": "the snippet"},
+        )
+        conn.execute(
+            "UPDATE thread_emails SET ai_summary = ?, body = ? WHERE meeting_id = 1",
+            ("Priya confirms Friday", "THE-FULL-BODY"),
+        )
+
+        [email] = m.attached_context(conn, 1)["emails"]
+
+        assert email["direction"] == "inbound"
+        assert email["ai_summary"] == "Priya confirms Friday"
+
+    def test_it_never_returns_a_body(self, conn):
+        """This feeds the summarizer, whose input is a transcript. A full inbox
+        alongside it changes what the minutes are written from."""
+        self._seed(conn)
+        m.attach_email(conn, thread_id=1, meeting_id=1, user_id=1, email=FULL_EMAIL)
+        conn.execute("UPDATE thread_emails SET body = 'THE-FULL-BODY' WHERE meeting_id = 1")
+
+        [email] = m.attached_context(conn, 1)["emails"]
+        assert "body" not in email
+
+    def test_it_does_not_group_into_conversations(self, conn):
+        """Scoped per meeting, so two messages of one exchange can be attached
+        under different meetings -- grouping here would render a fragment and
+        present it as the whole conversation."""
+        self._seed(conn)
+        m.attach_email(
+            conn, thread_id=1, meeting_id=1, user_id=1,
+            email={**FULL_EMAIL, "message_id": "google:5:m1", "rfc_message_id": "<a@x>"},
+        )
+        m.attach_email(
+            conn, thread_id=1, meeting_id=1, user_id=1,
+            email={**FULL_EMAIL, "message_id": "google:5:m2",
+                   "rfc_message_id": "<b@x>", "in_reply_to": "<a@x>"},
+        )
+
+        emails = m.attached_context(conn, 1)["emails"]
+
+        # Two flat rows, not one chain.
+        assert len(emails) == 2
+        assert all("messages" not in e for e in emails)
+
+    def test_it_still_returns_only_events_and_emails(self, conn):
+        """Notes stay out: an AI-written note feeding the next summary of the
+        meeting it was written from puts the model's own prose in its input."""
+        self._seed(conn)
+        assert set(m.attached_context(conn, 1)) == {"events", "emails"}
+
+
+class TestRankPayloadDirection:
+    def test_the_ranker_is_told_who_sent_each_candidate(self):
+        """"I wrote about Atlas" and "someone asked me about Atlas" are
+        different evidence, and the ranker could not previously tell them apart."""
+        payload = m.build_rank_payload(
+            context={"thread_title": "Atlas"},
+            events=[],
+            emails=[
+                {"subject": "Atlas", "sender": "me@acme.com", "direction": "outbound",
+                 "to_recipients": "priya@acme.com", "date": "2026-03-16T09:00:00+00:00"},
+                {"subject": "Atlas", "sender": "p@acme.com", "direction": None,
+                 "date": "2026-03-17T09:00:00+00:00"},
+            ],
+        )
+
+        candidates = payload["email_candidates"]
+        assert candidates[0]["direction"] == "outbound"
+        assert candidates[0]["to"] == "priya@acme.com"
+        # Unknown stays unknown.
+        assert candidates[1]["direction"] is None

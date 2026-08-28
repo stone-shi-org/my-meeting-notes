@@ -376,23 +376,120 @@ class TestAppleEmail:
         assert mail.url is None
 
     async def test_get_email_body_delegates_to_imap(self, provider, monkeypatch):
-        async def fake_fetch_body(**kwargs):
-            return "The rollback rehearsal is booked for Friday."
+        async def fake_fetch_message(**kwargs):
+            return {"body": "The rollback rehearsal is booked for Friday."}
 
-        monkeypatch.setattr(_imap, "fetch_body", fake_fetch_body)
+        monkeypatch.setattr(_imap, "fetch_message", fake_fetch_message)
         body = await provider.get_email_body(native_id="1")
         assert "rollback rehearsal" in body
 
     async def test_get_email_body_rejected_login_names_the_app_specific_password(
         self, provider, monkeypatch
     ):
-        async def fake_fetch_body(**kwargs):
+        async def fake_fetch_message(**kwargs):
             raise IntegrationAuthError("AUTHENTICATIONFAILED")
 
-        monkeypatch.setattr(_imap, "fetch_body", fake_fetch_body)
+        monkeypatch.setattr(_imap, "fetch_message", fake_fetch_message)
         with pytest.raises(IntegrationAuthError) as exc:
             await provider.get_email_body(native_id="1")
         assert "app-specific password" in str(exc.value)
+
+
+class TestAppleThreading:
+    """Threading and direction, from headers the same FETCH already returns."""
+
+    def test_fetch_parts_asks_for_the_threading_headers(self):
+        """Cheap, and it catches a silent revert.
+
+        These are only available at search time, so losing them here would be
+        both expensive to recover and completely invisible.
+        """
+        for field in ("TO", "CC", "IN-REPLY-TO", "REFERENCES"):
+            assert field in _imap.FETCH_PARTS
+
+    async def _one(self, provider, monkeypatch, **message):
+        base = {
+            "id": "1",
+            "subject": "Re: cutover",
+            "sender": "priya@acme.com",
+            "date": "Tue, 17 Mar 2026 17:42:00 +0000",
+            "rfc_message_id": "<cutover@acme.com>",
+            "to_recipients": "me@icloud.com",
+            "cc_recipients": "ops@acme.com",
+            "in_reply_to": "<orig@acme.com>",
+            "references": "<root@acme.com> <orig@acme.com>",
+        }
+        base.update(message)
+
+        async def fake_search(**kwargs):
+            return [base]
+
+        monkeypatch.setattr(_imap, "search", fake_search)
+        [mail] = await provider.search_emails(keywords=["x"], start=START, end=END)
+        return mail
+
+    async def test_the_threading_headers_are_mapped(self, provider, monkeypatch):
+        mail = await self._one(provider, monkeypatch)
+
+        assert mail.in_reply_to == "<orig@acme.com>"
+        assert mail.references == ("<root@acme.com>", "<orig@acme.com>")
+        assert mail.to_recipients == "me@icloud.com"
+        assert mail.cc_recipients == "ops@acme.com"
+
+    async def test_there_is_no_conversation_id(self, provider, monkeypatch):
+        """IMAP has none, and synthesising one from the subject would promote a
+        guess to the authoritative tier of chaining."""
+        assert (await self._one(provider, monkeypatch)).conversation_id is None
+
+    async def test_a_message_from_someone_else_is_inbound(self, provider, monkeypatch):
+        mail = await self._one(provider, monkeypatch, sender="priya@acme.com")
+        assert mail.direction == "inbound"
+
+    async def test_a_message_from_my_own_address_is_outbound(self, provider, monkeypatch):
+        mail = await self._one(provider, monkeypatch, sender="me@icloud.com")
+        assert mail.direction == "outbound"
+
+    async def test_a_display_name_sender_still_compares_equal(self, provider, monkeypatch):
+        """The comparison is on the address, not the rendered header."""
+        mail = await self._one(provider, monkeypatch, sender="Me <ME@iCloud.com>")
+        assert mail.direction == "outbound"
+
+    async def test_an_unparseable_sender_is_unknown_rather_than_inbound(
+        self, provider, monkeypatch
+    ):
+        mail = await self._one(provider, monkeypatch, sender="Mailer Daemon")
+        assert mail.direction is None
+
+    async def test_hydration_backfills_threading_from_the_full_message(
+        self, provider, monkeypatch
+    ):
+        async def fake_fetch_message(**kwargs):
+            return {
+                "body": "text",
+                "rfc_message_id": "<cutover@acme.com>",
+                "in_reply_to": "<orig@acme.com>",
+                "references": "<root@acme.com>",
+                "to_recipients": "me@icloud.com",
+                "cc_recipients": None,
+                "sender": "priya@acme.com",
+            }
+
+        monkeypatch.setattr(_imap, "fetch_message", fake_fetch_message)
+        fetched = await provider.get_email_message(native_id="1")
+
+        assert fetched.body == "text"
+        assert fetched.in_reply_to == "<orig@acme.com>"
+        assert fetched.direction == "inbound"
+        # An absent header must not be offered for write-back, or hydration
+        # would blank a value a search already stored.
+        assert "cc_recipients" not in fetched.header_updates()
+
+    async def test_a_missing_message_hydrates_to_none(self, provider, monkeypatch):
+        async def fake_fetch_message(**kwargs):
+            return None
+
+        monkeypatch.setattr(_imap, "fetch_message", fake_fetch_message)
+        assert await provider.get_email_message(native_id="1") is None
 
 
 class TestErrorTyping:

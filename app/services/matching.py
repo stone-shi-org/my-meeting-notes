@@ -397,6 +397,13 @@ def build_rank_payload(context: dict, events: list[dict], emails: list[dict]) ->
                 "ref": f"e{i}",
                 "subject": m.get("subject"),
                 "sender": m.get("sender"),
+                # Gmail's query has no `-in:sent`, so a candidate list routinely
+                # contains the user's own mail. "I wrote about Atlas" and
+                # "someone asked me about Atlas" are different evidence for
+                # whether this belongs to the meeting, and the ranker could not
+                # previously tell them apart. NULL where it is not known.
+                "direction": m.get("direction"),
+                "to": m.get("to_recipients"),
                 "date": m.get("date"),
                 "snippet": _truncate(m.get("snippet"), SNIPPET_LIMIT),
                 "account": m.get("account"),
@@ -606,6 +613,21 @@ def attached_context(conn: sqlite3.Connection, meeting_id: int) -> dict:
     Scoped to this meeting, not the whole thread: a thread can span many
     meetings, and pulling in items attached via a different meeting's match
     would feed the summarizer content the user never confirmed for this one.
+
+    Two things deliberately absent, both of which the next person will want to
+    add:
+
+    **No email bodies.** This feeds the summarizer, whose input is a meeting's
+    transcript; a full inbox alongside it changes what the minutes are written
+    from. ``ai_summary`` goes instead -- one labelled sentence, bounded by the
+    same ``CONTEXT_SNIPPET_LIMIT`` as a snippet.
+
+    **No conversation grouping.** Chains are a whole-thread notion and this is
+    scoped per meeting, so two messages of one exchange can be attached under
+    different meetings -- or one under a meeting and one under NULL from the
+    sweep. Grouping here would render a fragment and present it as the whole
+    conversation. Chains belong only where the scope is the whole thread:
+    ``next_step._payload``, ``chat._format_attachments`` and the chains route.
     """
     events = conn.execute(
         """
@@ -616,7 +638,7 @@ def attached_context(conn: sqlite3.Connection, meeting_id: int) -> dict:
     ).fetchall()
     emails = conn.execute(
         """
-        SELECT subject, sender, date, snippet
+        SELECT subject, sender, date, snippet, direction, ai_summary
         FROM thread_emails WHERE meeting_id = ? ORDER BY date
         """,
         (meeting_id,),
@@ -699,20 +721,44 @@ def attach_email(
     The counterpart to :func:`attach_event`, and for the same reason: two callers
     writing this column list independently is how one of them starts leaving a
     column NULL.
+
+    Deliberately does **not** write `body`, `body_fetched_at`, `ai_summary` or
+    `ai_summary_model`. No provider has a body at search time, so those belong to
+    hydration (`services/email_bodies.py`) and writing NULLs for them here would
+    let a re-attach wipe a body someone already fetched.
+
+    Note the ``COALESCE`` in the conflict clause. Re-attaching is the only way a
+    row that predates these columns ever gets them, so the clause has to update
+    them -- but a bare ``excluded.x`` would let a *second* attach from a provider
+    with no headers (Zoho, MCP) **erase** threading a first attach had stored.
+    The clause could not lose data while it only touched meeting_id and the
+    relevance pair; extending it can, and COALESCE is what keeps it write-once.
     """
     auto_attached, seen_at = _unread_flags(auto)
+    references = email.get("references") or ()
     conn.execute(
         """
         INSERT INTO thread_emails (thread_id, meeting_id, mcp_id, message_id, sender,
             subject, date, snippet, account, triage_level, tag, reason, summary,
             score, raw_json, relevance_score, relevance_reason,
             url, rfc_message_id, provider, auto_attached, seen_at,
-            attached_by, attached_at, folder_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            attached_by, attached_at, folder_id,
+            conversation_id, in_reply_to, references_json, to_recipients,
+            cc_recipients, direction, integration_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(thread_id, message_id) DO UPDATE SET
             meeting_id = excluded.meeting_id,
             relevance_score = excluded.relevance_score,
-            relevance_reason = excluded.relevance_reason
+            relevance_reason = excluded.relevance_reason,
+            conversation_id = COALESCE(excluded.conversation_id, conversation_id),
+            in_reply_to     = COALESCE(excluded.in_reply_to, in_reply_to),
+            references_json = COALESCE(excluded.references_json, references_json),
+            to_recipients   = COALESCE(excluded.to_recipients, to_recipients),
+            cc_recipients   = COALESCE(excluded.cc_recipients, cc_recipients),
+            direction       = COALESCE(excluded.direction, direction),
+            integration_id  = COALESCE(excluded.integration_id, integration_id),
+            rfc_message_id  = COALESCE(excluded.rfc_message_id, rfc_message_id)
         """,
         (
             thread_id, meeting_id, email.get("id"), email.get("message_id"),
@@ -725,6 +771,12 @@ def attach_email(
             email.get("url"), email.get("rfc_message_id"), email.get("provider"),
             auto_attached, seen_at,
             user_id, utcnow(), email.get("folder_id"),
+            email.get("conversation_id"), email.get("in_reply_to"),
+            # NULL rather than "[]" for no references, so the COALESCE above
+            # treats "this provider has none" as "leave whatever is there".
+            json.dumps(list(references)) if references else None,
+            email.get("to_recipients"), email.get("cc_recipients"),
+            email.get("direction"), email.get("integration_id"),
         ),
     )
 

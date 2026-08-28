@@ -187,17 +187,32 @@ def compute_next_step_fingerprint(conn: sqlite3.Connection, thread_id: int) -> s
     attach/create call site, the same way ``summaries.stale`` is derived from a
     transcript hash rather than cleared on write.
 
-    Notes carry ``updated_at`` where emails and events carry only their id:
-    those two are immutable snapshots of something fetched, but a note is
-    edited in place, and rewriting one is exactly the kind of change that
-    should move the suggestion.
+    A calendar event carries only its id: it is an immutable snapshot of
+    something fetched. A note carries ``updated_at`` because it is edited in
+    place, and rewriting one is exactly the kind of change that should move the
+    suggestion.
+
+    An email carries ``body_fetched_at``, which is the one that is easy to get
+    wrong. An email's *content* is immutable, so the row looks like an event --
+    but the row is filled in lazily: hydration adds the full body and its AI
+    summary the first time someone opens the thread, and those are what the
+    suggestion is actually reading. Keyed on the id alone, a thread's first
+    hydration would silently fail to refresh anything and the cached suggestion
+    would keep describing a thread it could only see the snippets of.
+
+    Deliberately not the ``ai_summary`` text itself: it is derived from the body,
+    so it adds no information the stamp does not already carry, and hashing
+    multi-KB strings once per row on every home-page poll is pure waste. Nor
+    does this call ``email_chains.build_chains`` -- grouping is a whole-thread
+    computation and this runs per row on every list load.
     """
     rows = conn.execute(
         """
         SELECT 'm' || id || ':' || COALESCE(active_summary_id, 0) || ':' || updated_at AS token
           FROM meetings WHERE thread_id = ?
         UNION ALL
-        SELECT 'e' || id FROM thread_emails WHERE thread_id = ?
+        SELECT 'e' || id || ':' || COALESCE(body_fetched_at, '')
+          FROM thread_emails WHERE thread_id = ?
         UNION ALL
         SELECT 'c' || id FROM thread_calendar_events WHERE thread_id = ?
         UNION ALL

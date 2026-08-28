@@ -32,9 +32,11 @@ from app.services.providers.base import (
     Check,
     EmailCandidate,
     EventCandidate,
+    FetchedEmail,
     attendee_label,
     clean_attendees,
     test_result,
+    truncate_references,
 )
 from app.services.providers.query import build_gmail_query
 
@@ -294,14 +296,33 @@ class GoogleProvider(BaseProvider):
                         http,
                         f"{GMAIL_API}/users/me/messages/{message_id}",
                         {
-                            # metadata avoids downloading whole bodies; snippet
-                            # still comes back with it in practice.
                             # metadata avoids downloading bodies. The docs only
                             # promise ids/labels/headers, so treat snippet as
                             # present-but-unpromised and tolerate it being absent.
                             "format": "metadata",
-                            "metadataHeaders": ["Subject", "From", "Date", "Message-ID"],
-                            "fields": "id,threadId,snippet,internalDate,payload/headers",
+                            # To/Cc and the two threading headers ride along in
+                            # the same request at no extra cost -- and they are
+                            # only available here: recovering them later would
+                            # mean re-downloading every message. In-Reply-To and
+                            # References are what chain a conversation across two
+                            # accounts or two providers, which threadId cannot.
+                            "metadataHeaders": [
+                                "Subject",
+                                "From",
+                                "Date",
+                                "Message-ID",
+                                "To",
+                                "Cc",
+                                "In-Reply-To",
+                                "References",
+                            ],
+                            # labelIds carries SENT (hence `direction`) and DRAFT.
+                            # Also free: it is a field on the response we were
+                            # already fetching, not another round trip.
+                            "fields": (
+                                "id,threadId,labelIds,snippet,internalDate,"
+                                "payload/headers"
+                            ),
                         },
                     )
 
@@ -315,15 +336,47 @@ class GoogleProvider(BaseProvider):
                 # One unreadable message must not lose the other 24.
                 log.warning("gmail message %s failed: %s", message_id, body)
                 continue
-            emails.append(self._to_email(body))
+            candidate = self._to_email(body)
+            if candidate is None:
+                continue
+            emails.append(candidate)
         return emails
 
-    def _to_email(self, body: dict) -> EmailCandidate:
-        headers = {
+    @staticmethod
+    def _headers(body: dict) -> dict[str, str | None]:
+        return {
             h.get("name", "").lower(): h.get("value")
             for h in (body.get("payload", {}).get("headers") or [])
         }
+
+    @staticmethod
+    def _direction(body: dict) -> str | None:
+        """'outbound' when Gmail says SENT, else 'inbound', else unknown.
+
+        SENT is authoritative for outbound, so its absence is good evidence of
+        inbound -- but only when the label list came back at all. A response with
+        no ``labelIds`` key is "we did not ask" or "the mask dropped it", not
+        "not sent", and guessing there is exactly what the NULL state is for.
+        """
+        if "labelIds" not in body:
+            return None
+        labels = {str(label).upper() for label in (body.get("labelIds") or [])}
+        return "outbound" if "SENT" in labels else "inbound"
+
+    def _to_email(self, body: dict) -> EmailCandidate | None:
+        labels = {str(label).upper() for label in (body.get("labelIds") or [])}
+        if "DRAFT" in labels:
+            # A draft is not correspondence, and its Date header is whenever it
+            # was last touched. Attaching one is actively harmful now that
+            # direction exists: as inbound it invents an incoming request, and as
+            # outbound it claims you replied when the whole point of a draft is
+            # that you have not. Dropped rather than mapped either way.
+            log.debug("gmail message %s skipped: draft", body.get("id"))
+            return None
+
+        headers = self._headers(body)
         native = body.get("id", "")
+        thread_native = body.get("threadId")
         return EmailCandidate(
             message_id=f"{self.provider_id}:{self.ref.id}:{native}",
             rfc_message_id=headers.get("message-id"),
@@ -336,11 +389,32 @@ class GoogleProvider(BaseProvider):
             url=f"https://mail.google.com/mail/u/0/#all/{native}",
             provider=self.provider_id,
             integration_id=self.ref.id,
+            # Namespaced, because a threadId is unique per *mailbox*: two
+            # connected accounts holding one conversation would otherwise
+            # collide into a single chain.
+            conversation_id=self.uid_for(thread_native) if thread_native else None,
+            in_reply_to=headers.get("in-reply-to"),
+            references=truncate_references(headers.get("references")),
+            to_recipients=headers.get("to"),
+            cc_recipients=headers.get("cc"),
+            direction=self._direction(body),
         )
 
     async def get_email_body(
         self, *, native_id: str, folder_id: str | None = None
     ) -> str | None:
+        message = await self.get_email_message(native_id=native_id, folder_id=folder_id)
+        return message.body if message else None
+
+    async def get_email_message(
+        self, *, native_id: str, folder_id: str | None = None
+    ) -> FetchedEmail | None:
+        """``format=full`` returns the headers alongside the body, for free.
+
+        Which makes hydration the threading backfill for Gmail: a row attached
+        before those headers were requested gets its conversation id, reply
+        pointers and recipients filled in the first time someone opens it.
+        """
         token = await self._token()
         async with httpx.AsyncClient(
             timeout=REQUEST_TIMEOUT_SEC, headers={"Authorization": f"Bearer {token}"}
@@ -350,7 +424,20 @@ class GoogleProvider(BaseProvider):
                 f"{GMAIL_API}/users/me/messages/{native_id}",
                 {"format": "full"},
             )
-        return _extract_gmail_text(body.get("payload") or {})
+
+        headers = self._headers(body)
+        thread_native = body.get("threadId")
+        return FetchedEmail(
+            body=_extract_gmail_text(body.get("payload") or {}),
+            conversation_id=self.uid_for(thread_native) if thread_native else None,
+            rfc_message_id=headers.get("message-id"),
+            in_reply_to=headers.get("in-reply-to"),
+            references=truncate_references(headers.get("references")),
+            to_recipients=headers.get("to"),
+            cc_recipients=headers.get("cc"),
+            sender=headers.get("from"),
+            direction=self._direction(body),
+        )
 
     # --------------------------------------------------------------------- test
 

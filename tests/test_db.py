@@ -476,6 +476,64 @@ def test_username_is_case_insensitively_unique(conn):
 # --------------------------------------------------------------------------- #
 
 
+# --------------------------------------------------------------------------- #
+# LATE_COLUMNS
+# --------------------------------------------------------------------------- #
+
+EMAIL_THREADING_COLUMNS = {
+    "conversation_id",
+    "in_reply_to",
+    "references_json",
+    "to_recipients",
+    "cc_recipients",
+    "direction",
+    "body",
+    "body_fetched_at",
+    "ai_summary",
+    "ai_summary_model",
+    "integration_id",
+}
+
+
+def test_email_threading_columns_exist(conn):
+    present = {row[1] for row in conn.execute("PRAGMA table_info(thread_emails)")}
+    assert EMAIL_THREADING_COLUMNS <= present
+
+
+def test_dev_email_authoring_columns_exist(conn):
+    present = {row[1] for row in conn.execute("PRAGMA table_info(dev_emails)")}
+    assert {"in_reply_to", "conversation_id", "to_recipients", "outbound"} <= present
+
+
+def test_init_db_is_idempotent_for_late_columns(initialised_db):
+    """A second boot must not raise -- "duplicate column name" is the no-op."""
+    init_db(initialised_db)
+    init_db(initialised_db)
+
+    with get_conn(initialised_db) as conn:
+        present = {row[1] for row in conn.execute("PRAGMA table_info(thread_emails)")}
+    assert EMAIL_THREADING_COLUMNS <= present
+
+
+def test_no_late_column_is_not_null_without_a_default():
+    """A structural guard on the rule documented above LATE_COLUMNS.
+
+    SQLite's ALTER TABLE ADD COLUMN cannot add NOT NULL without a default, and
+    cannot add UNIQUE at all -- anything needing either has to go in SCHEMA
+    instead. Asserted here rather than left to a failing boot, because the boot
+    that fails is the one upgrading an existing database, not a fresh test run.
+    """
+    from app.db import LATE_COLUMNS
+
+    offenders = [
+        f"{table}.{column}"
+        for table, column, ddl in LATE_COLUMNS
+        if ("NOT NULL" in ddl.upper() and "DEFAULT" not in ddl.upper())
+        or "UNIQUE" in ddl.upper()
+    ]
+    assert offenders == []
+
+
 def test_utcnow_is_iso8601_utc():
     from datetime import datetime
 

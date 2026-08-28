@@ -35,6 +35,7 @@ from app.services.providers.base import (
     EmailCandidate,
     EventCandidate,
     coerce_attendees,
+    normalize_address,
     test_result,
 )
 from app.services.providers.query import zoho_range
@@ -349,8 +350,21 @@ class ZohoProvider(BaseProvider):
         folder = names.get(str(folder_id)) or folder_id
         return f"https://mail.zoho.{self._dc()}/zm/#mail/folder/{folder}/p/{message_id}"
 
+    def _direction(self, sender: str | None) -> str | None:
+        """Address comparison only -- Zoho's search payload has no sent flag.
+
+        None rather than a default when either side is unparseable: the whole
+        point of the third state is that a guess here reads as fact downstream.
+        """
+        mine = normalize_address(self.ref.account_label)
+        theirs = normalize_address(sender)
+        if not mine or not theirs:
+            return None
+        return "outbound" if mine == theirs else "inbound"
+
     def _to_email(self, item: dict) -> EmailCandidate:
         native = str(item.get("messageId") or "")
+        sender = _plain(item.get("fromAddress") or item.get("sender"))
         return EmailCandidate(
             message_id=f"{self.provider_id}:{self.ref.id}:{native}",
             # Zoho's search payload does not carry the RFC 2822 header.
@@ -358,7 +372,7 @@ class ZohoProvider(BaseProvider):
             id=native,
             # Zoho HTML-escapes these, so a sender arrives as
             # "&quot;Ada&quot;&lt;ada@x&gt;" and would render literally.
-            sender=_plain(item.get("fromAddress") or item.get("sender")),
+            sender=sender,
             subject=_plain(item.get("subject")),
             date=parse_stamp(item.get("receivedTime") or item.get("sentDateInGMT")),
             snippet=_plain(item.get("summary")),
@@ -367,6 +381,17 @@ class ZohoProvider(BaseProvider):
             provider=self.provider_id,
             integration_id=self.ref.id,
             folder_id=str(item["folderId"]) if item.get("folderId") is not None else None,
+            # Zoho's search payload carries no conversation id and no threading
+            # headers, and its content endpoint returns content alone -- so
+            # unlike Gmail and IMAP there is no hydration backfill for these
+            # either. Left NULL, never synthesised, the same honesty as
+            # `rfc_message_id` above; chaining falls back to its subject tier.
+            conversation_id=None,
+            in_reply_to=None,
+            references=(),
+            to_recipients=_plain(item.get("toAddress")),
+            cc_recipients=_plain(item.get("ccAddress")),
+            direction=self._direction(sender),
         )
 
     async def get_email_body(
