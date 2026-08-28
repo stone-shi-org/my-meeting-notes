@@ -2,6 +2,18 @@
 
 Working notes for this codebase. Read alongside `README.md`, which covers running it.
 
+## Documentation
+
+This file (and README.md) is also mirrored, expanded, and organized by topic on Confluence —
+space key **MMN** (`https://confluence.local.shifamily.com/spaces/MMN/`). Page tree: My Meeting
+Notes → Getting Started, Architecture Overview, Meetings & Transcription Pipeline, Summaries & AI
+Chat, Threads/Groups & Notes, Integrations Overview & Matching → Provider Details, Email
+Conversations & Hydration, Testing, CI/CD & Release (Bamboo), Gotchas Reference.
+
+**Whenever something in this file changes, update the matching Confluence page(s) too.** This file
+is the source of truth for day-to-day agent work; Confluence is the durable, browsable copy for
+humans. Letting them drift apart defeats the point of having both.
+
 ## Shape
 
 FastAPI backend + Vite/React SPA, one container, port 4020. SQLite at `data/app.db`, audio on disk
