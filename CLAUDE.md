@@ -183,6 +183,147 @@ is the absence of a group colour, not a ninth one.
 **The collapsed set is stored whole**, so it has exactly one owner in `GroupedThreadList`. Two
 sections each holding their own copy would have the second one's write erase the first's.
 
+## Email conversations
+
+Attached emails are grouped into conversations and carry a `direction`, so the app can tell "they
+are waiting on me" from "I already replied". Before this, every LLM surface saw `sender`, `date` and
+a 200-char `snippet` and nothing else — which is why the next-step suggestion would cheerfully tell
+you to send a mail you had already sent. `build_gmail_query` has no `-in:sent`, so **your own sent
+mail was already being attached**; it just rendered identically to received mail.
+
+**Chains are computed on read, never stored** (`services/email_chains.py`). Not merely because lazy
+backfill would make a stored key stale: a chain key is a *global* property of the set, so attaching
+one email can merge two chains and would require rewriting every row in *both* — a fan-out write on a
+table four independent paths write to (`matching.attach_selected`, `followups.sweep_thread`,
+`chat._tool_attach`, `routers/calendar.py`). Corollary: do **not** call `build_chains` from
+`threads.compute_next_step_fingerprint`, which runs once per row on every home-page load.
+
+**Three tiers, in descending authority**: the provider's own conversation id → the RFC 2822
+`In-Reply-To`/`References` graph → normalized subject plus participant overlap. Tier 2 has a
+non-obvious half: two replies citing an ancestor *nobody attached* still belong together, and that is
+the common case, because people attach the replies and not the original.
+
+**Tier 3 is a heuristic with five guards, and it only ever looks at rows the first two tiers left
+alone.** That restriction is what makes lazy backfill *monotone*: hydrating one pair splits a
+subject-guess into a real chain plus leftovers, and can never reshuffle a chain someone else is
+already in — otherwise a half-backfilled thread reorders its cards on every page view. The guards:
+generic subjects never merge; a bucket over 12 is a newsletter; **the only shared participant being
+*you* is not evidence** (every message in your mailbox shares you, so `account_addresses` is
+subtracted first); an undated row never merges; and a gap over 30 days is a new conversation.
+
+**`normalize_message_id` returns `None`, never `""`,** for an absent header. An empty string is a
+perfectly good dict key, so every header-less row on a thread would union into one chain on a value
+that means "we don't know".
+
+**`chain_addresses` filters empty headers *before* `getaddresses`.** Since the CVE-2023-27043
+hardening it returns a single `[('', '')]` — discarding every address it did parse — if any element is
+malformed, and `""` counts. Most attached rows have no To/Cc, so passing them through silently
+reduced participant overlap to nothing and disabled tier 3 entirely.
+
+**`direction` is `'outbound' | 'inbound' | NULL`, not a boolean.** Three states, and the third is
+common (MCP, dev, Zoho without headers). Gmail's `SENT` label is authoritative; an address comparison
+against the account is a guess; neither is available everywhere. A NULL rendered as inbound tells the
+summarizer someone else asked a question the user asked themselves, so every surface — card, digest,
+next-step payload, ranker — renders it as *unknown* and none of them guess.
+
+**`conversation_id` goes through `uid_for`.** Gmail's `threadId` is unique per *mailbox*, so two
+connected accounts holding one conversation would collide into a single chain. Same invariant as
+`message_id` and `uid`. MCP emits `message_id`/`rfc_message_id` verbatim for back-compat but its
+threading fields stay NULL — there is no back-compat hazard because nothing was ever stored, and
+synthesising one would fabricate an authoritative-tier link out of nothing.
+
+**Gmail gets all of this for free.** `google.py` already requested `threadId` in its `fields` mask and
+threw it away; `To`/`Cc`/`In-Reply-To`/`References` and `labelIds` are more entries on the *same*
+request. Those headers are only available at search time — recovering them later means re-downloading
+every message. `labelIds` also exposed a pre-existing bug: Gmail's `q` returns **drafts**, which used
+to attach as ordinary inbound mail with a meaningless date. Dropped now: as inbound a draft invents an
+incoming request, and as outbound it claims you replied when the whole point is that you have not.
+
+**`body` is not on `EmailCandidate`.** Candidates are persisted three times per match run and nothing
+prunes `match_runs` — and no provider has a body at search time anyway (Gmail is `format=metadata`,
+IMAP fetches header fields, Zoho's search payload and the MCP result carry no content), so the field
+would be permanently None on every path. Bodies live only in `thread_emails.body`, written by
+hydration.
+
+**`ai_summary` is deliberately not `summary`.** That column is the email-triage MCP server's own
+field, and a triage field must never be synthesised.
+
+### Hydration
+
+`services/email_bodies.py`, on demand, **not a queued job**. Both reasons the sweep avoids the queue
+apply harder: hydration fires on every thread open rather than on a timer, so the dock would fill with
+one-second jobs while a 40-minute diarization scrolled out of sight; and restart survival is free,
+because `body IS NULL AND body_fetched_at IS NULL` *is* the resume predicate. The one honest argument
+for the queue is bounding LLM spend, and the queue is an unbounded FIFO with no per-user limit — the
+guards that work are `next_step`'s: a per-event-loop semaphore and a "we already tried" stamp.
+
+**`body_fetched_at` is stamped on every *attempt*, success or failure** — the `next_step_checked_at`
+vs `next_step_generated_at` split. `body IS NULL AND body_fetched_at IS NOT NULL` therefore means
+"asked, and this account cannot", which is what stops a provider with no fetch-by-id tool being
+re-asked on every page view. The SPA renders that state as terminal with **no retry button**: a retry
+that cannot succeed is a lie.
+
+**Hydration is the threading backfill for Gmail and IMAP only.** `format=full` and
+`FETCH BODY.PEEK[]` both return the whole message, so `get_email_message` can fill the header columns
+too; Zoho's content endpoint and MCP's `fetch_full_email` return content alone. That is why
+`get_email_message` is a *sibling* of `get_email_body` rather than a widening of it — widening would
+make it a promise three of five providers cannot keep. Write-back is COALESCE-guarded, so a provider
+with no headers never blanks what a search already stored.
+
+**Bodies are converted to text on the way in** (`services/html_text.py`, stdlib only). The SPA then
+needs no HTML sanitizer, and SQLite reads whole rows so markup would be dragged off disk by every
+read that never shows it. The detector requires **two** well-formed tags or a document marker,
+because the failure directions are not symmetrical: mistaking markup for text leaves tags visible,
+while mistaking text for markup *deletes characters* — `a<b and b>c` is a comparison, and
+`<priya@acme.com>` is an address.
+
+Hydration must not `touch_thread` (opening a thread is not activity — the same rule as filing one) and
+must not write `seen_at` (owned by `mark_seen`; this is the app fetching, not a person reading).
+
+**`thread_emails.integration_id` is a plain INTEGER, not a foreign key.** It is copied out of a match
+run's persisted `ranked_json`, which can name an account disconnected between running the match and
+confirming it — with `foreign_keys=ON` a REFERENCES clause makes that a hard IntegrityError, turning
+"attach these emails" into a 500. A dangling id is harmless: the lookup is owner-scoped, finds
+nothing, and takes the "cannot supply a body" path. The column also *fixes* a bug — `integration_id`
+used to be recovered by parsing the composite `message_id`, which silently fails for MCP's bare ids,
+so every MCP-sourced email was unfetchable.
+
+### What reads chains, and what must not
+
+**`attach_email`'s `ON CONFLICT` clause is the most dangerous line in the feature.** Re-attaching is
+the only way a pre-migration row acquires these columns, so the clause has to update them — but every
+new field must be `COALESCE(excluded.x, x)`, never bare `excluded.x`, or a second attach from a
+headerless provider *erases* threading the first one stored. The clause could not lose data while it
+only touched `meeting_id` and the relevance pair; extending it can.
+
+**`attached_context` gets `direction` and `ai_summary`, but never a body and never chains.** It feeds
+the summarizer, whose input is a transcript — a full inbox alongside it changes what the minutes are
+written from. And it is scoped *per meeting*, so two messages of one exchange can be attached under
+different meetings (or one under a meeting and one under NULL from the sweep); grouping there would
+render a fragment and present it as the whole conversation. Chains belong only where the scope is the
+whole thread: `next_step._payload`, `chat._format_attachments`, and the chains route.
+
+**The chat digest budgets its attachments block.** It used to add attachments unconditionally and
+truncate only meetings — harmless while an email was a 200-char snippet, a real bug once it can carry
+a full body, because one long thread could produce an attachments-only digest with a single meeting
+glued on. Attachments take at most `ATTACHMENT_BUDGET_SHARE`, split per section, and say what they
+dropped: a silent cap reads as "you saw everything".
+
+**`next_step` selects every email and caps the *chains*.** Slicing the messages first would cut
+conversations in half and then report the remainder as if it were the whole exchange. Its payload key
+is `email_chains`, renamed from `recent_emails` in the same commit as the prompt bump — a stale prompt
+reading the old key would find nothing and quietly decide the thread has no email on it.
+
+**iCloud/IMAP search is `INBOX`-only, so your own sent mail is never found there.** Not fixed:
+`_imap.search` selects exactly one mailbox, the sent folder's name is localized, and widening it
+changes what gets matched and auto-attached. Surfaced in the UI instead — an all-inbound chain on an
+Apple account says outbound mail may be missing, because a fragment presented as whole is the failure
+mode this whole feature exists to remove.
+
+**`--fg-faint` is not for email text.** The snippet and the timeline `<time>` used to use it; both are
+content, and that token is annotated `DECORATIVE ONLY` and fails AA by design. Body → `--fg`,
+preview/summary → `--fg-muted`, meta → `--fg-subtle`.
+
 ## Integrations (calendar + email)
 
 Per-user, never shared. `app/services/providers/` holds one module per backend behind the protocol
