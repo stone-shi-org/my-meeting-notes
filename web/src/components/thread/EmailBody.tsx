@@ -45,8 +45,12 @@ function BodyText({ body }: { body: string }) {
   const folded = quotedLineCount(parts);
 
   return (
-    <div className="mt-1 space-y-2">
-      <p className="whitespace-pre-wrap break-words text-sm text-fg">{parts.reply}</p>
+    <div className="mt-1.5 space-y-2">
+      {/* `leading-relaxed` is doing real work here: it is what makes this read
+          as prose against the compact uppercase label above it. */}
+      <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-fg">
+        {parts.reply}
+      </p>
 
       {parts.signature ? (
         <p className="whitespace-pre-wrap break-words text-xs text-fg-subtle">

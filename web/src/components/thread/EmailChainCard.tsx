@@ -66,20 +66,26 @@ function missingOutbound(chain: EmailChain): boolean {
   return chain.messages.some((m) => INBOX_ONLY_PROVIDERS.has(m.provider ?? ''));
 }
 
+/**
+ * Who sent one message.
+ *
+ * Weight and size are uniform across all three branches, and set by the header
+ * row rather than here: the *content* is what distinguishes the directions
+ * ("You" vs the sender), so varying the weight as well made an unknown-direction
+ * header indistinguishable from the body text below it.
+ */
 function DirectionLabel({ email }: { email: Email }) {
-  if (email.direction === 'outbound') {
-    return <span className="font-medium text-fg">You</span>;
-  }
+  if (email.direction === 'outbound') return <span>You</span>;
   if (email.direction === 'inbound') {
-    return <span className="font-medium text-fg">{email.sender ?? 'Unknown sender'}</span>;
+    return <span>{email.sender ?? 'Unknown sender'}</span>;
   }
-  // Null is genuinely unknown. No label, no colour, no placeholder dash -- the
-  // raw sender string and nothing else. The coloured gutter is decoration; the
-  // text is what carries the claim, so a colour with no accessible equivalent
-  // would be asserting something the UI cannot back up.
+  // Null is genuinely unknown. No label and no direction colour -- the raw
+  // sender and nothing else. The coloured gutter is decoration; the text is what
+  // carries the claim, so a colour with no accessible equivalent would be
+  // asserting something the UI cannot back up.
   return (
     <>
-      <span className="text-fg">{email.sender ?? 'Unknown sender'}</span>
+      <span>{email.sender ?? 'Unknown sender'}</span>
       <span className="sr-only"> (sender side unknown)</span>
     </>
   );
@@ -88,7 +94,10 @@ function DirectionLabel({ email }: { email: Email }) {
 function gutterClass(direction: Email['direction']): string {
   if (direction === 'outbound') return 'border-primary';
   if (direction === 'inbound') return 'border-entity-email';
-  return 'border-transparent';
+  // The neutral border, not a third direction colour and not transparent. It
+  // gives the row the same structure as its siblings without claiming a side --
+  // transparent left an unknown-direction message with no anchor at all.
+  return 'border-border';
 }
 
 function EmailMessageRow({
@@ -145,7 +154,14 @@ function EmailMessageRow({
   }, [open, unread, rowId]);
 
   return (
-    <li className={cn('group/msg border-l-2 pl-3', gutterClass(email.direction))}>
+    <li
+      className={cn(
+        // py-1 as well as pl-3: each message needs to read as its own block, not
+        // as one more line in a run of text.
+        'group/msg border-l-2 py-1 pl-3',
+        gutterClass(email.direction),
+      )}
+    >
       <div className="flex items-start gap-2">
         {unread ? <UnreadDot /> : null}
         <button
@@ -155,12 +171,26 @@ function EmailMessageRow({
           aria-controls={bodyId}
           className="flex min-w-0 flex-1 items-baseline gap-2 text-left"
         >
-          <span className={cn('truncate text-sm', unread && 'font-semibold')}>
+          {/* A compact bold label, deliberately one size *below* the body text
+              underneath it. Both used to be `text-sm text-fg`, which made a
+              message's header and its own first line look identical.
+              Deliberately not uppercased: this is usually an address, and
+              "PRIYA@ACME.COM" is harder to read than it is label-like. */}
+          <span
+            className={cn(
+              'truncate text-xs text-fg',
+              unread ? 'font-bold' : 'font-semibold',
+            )}
+          >
             <DirectionLabel email={email} />
           </span>
           {/* Each row carries its own absolute date: a conversation spans weeks
-              and sits under its newest message's day header. */}
-          <time dateTime={email.date ?? undefined} className="shrink-0 text-2xs text-fg-subtle">
+              and sits under its newest message's day header. Mono, matching the
+              timeline's own times. */}
+          <time
+            dateTime={email.date ?? undefined}
+            className="shrink-0 font-mono text-2xs font-normal text-fg-subtle"
+          >
             {shortDate(email.date)}
           </time>
         </button>
@@ -340,7 +370,7 @@ export function EmailChainCard({
         <p className={cn('mt-1 line-clamp-1 pl-5 text-xs', 'text-fg-muted')}>{preview}</p>
       ) : null}
 
-      <ol id={listId} hidden={!expanded} className="mt-2 space-y-3 pl-5">
+      <ol id={listId} hidden={!expanded} className="mt-2 space-y-4 pl-5">
         {expanded
           ? chain.messages.map((message, index) => (
               <EmailMessageRow
