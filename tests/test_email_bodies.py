@@ -228,7 +228,7 @@ class TestUnavailable:
         add_email(thread)
 
         first = await hydrate(thread)
-        assert first == {"requested": 1, "fetched": 0, "unavailable": 1, "summarised": 0}
+        assert first == {"requested": 1, "fetched": 0, "unavailable": 1, "remaining": 0}
         assert row(thread)["body"] is None
         assert row(thread)["body_fetched_at"] is not None
         assert provider.calls == 1
@@ -395,68 +395,146 @@ class TestInvariants:
 # --------------------------------------------------------------------------- #
 
 
-class TestSummaries:
-    async def test_a_short_body_gets_no_summary(self, thread, fake, monkeypatch):
-        """The body IS the summary below the threshold: paying for a call to
-        compress four lines costs money, adds latency and loses information."""
+class TestSummariesAreOptIn:
+    """Hydration fetches bodies and nothing else.
+
+    One LLM call per message is real money and real latency, and it used to ride
+    along with every thread open. Summarising is its own request now.
+    """
+
+    async def test_hydration_never_calls_the_llm(self, thread, fake, monkeypatch):
         called = []
         monkeypatch.setattr(
-            eb, "summarise_sync",
-            lambda *a, **k: called.append(1) or ("should not happen", "m"),
+            eb, "summarise_sync", lambda *a, **k: called.append(1) or ("no", "m")
         )
-        fake(FakeProvider(FetchedEmail(body="Short and clear.")))
+        fake(FakeProvider(FetchedEmail(body="word " * 400)))
         add_email(thread)
 
         result = await hydrate(thread)
 
-        assert called == []
-        assert result["summarised"] == 0
+        assert result["fetched"] == 1
+        assert called == [], "opening a thread must not spend LLM budget"
         assert row(thread)["ai_summary"] is None
+        assert "summarised" not in result
 
-    async def test_a_long_body_gets_a_summary(self, thread, fake, monkeypatch):
+    async def test_summarise_fills_a_stored_body(self, thread, fake, monkeypatch):
         monkeypatch.setattr(
             eb, "summarise_sync",
             lambda *a, **k: ("Priya confirms the Friday window", "test-model"),
         )
         fake(FakeProvider(FetchedEmail(body="word " * 400)))
         add_email(thread)
+        await hydrate(thread)
 
-        result = await hydrate(thread)
+        result = await eb.summarise_thread_emails(thread, thread_id=1)
 
-        assert result["summarised"] == 1
+        assert result == {"requested": 1, "summarised": 1, "failed": 0, "remaining": 0}
         r = row(thread)
         assert r["ai_summary"] == "Priya confirms the Friday window"
         assert r["ai_summary_model"] == "test-model"
 
-    async def test_a_failed_summary_leaves_the_body_stored(self, thread, fake, monkeypatch):
-        """The same "cannot fail the save" discipline as note titles. Losing the
-        body because nothing could summarise it would be the worst outcome of
-        opening a thread, and both NULL columns are how "nothing generated one"
-        is recorded."""
-        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: (None, None))
-        body = "word " * 400
-        fake(FakeProvider(FetchedEmail(body=body)))
-        add_email(thread)
-
-        result = await hydrate(thread)
-
-        assert result["fetched"] == 1
-        assert result["summarised"] == 0
-        r = row(thread)
-        assert r["body"].startswith("word")
-        assert r["ai_summary"] is None
-        assert r["ai_summary_model"] is None
-
-    async def test_summaries_can_be_disabled_for_the_call(self, thread, fake, monkeypatch):
+    async def test_a_short_body_is_never_selected(self, thread, fake, monkeypatch):
+        """The body IS the summary below the threshold: paying to compress four
+        lines costs money, adds latency and loses information."""
         called = []
         monkeypatch.setattr(
-            eb, "summarise_sync", lambda *a, **k: called.append(1) or (None, None)
+            eb, "summarise_sync", lambda *a, **k: called.append(1) or ("x", "m")
         )
+        fake(FakeProvider(FetchedEmail(body="Short and clear.")))
+        add_email(thread)
+        await hydrate(thread)
+
+        result = await eb.summarise_thread_emails(thread, thread_id=1)
+
+        assert result["requested"] == 0
+        assert called == []
+
+    async def test_a_failed_summary_can_be_retried(self, thread, fake, monkeypatch):
+        """The bug this split exists to fix.
+
+        `pending` requires `body IS NULL`, so once a body is stored the row is
+        invisible to it forever -- even with force=True, which only relaxes the
+        `body_fetched_at` half. A failed summary was therefore permanent.
+        `pending_summaries` asks a different question, so pressing the button
+        again is a real retry.
+        """
         fake(FakeProvider(FetchedEmail(body="word " * 400)))
         add_email(thread)
+        await hydrate(thread)
 
-        await hydrate(thread, summarise=False)
+        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: (None, None))
+        failed = await eb.summarise_thread_emails(thread, thread_id=1)
+        assert failed == {"requested": 1, "summarised": 0, "failed": 1, "remaining": 1}
+        assert row(thread)["body"].startswith("word"), "the body survives regardless"
+        assert row(thread)["ai_summary"] is None
+
+        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: ("Now it works", "m"))
+        retried = await eb.summarise_thread_emails(thread, thread_id=1)
+
+        assert retried["summarised"] == 1
+        assert row(thread)["ai_summary"] == "Now it works"
+
+    async def test_force_hydration_still_cannot_reach_a_summarised_row(
+        self, thread, fake, monkeypatch
+    ):
+        """Documents why the second predicate is necessary rather than a nicety."""
+        fake(FakeProvider(FetchedEmail(body="word " * 400)))
+        add_email(thread)
+        await hydrate(thread)
+
+        assert (await hydrate(thread, force=True))["requested"] == 0
+
+    async def test_an_already_summarised_row_is_not_paid_for_twice(
+        self, thread, fake, monkeypatch
+    ):
+        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: ("Once", "m"))
+        fake(FakeProvider(FetchedEmail(body="word " * 400)))
+        add_email(thread)
+        await hydrate(thread)
+        await eb.summarise_thread_emails(thread, thread_id=1)
+
+        assert (await eb.summarise_thread_emails(thread, thread_id=1))["requested"] == 0
+
+    async def test_it_can_be_scoped_to_named_ids(self, thread, fake, monkeypatch):
+        """How one conversation's button avoids paying for the whole thread."""
+        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: ("S", "m"))
+        fake(FakeProvider(FetchedEmail(body="word " * 400)))
+        add_email(thread, email_id=1)
+        add_email(thread, email_id=2)
+        await hydrate(thread)
+
+        result = await eb.summarise_thread_emails(thread, thread_id=1, email_ids=[2])
+
+        assert result["summarised"] == 1
+        assert result["remaining"] == 1
+        assert row(thread, 1)["ai_summary"] is None
+        assert row(thread, 2)["ai_summary"] == "S"
+
+    async def test_it_is_bounded_per_call(self, thread, fake, monkeypatch):
+        monkeypatch.setattr(eb, "summarise_sync", lambda *a, **k: ("S", "m"))
+        fake(FakeProvider(FetchedEmail(body="word " * 400)))
+        for i in range(1, eb.SUMMARISE_MAX_PER_CALL + 4):
+            add_email(thread, email_id=i)
+        await hydrate(thread)
+
+        result = await eb.summarise_thread_emails(thread, thread_id=1)
+
+        assert result["requested"] == eb.SUMMARISE_MAX_PER_CALL
+        assert result["remaining"] == 3
+
+    async def test_a_row_with_no_body_is_never_selected(self, thread, fake, monkeypatch):
+        called = []
+        monkeypatch.setattr(
+            eb, "summarise_sync", lambda *a, **k: called.append(1) or ("x", "m")
+        )
+        add_email(thread)  # never hydrated
+
+        assert (await eb.summarise_thread_emails(thread, thread_id=1))["requested"] == 0
         assert called == []
+
+
+class TestSummariseSync:
+    """The blocking helper itself, exercised through REAL_SUMMARISE."""
 
     def test_summarise_sync_succeeds_on_a_well_formed_reply(self, thread, monkeypatch):
         """The positive case, so the three below cannot pass vacuously."""

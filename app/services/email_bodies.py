@@ -50,6 +50,11 @@ MAX_BODY_CHARS = 32_000
 # lines into one costs money, adds latency and loses information.
 AI_SUMMARY_MIN_CHARS = 900
 
+# Summaries are opt-in, one button press per conversation, so this bound is about
+# what a person is willing to wait for rather than about a screenful. Lower than
+# HYDRATE_MAX_PER_CALL because each item here is an LLM round trip.
+SUMMARISE_MAX_PER_CALL = 8
+
 # What gets sent to the summariser, so one enormous newsletter cannot dominate a
 # request. The head is kept: an email says what it wants in its first screen.
 SUMMARY_INPUT_CHARS = 6_000
@@ -141,6 +146,60 @@ def pending(
         f"WHERE {' AND '.join(where)} ORDER BY date DESC LIMIT ?",
         params,
     ).fetchall()
+
+
+def pending_summaries(
+    conn: sqlite3.Connection,
+    thread_id: int,
+    *,
+    limit: int = SUMMARISE_MAX_PER_CALL,
+    email_ids: list[int] | None = None,
+) -> list[sqlite3.Row]:
+    """Rows that have a body worth summarising but no summary, newest first.
+
+    A **separate** predicate from :func:`pending`, and that separation is the
+    whole point. ``pending`` requires ``body IS NULL``, so once a body is stored
+    the row is never selected again -- which silently made a failed or skipped
+    summary permanent, since even ``force=True`` only relaxes the
+    ``body_fetched_at`` half. Asking "which rows want a summary?" is a different
+    question from "which rows want a body?" and needs its own query.
+
+    No "we already tried" stamp here, unlike ``body_fetched_at``: summarising is
+    an explicit button press, so pressing it again *is* the retry.
+    """
+    where = [
+        "thread_id = ?",
+        "body IS NOT NULL",
+        "ai_summary IS NULL",
+        "length(body) >= ?",
+    ]
+    params: list = [thread_id, AI_SUMMARY_MIN_CHARS]
+    if email_ids:
+        where.append(f"id IN ({','.join('?' * len(email_ids))})")
+        params.extend(email_ids)
+
+    params.append(limit)
+    return conn.execute(
+        f"SELECT id, subject, sender, body FROM thread_emails "
+        f"WHERE {' AND '.join(where)} ORDER BY date DESC LIMIT ?",
+        params,
+    ).fetchall()
+
+
+def _count_pending_bodies(conn: sqlite3.Connection, thread_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM thread_emails WHERE thread_id = ? "
+        "AND body IS NULL AND body_fetched_at IS NULL",
+        (thread_id,),
+    ).fetchone()[0]
+
+
+def _count_pending_summaries(conn: sqlite3.Connection, thread_id: int) -> int:
+    return conn.execute(
+        "SELECT COUNT(*) FROM thread_emails WHERE thread_id = ? "
+        "AND body IS NOT NULL AND ai_summary IS NULL AND length(body) >= ?",
+        (thread_id, AI_SUMMARY_MIN_CHARS),
+    ).fetchone()[0]
 
 
 def _native_id(row: sqlite3.Row) -> str | None:
@@ -284,7 +343,7 @@ def summarise_sync(
 
 
 # --------------------------------------------------------------------------- #
-# The one entry point
+# Bodies
 # --------------------------------------------------------------------------- #
 
 
@@ -296,9 +355,17 @@ async def hydrate_thread_emails(
     limit: int = HYDRATE_MAX_PER_CALL,
     email_id: int | None = None,
     force: bool = False,
-    summarise: bool = True,
 ) -> dict:
     """Fetch and store bodies for a thread's un-hydrated emails.
+
+    Bodies only. Summaries are a separate, explicitly-requested pass -- see
+    :func:`summarise_thread_emails`. Splitting them keeps the automatic path free
+    of LLM spend and latency: fetching a body is a cheap provider read that
+    should just happen, while summarising is a per-message model call somebody
+    should be asking for.
+
+    ``remaining`` says how many rows are still un-hydrated after this call, so
+    the caller can keep going rather than leaving a long thread half-filled.
 
     Connections are opened per step rather than held across the provider round
     trips -- the same rule as the interactive match route: a request connection
@@ -307,7 +374,12 @@ async def hydrate_thread_emails(
     with get_conn(db_path) as conn:
         rows = pending(conn, thread_id, limit=limit, email_id=email_id, force=force)
         if not rows:
-            return {"requested": 0, "fetched": 0, "unavailable": 0, "summarised": 0}
+            return {
+                "requested": 0,
+                "fetched": 0,
+                "unavailable": 0,
+                "remaining": _count_pending_bodies(conn, thread_id),
+            }
 
         # Owner-scoped, so someone else's integration id is simply not found --
         # this is what keeps hydration from becoming a way to probe another
@@ -327,10 +399,8 @@ async def hydrate_thread_emails(
         }
 
     gate = asyncio.Semaphore(FETCH_CONCURRENCY)
-    summary_gate = _summary_limiter()
 
-    async def one(row: sqlite3.Row) -> tuple[bool, bool]:
-        """Returns ``(fetched, summarised)``."""
+    async def one(row: sqlite3.Row) -> bool:
         provider = providers.get(_integration_id(row) or -1)
         native = _native_id(row)
         fetched: object = None
@@ -359,41 +429,96 @@ async def hydrate_thread_emails(
             # exists for; overwriting Gmail's own snippet would be a regression.
             fill_snippet=not (row["snippet"] or "").strip(),
         )
-        if not body:
-            return False, False
-
-        if not summarise or len(body) < AI_SUMMARY_MIN_CHARS:
-            return True, False
-
-        async with summary_gate:
-            summary, model = await asyncio.to_thread(
-                summarise_sync,
-                db_path,
-                body=body,
-                subject=row["subject"],
-                sender=row["sender"],
-            )
-        if summary and model:
-            await asyncio.to_thread(_store_summary, db_path, row["id"], summary, model)
-            return True, True
-        return True, False
+        return bool(body)
 
     results = await asyncio.gather(*(one(r) for r in rows), return_exceptions=True)
 
-    fetched = summarised = 0
+    fetched = 0
     for result in results:
         if isinstance(result, BaseException):
             log.warning("hydration task failed: %s", result)
             continue
-        got, summed = result
-        fetched += int(got)
-        summarised += int(summed)
+        fetched += int(result)
+
+    with get_conn(db_path) as conn:
+        remaining = _count_pending_bodies(conn, thread_id)
 
     return {
         "requested": len(rows),
         "fetched": fetched,
         "unavailable": len(rows) - fetched,
+        "remaining": remaining,
+    }
+
+
+# --------------------------------------------------------------------------- #
+# Summaries -- opt in, never automatic
+# --------------------------------------------------------------------------- #
+
+
+async def summarise_thread_emails(
+    db_path: Path | str | None,
+    *,
+    thread_id: int,
+    limit: int = SUMMARISE_MAX_PER_CALL,
+    email_ids: list[int] | None = None,
+) -> dict:
+    """Summarise stored bodies that have no summary yet.
+
+    Deliberately not part of hydration. One LLM call per message is real money
+    and real latency, and most messages are read rather than skimmed -- so this
+    runs when somebody asks for it, on the conversation they are looking at.
+
+    Selection is `pending_summaries`, which asks "which rows want a summary?"
+    rather than reusing the body predicate. That distinction is what makes a
+    failed summary retryable: a row with a stored body is invisible to
+    ``pending`` forever, whatever ``force`` is set to.
+    """
+    with get_conn(db_path) as conn:
+        rows = pending_summaries(conn, thread_id, limit=limit, email_ids=email_ids)
+        if not rows:
+            return {
+                "requested": 0,
+                "summarised": 0,
+                "failed": 0,
+                "remaining": _count_pending_summaries(conn, thread_id),
+            }
+
+    gate = _summary_limiter()
+
+    async def one(row: sqlite3.Row) -> bool:
+        async with gate:
+            summary, model = await asyncio.to_thread(
+                summarise_sync,
+                db_path,
+                body=row["body"],
+                subject=row["subject"],
+                sender=row["sender"],
+            )
+        if not (summary and model):
+            # Both columns stay NULL, which is what leaves the row selectable
+            # next time. The body is already stored either way.
+            return False
+        await asyncio.to_thread(_store_summary, db_path, row["id"], summary, model)
+        return True
+
+    results = await asyncio.gather(*(one(r) for r in rows), return_exceptions=True)
+
+    summarised = 0
+    for result in results:
+        if isinstance(result, BaseException):
+            log.warning("summary task failed: %s", result)
+            continue
+        summarised += int(result)
+
+    with get_conn(db_path) as conn:
+        remaining = _count_pending_summaries(conn, thread_id)
+
+    return {
+        "requested": len(rows),
         "summarised": summarised,
+        "failed": len(rows) - summarised,
+        "remaining": remaining,
     }
 
 

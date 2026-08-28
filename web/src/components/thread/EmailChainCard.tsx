@@ -7,7 +7,7 @@
  * common case does not gain a click.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronRight, ExternalLink } from 'lucide-react';
+import { ChevronRight, ExternalLink, Sparkles } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { EmailBody } from '@/components/thread/EmailBody';
 import { MoveToThread } from '@/components/thread/MoveToThread';
@@ -24,7 +24,12 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { emailLink } from '@/lib/links';
 import { fmtRelative } from '@/lib/time';
-import type { Email, EmailBody as EmailBodyPayload, EmailChain } from '@/types/api';
+import type {
+  Email,
+  EmailBody as EmailBodyPayload,
+  EmailChain,
+  EmailSummariseResult,
+} from '@/types/api';
 
 /** Providers whose search cannot see this account's own sent mail. */
 const INBOX_ONLY_PROVIDERS = new Set(['apple']);
@@ -104,10 +109,13 @@ function EmailMessageRow({
   email,
   threadId,
   defaultOpen,
+  hydrating,
 }: {
   email: Email;
   threadId: string;
   defaultOpen: boolean;
+  /** A thread-wide body fetch is in flight, so this row may be about to fill in. */
+  hydrating: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
   const bodyId = useId();
@@ -252,7 +260,7 @@ function EmailMessageRow({
             externalUrl={link}
             onLoad={() => loadBody.mutate()}
             onRetry={() => void body.refetch()}
-            loadPending={loadBody.isPending}
+            loadPending={loadBody.isPending || hydrating}
           />
         ) : null}
       </div>
@@ -263,12 +271,17 @@ function EmailMessageRow({
 export function EmailChainCard({
   chain,
   threadId,
+  hydrating = false,
 }: {
   chain: EmailChain;
   threadId: string;
+  /** The page's bulk body fetch is running. Rows show it rather than offering a
+   *  "Load full message" button for work already under way. */
+  hydrating?: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
   const listId = useId();
+  const queryClient = useQueryClient();
   const markRead = useMarkRead(threadId, 'emails');
   const detach = useDetach(threadId, 'emails');
   const move = useMoveItem(threadId, 'emails');
@@ -278,6 +291,23 @@ export function EmailChainCard({
   const unread = chain.unread_count > 0;
   const preview = newest?.ai_summary || newest?.snippet || null;
   const soleId = single && typeof newest?.id === 'number' ? newest.id : null;
+
+  // Messages on this conversation that have text but no summary yet. Summarising
+  // is one LLM call each, so it is asked for per conversation rather than
+  // happening to the whole thread on open.
+  const summarisableIds = chain.messages
+    .filter((m) => m.has_body && !m.ai_summary && typeof m.id === 'number')
+    .map((m) => m.id as number);
+
+  const summarise = useMutation({
+    mutationFn: () =>
+      api.post<EmailSummariseResult>(`/threads/${threadId}/emails/summarise`, {
+        email_ids: summarisableIds,
+      }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+    },
+  });
 
   function markChainRead() {
     // N mutations invalidating the same keys, which react-query dedupes within a
@@ -358,6 +388,26 @@ export function EmailChainCard({
             Waiting on them
           </Badge>
         ) : null}
+
+        {/* Opt-in, and only offered when there is something to summarise. One
+            LLM call per message, so it says how many rather than hiding the
+            cost behind a verb. */}
+        {summarisableIds.length > 0 ? (
+          <button
+            type="button"
+            onClick={() => summarise.mutate()}
+            disabled={summarise.isPending}
+            className="inline-flex items-center gap-1 text-xs text-primary hover:underline disabled:opacity-50"
+          >
+            <Sparkles className="size-3" aria-hidden />
+            {summarise.isPending
+              ? 'Summarising…'
+              : `Summarise ${summarisableIds.length === 1 ? 'message' : `${summarisableIds.length} messages`}`}
+          </button>
+        ) : null}
+        {summarise.isError ? (
+          <span className="text-xs text-danger-ink">Could not summarise — try again</span>
+        ) : null}
       </div>
 
       {missingOutbound(chain) ? (
@@ -377,6 +427,7 @@ export function EmailChainCard({
                 key={message.message_id}
                 email={message}
                 threadId={threadId}
+                hydrating={hydrating}
                 // The newest message opens with the chain: one click gets you
                 // what you actually wanted.
                 defaultOpen={index === chain.messages.length - 1}

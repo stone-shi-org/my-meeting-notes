@@ -473,12 +473,26 @@ export interface EmailBody {
   ai_summary_model: string | null;
 }
 
-/** POST /threads/{id}/emails/hydrate */
+/**
+ * POST /threads/{id}/emails/hydrate — bodies only, no LLM call.
+ *
+ * `remaining` is how many rows are still un-hydrated afterwards, which is what
+ * lets the client keep going instead of stopping at one screenful.
+ */
 export interface EmailHydrateResult {
   requested: number;
   fetched: number;
   unavailable: number;
+  remaining: number;
+}
+
+/** POST /threads/{id}/emails/summarise — the opt-in LLM pass. */
+export interface EmailSummariseResult {
+  requested: number;
   summarised: number;
+  /** Left eligible, so pressing the button again is a real retry. */
+  failed: number;
+  remaining: number;
 }
 
 /** One conversation on a thread. Newest chain first; messages chronological. */

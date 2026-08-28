@@ -22,6 +22,7 @@ from app.deps import (
 from app.errors import NotFoundError
 from app.logging_config import get_logger
 from app.schemas import (
+    EmailSummariseRequest,
     MeetingOut,
     MoveItemRequest,
     Page,
@@ -421,6 +422,11 @@ async def hydrate_thread_emails(
 ) -> dict:
     """Fetch bodies for this thread's un-hydrated emails, bounded per call.
 
+    Bodies only -- no LLM call happens here. Summaries are opt-in, on the route
+    below, because one model call per message is spend and latency nobody asked
+    for. The response carries ``remaining`` so the SPA can keep going rather than
+    leaving a long thread half-filled.
+
     Deliberately synchronous rather than a queued job: this fires on every thread
     open, so the progress dock would fill with one-second jobs while a 40-minute
     diarization scrolled out of sight. See ``services/email_bodies``.
@@ -431,6 +437,31 @@ async def hydrate_thread_emails(
     # service opens its own short-lived ones -- same rule as the match route.
     return await email_bodies_svc.hydrate_thread_emails(
         None, thread_id=thread_id, user_id=user.id
+    )
+
+
+@router.post("/{thread_id}/emails/summarise")
+async def summarise_thread_emails(
+    thread_id: int,
+    payload: EmailSummariseRequest | None = None,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Summarise stored email bodies that have none yet, on request.
+
+    Scoped to specific ids when the caller names them -- which is how the
+    "Summarise" button on one conversation avoids paying for every other
+    conversation on the thread. Ids are filtered to this thread by the query, so
+    a foreign id simply selects nothing.
+
+    Pressing it again *is* the retry: a failed summary leaves both columns NULL
+    and stays selectable, unlike a failed body fetch which is stamped so a
+    provider that cannot supply one is never re-asked.
+    """
+    thread = threads_svc.get_thread(conn, thread_id)
+    assert_can_access(thread, user)
+    return await email_bodies_svc.summarise_thread_emails(
+        None, thread_id=thread_id, email_ids=(payload.email_ids if payload else None)
     )
 
 

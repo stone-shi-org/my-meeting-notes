@@ -51,11 +51,13 @@ function chain(over: Partial<EmailChain> = {}): EmailChain {
   };
 }
 
-function renderCard(c: EmailChain) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+function renderCard(c: EmailChain, opts: { hydrating?: boolean } = {}) {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+  });
   return render(
     <QueryClientProvider client={client}>
-      <EmailChainCard chain={c} threadId="7" />
+      <EmailChainCard chain={c} threadId="7" hydrating={opts.hydrating} />
     </QueryClientProvider>,
   );
 }
@@ -333,5 +335,98 @@ describe('the iCloud gap', () => {
     expect(
       screen.queryByText(/Outbound messages from this account may be missing/),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe('opt-in summaries', () => {
+  it('offers to summarise only messages that have a body but no summary', async () => {
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, has_body: true, ai_summary: 'already done' }),
+          email({ id: 2, message_id: 'm2', has_body: true, ai_summary: null }),
+          email({ id: 3, message_id: 'm3', has_body: false, ai_summary: null }),
+        ],
+      }),
+    );
+
+    // One eligible: #1 is done, #3 has no text to summarise.
+    expect(screen.getByRole('button', { name: /Summarise message/ })).toBeInTheDocument();
+  });
+
+  it('says how many messages it will summarise', () => {
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 1, has_body: true }),
+          email({ id: 2, message_id: 'm2', has_body: true }),
+        ],
+      }),
+    );
+    expect(screen.getByRole('button', { name: /Summarise 2 messages/ })).toBeInTheDocument();
+  });
+
+  it('posts only the eligible ids, so one conversation does not pay for the thread', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.post).mockResolvedValue({ requested: 1, summarised: 1, failed: 0, remaining: 0 });
+    renderCard(
+      chain({
+        messages: [
+          email({ id: 11, has_body: true, ai_summary: 'done' }),
+          email({ id: 22, message_id: 'm2', has_body: true, ai_summary: null }),
+        ],
+      }),
+    );
+
+    await user.click(screen.getByRole('button', { name: /Summarise/ }));
+
+    expect(api.post).toHaveBeenCalledWith('/threads/7/emails/summarise', {
+      email_ids: [22],
+    });
+  });
+
+  it('offers nothing when every message is already summarised', () => {
+    renderCard(chain({ messages: [email({ has_body: true, ai_summary: 'done' })] }));
+    expect(screen.queryByRole('button', { name: /Summarise/ })).not.toBeInTheDocument();
+  });
+
+  it('offers nothing when no message has a body yet', () => {
+    // Nothing to summarise until hydration has run.
+    renderCard(chain({ messages: [email({ has_body: false })] }));
+    expect(screen.queryByRole('button', { name: /Summarise/ })).not.toBeInTheDocument();
+  });
+
+  it('surfaces a failure so the retry is discoverable', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.post).mockRejectedValue(new Error('llm down'));
+    renderCard(chain({ messages: [email({ has_body: true, ai_summary: null })] }));
+
+    await user.click(screen.getByRole('button', { name: /Summarise/ }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/Could not summarise/)).toBeInTheDocument(),
+    );
+  });
+});
+
+describe('bulk hydration in flight', () => {
+  it('does not offer a Load button for work already under way', async () => {
+    // Otherwise the card invites you to re-request a body the page is fetching.
+    const user = userEvent.setup();
+    renderCard(
+      chain({ messages: [email({ has_body: false, body_fetched_at: null })] }),
+      { hydrating: true },
+    );
+    await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
+
+    expect(screen.getByText(/Fetching the full message/)).toBeInTheDocument();
+  });
+
+  it('offers the Load button once hydration has settled', async () => {
+    const user = userEvent.setup();
+    renderCard(chain({ messages: [email({ has_body: false, body_fetched_at: null })] }));
+    await user.click(screen.getByRole('button', { name: /Atlas cutover/ }));
+
+    expect(screen.getByRole('button', { name: /Load full message/ })).toBeInTheDocument();
   });
 });

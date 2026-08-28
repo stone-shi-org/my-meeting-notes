@@ -652,6 +652,8 @@ def test_hydrating_a_thread_with_no_provider_reports_unavailable(
 
     assert result["requested"] == 1
     assert result["unavailable"] == 1
+    # No LLM leg at all on this route any more.
+    assert "summarised" not in result
 
 
 def test_hydrating_an_empty_thread_is_a_no_op(user_client):
@@ -675,3 +677,82 @@ def test_hydrating_an_email_not_on_this_thread_is_404(user_client, isolated_sett
     assert user_client.post(
         f"/api/threads/{other['id']}/emails/{email_id}/hydrate"
     ).status_code == 404
+
+
+def test_hydrate_reports_what_is_still_pending(user_client, isolated_settings):
+    """So the SPA can keep going rather than leaving a long thread half-filled
+    at 12 bodies per page visit."""
+    t = make_thread(user_client)
+    for i in range(15):
+        _attach_email(isolated_settings.db_path, t["id"], message_id=f"<m{i}>",
+                      mcp_id=f"m{i}", integration_id=5)
+
+    result = user_client.post(f"/api/threads/{t['id']}/emails/hydrate").json()
+
+    from app.services import email_bodies as eb
+    assert result["requested"] == eb.HYDRATE_MAX_PER_CALL
+    # All 12 were stamped as unavailable (no provider), so they drop out of the
+    # pending count -- what is left is the 3 nobody has asked about yet.
+    assert result["remaining"] == 3
+
+
+def test_summarise_is_a_separate_opt_in_route(user_client, isolated_settings):
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], body="word " * 400,
+                  body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    result = user_client.post(f"/api/threads/{t['id']}/emails/summarise").json()
+
+    # One row is eligible; the LLM is not wired in this test, so it fails and
+    # stays eligible -- which is the retryable behaviour we want.
+    assert result["requested"] == 1
+    assert result["summarised"] + result["failed"] == 1
+
+
+def test_summarise_skips_a_body_that_is_too_short(user_client, isolated_settings):
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], body="Short.",
+                  body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    assert user_client.post(
+        f"/api/threads/{t['id']}/emails/summarise"
+    ).json()["requested"] == 0
+
+
+def test_summarise_can_be_scoped_to_named_ids(user_client, isolated_settings):
+    """How one conversation's button avoids paying for the whole thread."""
+    t = make_thread(user_client)
+    keep = _attach_email(isolated_settings.db_path, t["id"], message_id="<a>",
+                         body="word " * 400, body_fetched_at="2026-08-27T10:00:00+00:00")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<b>",
+                  body="word " * 400, body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    result = user_client.post(
+        f"/api/threads/{t['id']}/emails/summarise", json={"email_ids": [keep]}
+    ).json()
+
+    # One requested, not two: that is the scoping. `remaining` still counts both,
+    # because the LLM is not wired here so even the named one stays eligible --
+    # which is the retryable behaviour, not a scoping failure.
+    assert result["requested"] == 1
+    assert result["remaining"] == 2
+
+
+def test_summarise_respects_ownership(user_client, other_user_client):
+    t = make_thread(user_client)
+    assert other_user_client.post(
+        f"/api/threads/{t['id']}/emails/summarise"
+    ).status_code == 404
+
+
+def test_summarise_ignores_an_id_from_another_thread(user_client, isolated_settings):
+    t = make_thread(user_client)
+    other = make_thread(user_client, title="Other")
+    foreign = _attach_email(isolated_settings.db_path, other["id"], body="word " * 400,
+                            body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    result = user_client.post(
+        f"/api/threads/{t['id']}/emails/summarise", json={"email_ids": [foreign]}
+    ).json()
+
+    assert result["requested"] == 0, "the thread_id filter is in the query"

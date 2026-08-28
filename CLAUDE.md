@@ -263,6 +263,19 @@ vs `next_step_generated_at` split. `body IS NULL AND body_fetched_at IS NOT NULL
 re-asked on every page view. The SPA renders that state as terminal with **no retry button**: a retry
 that cannot succeed is a lie.
 
+**Hydration fetches bodies. It never calls the LLM.** Summarising is a separate route
+(`POST /emails/summarise`) behind a per-conversation button, because one model call per message is
+spend and latency nobody asked for on a page load. The bulk body fetch returns `remaining`, and the
+SPA loops until the thread is done — the first version stopped after one screenful per *page visit*,
+so a 40-email thread needed four visits to fill in.
+
+**`pending_summaries` is a second predicate, not a flag on the first.** `pending` requires
+`body IS NULL`, so once a body is stored the row is invisible to it forever — including under
+`force=True`, which only relaxes the `body_fetched_at` half. That silently made a failed or skipped
+summary *permanent*. "Which rows want a summary?" is a different question from "which rows want a
+body?" and needs its own query. Deliberately no attempt-stamp on the summary side, unlike
+`body_fetched_at`: summarising is a button press, so pressing it again *is* the retry.
+
 **Hydration is the threading backfill for Gmail and IMAP only.** `format=full` and
 `FETCH BODY.PEEK[]` both return the whole message, so `get_email_message` can fill the header columns
 too; Zoho's content endpoint and MCP's `fetch_full_email` return content alone. That is why

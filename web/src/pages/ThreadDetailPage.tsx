@@ -379,7 +379,7 @@ export function ThreadDetailPage() {
   // Fetch email bodies once per visit. Called here rather than from the cards:
   // N cards each deciding to hydrate would race and multiply the request the
   // server deliberately bounds to one screenful.
-  useEmailHydration(threadId, timeline.data);
+  const hydration = useEmailHydration(threadId, timeline.data);
 
   const remove = useMutation({
     mutationFn: () => api.del(`/threads/${threadId}`),
@@ -794,6 +794,7 @@ export function ThreadDetailPage() {
                             <EmailChainCard
                               chain={item.payload as EmailChain}
                               threadId={threadId!}
+                              hydrating={hydration.pending}
                             />
                           )}
                           {item.kind === 'note' && (

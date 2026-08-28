@@ -136,6 +136,14 @@ class MoveItemRequest(BaseModel):
     target_thread_id: int
 
 
+class EmailSummariseRequest(BaseModel):
+    email_ids: list[int] | None = Field(default=None, max_length=200)
+    """Which attached emails to summarise. None means "whatever this thread has
+    pending", which is what a thread-level action sends; the per-conversation
+    button names its own messages so it does not pay for the rest of the thread.
+    Bounded because each id is potentially one LLM call."""
+
+
 # --------------------------------------------------------------------------- #
 # Thread groups
 # --------------------------------------------------------------------------- #
