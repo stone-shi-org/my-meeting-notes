@@ -30,6 +30,8 @@ from app.schemas import (
     ThreadUpdateRequest,
     TimelineItem,
 )
+from app.services import email_bodies as email_bodies_svc
+from app.services import email_chains as email_chains_svc
 from app.services import followups as followups_svc
 from app.services import matching as matching_svc
 from app.services import next_step as next_step_svc
@@ -260,6 +262,19 @@ def _row_to_email(row: sqlite3.Row) -> dict:
         "url": _optional(row, "url"),
         "rfc_message_id": _optional(row, "rfc_message_id"),
         "provider": _optional(row, "provider"),
+        "conversation_id": _optional(row, "conversation_id"),
+        "to_recipients": _optional(row, "to_recipients"),
+        "cc_recipients": _optional(row, "cc_recipients"),
+        # NULL means "we genuinely could not tell", and every surface must render
+        # it as unknown rather than picking a side.
+        "direction": _optional(row, "direction"),
+        "ai_summary": _optional(row, "ai_summary"),
+        "ai_summary_model": _optional(row, "ai_summary_model"),
+        # `has_body` and `body_fetched_at` together are the three states the UI
+        # needs: not fetched yet, fetched, or asked-and-this-account-cannot.
+        # The body itself is deliberately absent -- see EMAIL_COLUMNS.
+        "has_body": bool(_optional(row, "has_body")),
+        "body_fetched_at": _optional(row, "body_fetched_at"),
         **_unread(row),
     }
 
@@ -312,10 +327,138 @@ def list_thread_emails(
 ) -> list[dict]:
     assert_can_access(threads_svc.get_thread(conn, thread_id), user)
     rows = conn.execute(
-        "SELECT * FROM thread_emails WHERE thread_id = ? ORDER BY date DESC",
+        f"SELECT {email_bodies_svc.ROW_COLUMNS} FROM thread_emails "
+        "WHERE thread_id = ? ORDER BY date DESC",
         (thread_id,),
     ).fetchall()
     return [_row_to_email(r) for r in rows]
+
+
+def _account_addresses(conn: sqlite3.Connection, user_id: int) -> list[str]:
+    """This user's own connected addresses, for the chain grouper.
+
+    Needed because *every* message in your own mailbox shares you as a
+    participant, so without subtracting these the participant-overlap test would
+    merge every subject-matched thread you are on. `thread_emails.account` is
+    included as well as the integration label: it is what the provider recorded
+    at attach time, and it is the only account identity a row that predates a
+    disconnected integration still has.
+    """
+    rows = conn.execute(
+        "SELECT account_label AS a FROM integrations WHERE user_id = ? "
+        "UNION SELECT DISTINCT account AS a FROM thread_emails te "
+        "JOIN threads t ON t.id = te.thread_id WHERE t.owner_id = ?",
+        (user_id, user_id),
+    ).fetchall()
+    return [r["a"] for r in rows if r["a"]]
+
+
+def _email_chains(
+    conn: sqlite3.Connection, thread_id: int, user: CurrentUser
+) -> list[dict]:
+    """This thread's emails, grouped into conversations.
+
+    Grouping is computed on read rather than stored -- see
+    ``services/email_chains`` for why -- so this is the one place that turns rows
+    into chains, shared by the timeline and the standalone chains route.
+    """
+    rows = conn.execute(
+        f"SELECT {email_bodies_svc.ROW_COLUMNS} FROM thread_emails WHERE thread_id = ?",
+        (thread_id,),
+    ).fetchall()
+    if not rows:
+        return []
+
+    payloads = [_row_to_email(r) for r in rows]
+    chains = email_chains_svc.build_chains(
+        payloads, account_addresses=_account_addresses(conn, user.id)
+    )
+    for chain in chains:
+        # The earliest message's row id: stable as the conversation grows.
+        chain["root_id"] = chain["messages"][0]["id"]
+    return chains
+
+
+@router.get("/{thread_id}/email-chains")
+def list_thread_email_chains(
+    thread_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> list[dict]:
+    """Additive: ``GET /emails`` keeps its flat shape for anything still using it."""
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    return _email_chains(conn, thread_id, user)
+
+
+@router.get("/{thread_id}/emails/{email_id}/body")
+def get_email_body(
+    thread_id: int,
+    email_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """One email's stored body. Its own route because the list routes never
+    carry bodies -- SQLite reads whole rows."""
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    row = email_bodies_svc.body_of(conn, thread_id, email_id)
+    if row is None:
+        raise NotFoundError("Email not attached to this thread")
+    return {
+        "id": row["id"],
+        "body": row["body"],
+        "body_fetched_at": row["body_fetched_at"],
+        "has_body": bool(row["has_body"]),
+        "ai_summary": row["ai_summary"],
+        "ai_summary_model": row["ai_summary_model"],
+    }
+
+
+@router.post("/{thread_id}/emails/hydrate")
+async def hydrate_thread_emails(
+    thread_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Fetch bodies for this thread's un-hydrated emails, bounded per call.
+
+    Deliberately synchronous rather than a queued job: this fires on every thread
+    open, so the progress dock would fill with one-second jobs while a 40-minute
+    diarization scrolled out of sight. See ``services/email_bodies``.
+    """
+    thread = threads_svc.get_thread(conn, thread_id)
+    assert_can_access(thread, user)
+    # The request connection must not be held across provider round trips, so the
+    # service opens its own short-lived ones -- same rule as the match route.
+    return await email_bodies_svc.hydrate_thread_emails(
+        None, thread_id=thread_id, user_id=user.id
+    )
+
+
+@router.post("/{thread_id}/emails/{email_id}/hydrate")
+async def hydrate_one_email(
+    thread_id: int,
+    email_id: int,
+    force: bool = False,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """One email, for expand-on-demand and for retrying a failure.
+
+    ``force`` is what re-asks a provider that previously returned nothing; the
+    ordinary path deliberately never does, or an account with no fetch-by-id tool
+    would be re-asked on every page view.
+    """
+    thread = threads_svc.get_thread(conn, thread_id)
+    assert_can_access(thread, user)
+    if conn.execute(
+        "SELECT 1 FROM thread_emails WHERE id = ? AND thread_id = ?",
+        (email_id, thread_id),
+    ).fetchone() is None:
+        raise NotFoundError("Email not attached to this thread")
+
+    return await email_bodies_svc.hydrate_thread_emails(
+        None, thread_id=thread_id, user_id=user.id, email_id=email_id, force=force
+    )
 
 
 @router.delete("/{thread_id}/emails/{email_id}")
@@ -519,10 +662,20 @@ def thread_timeline(
     user: CurrentUser = Depends(active_user),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> list[TimelineItem]:
-    """Meetings, calendar events, emails and notes merged into one date-sorted list.
+    """Meetings, calendar events, email conversations and notes, date-sorted.
 
-    Merged server-side so the SPA renders one array and "load older" can page
-    coherently across all four kinds.
+    Merged server-side so the SPA renders one array. Emails arrive grouped into
+    conversations (``kind="email_chain"``) rather than one item per message --
+    grouped *here* rather than in the client for two reasons: the client's
+    day-bucketing only compares against the previous group, so it is correct only
+    for a pre-sorted array; and re-sorting client-side would mean a second
+    implementation of ``normalize_timestamp``, which is the rule that stops a
+    legacy RFC 2822 row sorting above every ISO one.
+
+    Note that chains make the timeline non-append-only: a chain moves out of its
+    old day bucket when a reply lands. So the "load older can page coherently"
+    premise no longer holds for emails -- don't add paging without deciding that
+    chains page on ``last_message_at`` alone.
     """
     assert_can_access(threads_svc.get_thread(conn, thread_id), user)
 
@@ -548,11 +701,20 @@ def thread_timeline(
             TimelineItem(kind="event", at=r["start_at"], id=r["id"], payload=_row_to_event(r))
         )
 
-    for r in conn.execute(
-        "SELECT * FROM thread_emails WHERE thread_id = ?", (thread_id,)
-    ):
+    for chain in _email_chains(conn, thread_id, user):
         items.append(
-            TimelineItem(kind="email", at=r["date"], id=r["id"], payload=_row_to_email(r))
+            TimelineItem(
+                kind="email_chain",
+                # The newest message: a conversation sits on the timeline where
+                # it last moved.
+                at=chain["last_message_at"],
+                # The *root* message's row id, not the newest. The SPA keys cards
+                # on `${kind}-${id}`, so tracking the newest message would change
+                # the key when a reply arrives, remounting the card and wiping the
+                # reader's expanded state on a background refetch.
+                id=chain["root_id"],
+                payload=chain,
+            )
         )
 
     # Dated by when it was written, not when it was last edited: a note's place

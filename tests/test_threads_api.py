@@ -298,8 +298,17 @@ def test_timeline_merges_and_sorts_all_three_kinds(user_client, isolated_setting
         )
 
     items = user_client.get(f"/api/threads/{t['id']}/timeline").json()
-    assert [i["kind"] for i in items] == ["meeting", "event", "email"]
+    # Emails arrive grouped: a lone email is a chain of one, so the timeline has
+    # a single email renderer rather than two that could drift apart.
+    assert [i["kind"] for i in items] == ["meeting", "event", "email_chain"]
     assert [i["at"] for i in items] == sorted((i["at"] for i in items), reverse=True)
+
+    chain = items[-1]["payload"]
+    assert chain["message_count"] == 1
+    assert chain["subject"] == "Re: cutover"
+    # Keyed on the root message's row id, not the newest, so a later reply does
+    # not change the React key and remount the card.
+    assert items[-1]["id"] == chain["messages"][0]["id"]
 
 
 def test_timeline_respects_ownership(user_client, other_user_client):
@@ -479,3 +488,190 @@ def test_moving_someone_elses_attachment_is_404(user_client, other_user_client, 
         json={"target_thread_id": t["id"]},
     )
     assert resp.status_code == 404
+
+
+# --------------------------------------------------------------------------- #
+# Email conversations, bodies and hydration
+# --------------------------------------------------------------------------- #
+
+
+def _attach_email(db_path, thread_id, **extra):
+    from app.db import get_conn, utcnow
+
+    values = {
+        "thread_id": thread_id,
+        "message_id": extra.pop("message_id", "<m1>"),
+        "subject": extra.pop("subject", "Re: cutover"),
+        "sender": extra.pop("sender", "priya@acme.com"),
+        "date": extra.pop("date", "2026-03-17T17:42:00+00:00"),
+        "raw_json": "{}",
+        "attached_at": utcnow(),
+        **extra,
+    }
+    with get_conn(db_path) as conn:
+        cur = conn.execute(
+            f"INSERT INTO thread_emails ({', '.join(values)}) "
+            f"VALUES ({', '.join('?' * len(values))})",
+            list(values.values()),
+        )
+        return cur.lastrowid
+
+
+def test_the_email_list_never_returns_a_body(user_client, isolated_settings):
+    """SQLite reads whole rows, so a 32KB body would be pulled off disk by every
+    list load that never displays one."""
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], body="the full text",
+                  body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    [email] = user_client.get(f"/api/threads/{t['id']}/emails").json()
+
+    assert "body" not in email
+    # ...but whether there is one, so the UI can offer to load it.
+    assert email["has_body"] is True
+    assert email["body_fetched_at"] is not None
+
+
+def test_the_email_list_reports_the_new_fields(user_client, isolated_settings):
+    t = make_thread(user_client)
+    _attach_email(
+        isolated_settings.db_path, t["id"],
+        direction="inbound", ai_summary="Priya confirms Friday",
+        ai_summary_model="test-model", conversation_id="google:5:tABC",
+        to_recipients="me@acme.com",
+    )
+
+    [email] = user_client.get(f"/api/threads/{t['id']}/emails").json()
+
+    assert email["direction"] == "inbound"
+    assert email["ai_summary"] == "Priya confirms Friday"
+    assert email["ai_summary_model"] == "test-model"
+    assert email["conversation_id"] == "google:5:tABC"
+    assert email["to_recipients"] == "me@acme.com"
+
+
+def test_an_unhydratable_row_is_distinguishable_from_an_unfetched_one(
+    user_client, isolated_settings
+):
+    """The two states the UI must not conflate: "not asked yet" offers a Load
+    button, "asked and this account cannot" must not, because a retry that
+    cannot succeed is a lie."""
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<untried>")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<tried>",
+                  body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    emails = {e["message_id"]: e for e in
+              user_client.get(f"/api/threads/{t['id']}/emails").json()}
+
+    assert emails["<untried>"]["has_body"] is False
+    assert emails["<untried>"]["body_fetched_at"] is None
+
+    assert emails["<tried>"]["has_body"] is False
+    assert emails["<tried>"]["body_fetched_at"] is not None
+
+
+def test_a_direction_that_was_never_determined_stays_null(user_client, isolated_settings):
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"])
+
+    [email] = user_client.get(f"/api/threads/{t['id']}/emails").json()
+    assert email["direction"] is None
+
+
+def test_the_email_chains_route_groups_a_reply_thread(user_client, isolated_settings):
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<a>",
+                  subject="Atlas cutover", rfc_message_id="<a@x>",
+                  date="2026-03-16T09:00:00+00:00", direction="outbound")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<b>",
+                  subject="Re: Atlas cutover", rfc_message_id="<b@x>",
+                  in_reply_to="<a@x>", date="2026-03-17T09:00:00+00:00",
+                  direction="inbound")
+    _attach_email(isolated_settings.db_path, t["id"], message_id="<z>",
+                  subject="Unrelated vendor invoice", sender="billing@vendor.example",
+                  date="2026-03-01T09:00:00+00:00")
+
+    chains = user_client.get(f"/api/threads/{t['id']}/email-chains").json()
+
+    assert [c["message_count"] for c in chains] == [2, 1], "newest chain first"
+    conversation = chains[0]
+    assert conversation["subject"] == "Atlas cutover"
+    # You wrote, she replied -- so the ball is in your court.
+    assert conversation["last_message_from"] == "them"
+    assert conversation["awaiting"] == "you"
+
+
+def test_the_chains_route_respects_ownership(user_client, other_user_client):
+    t = make_thread(user_client)
+    assert other_user_client.get(
+        f"/api/threads/{t['id']}/email-chains"
+    ).status_code == 404
+
+
+def test_the_body_route_returns_the_stored_text(user_client, isolated_settings):
+    t = make_thread(user_client)
+    email_id = _attach_email(isolated_settings.db_path, t["id"], body="the full text",
+                             body_fetched_at="2026-08-27T10:00:00+00:00")
+
+    body = user_client.get(f"/api/threads/{t['id']}/emails/{email_id}/body").json()
+
+    assert body["body"] == "the full text"
+    assert body["has_body"] is True
+
+
+def test_the_body_route_is_404_for_another_thread(user_client, isolated_settings):
+    """Not 403: a 403 would confirm the row exists."""
+    t = make_thread(user_client)
+    other = make_thread(user_client, title="Other")
+    email_id = _attach_email(isolated_settings.db_path, t["id"], body="mine")
+
+    assert user_client.get(
+        f"/api/threads/{other['id']}/emails/{email_id}/body"
+    ).status_code == 404
+
+
+def test_the_body_route_respects_ownership(user_client, other_user_client, isolated_settings):
+    t = make_thread(user_client)
+    email_id = _attach_email(isolated_settings.db_path, t["id"], body="mine")
+
+    assert other_user_client.get(
+        f"/api/threads/{t['id']}/emails/{email_id}/body"
+    ).status_code == 404
+
+
+def test_hydrating_a_thread_with_no_provider_reports_unavailable(
+    user_client, isolated_settings
+):
+    """No integration row at all, so nothing can supply a body -- and the route
+    must say so rather than erroring."""
+    t = make_thread(user_client)
+    _attach_email(isolated_settings.db_path, t["id"], mcp_id="m1", integration_id=5)
+
+    result = user_client.post(f"/api/threads/{t['id']}/emails/hydrate").json()
+
+    assert result["requested"] == 1
+    assert result["unavailable"] == 1
+
+
+def test_hydrating_an_empty_thread_is_a_no_op(user_client):
+    t = make_thread(user_client)
+    result = user_client.post(f"/api/threads/{t['id']}/emails/hydrate").json()
+    assert result["requested"] == 0
+
+
+def test_hydrate_respects_ownership(user_client, other_user_client):
+    t = make_thread(user_client)
+    assert other_user_client.post(
+        f"/api/threads/{t['id']}/emails/hydrate"
+    ).status_code == 404
+
+
+def test_hydrating_an_email_not_on_this_thread_is_404(user_client, isolated_settings):
+    t = make_thread(user_client)
+    other = make_thread(user_client, title="Other")
+    email_id = _attach_email(isolated_settings.db_path, t["id"])
+
+    assert user_client.post(
+        f"/api/threads/{other['id']}/emails/{email_id}/hydrate"
+    ).status_code == 404

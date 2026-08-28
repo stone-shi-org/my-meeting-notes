@@ -268,7 +268,10 @@ class NoteAppendRequest(BaseModel):
 
 
 class TimelineItem(BaseModel):
-    kind: str  # meeting | event | email | note
+    # meeting | event | email_chain | note. Emails arrive grouped into
+    # conversations, and a lone email is a chain of one -- one renderer rather
+    # than two, so the flat and grouped shapes cannot drift apart.
+    kind: str
     at: str | None
     id: int
     payload: dict
