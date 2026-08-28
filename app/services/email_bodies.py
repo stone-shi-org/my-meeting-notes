@@ -530,3 +530,99 @@ def body_of(conn: sqlite3.Connection, thread_id: int, email_id: int) -> sqlite3.
         "WHERE id = ? AND thread_id = ?",
         (email_id, thread_id),
     ).fetchone()
+
+
+# --------------------------------------------------------------------------- #
+# Account-wide status, for the Settings page
+#
+# Hydration is lazy by design: it fills a thread in as you open it, which means
+# a long-dormant account stays mostly un-backfilled and there is no way to see
+# that from the inside. These two answer "how far along is it?" and "do the rest
+# now", without turning the lazy path into an eager one.
+# --------------------------------------------------------------------------- #
+
+
+def account_stats(conn: sqlite3.Connection, user_id: int) -> dict:
+    """Counts across every email on every thread this user owns.
+
+    One pass with conditional SUMs rather than a query per figure: this runs on a
+    settings page that polls while a backfill is going, and eleven round trips to
+    render one panel would be eleven times the lock contention with the backfill
+    writing underneath it.
+    """
+    row = conn.execute(
+        """
+        SELECT
+          COUNT(*)                                                          AS total,
+          SUM(te.body IS NOT NULL)                                          AS bodies,
+          SUM(te.body IS NULL AND te.body_fetched_at IS NOT NULL)           AS unavailable,
+          SUM(te.body IS NULL AND te.body_fetched_at IS NULL)               AS body_pending,
+          SUM(te.ai_summary IS NOT NULL)                                    AS summaries,
+          SUM(te.body IS NOT NULL AND te.ai_summary IS NULL
+              AND length(te.body) >= ?)                                     AS summary_pending,
+          SUM(te.body IS NOT NULL AND te.ai_summary IS NULL
+              AND length(te.body) <  ?)                                     AS summary_not_needed,
+          SUM(te.direction = 'outbound')                                    AS outbound,
+          SUM(te.direction = 'inbound')                                     AS inbound,
+          SUM(te.direction IS NULL)                                         AS direction_unknown,
+          SUM(te.conversation_id IS NOT NULL)                               AS with_conversation_id,
+          SUM(te.conversation_id IS NULL AND (te.in_reply_to IS NOT NULL
+              OR te.references_json IS NOT NULL))                           AS with_rfc_headers
+        FROM thread_emails te
+        JOIN threads t ON t.id = te.thread_id
+        WHERE t.owner_id = ?
+        """,
+        (AI_SUMMARY_MIN_CHARS, AI_SUMMARY_MIN_CHARS, user_id),
+    ).fetchone()
+
+    stats = {k: (row[k] or 0) for k in row.keys()}
+    # Neither tier: chaining falls back to subject + participants for these, which
+    # is the heuristic tier. Worth surfacing, because it is the number that says
+    # how much of the grouping is a guess rather than a fact.
+    stats["subject_only"] = (
+        stats["total"] - stats["with_conversation_id"] - stats["with_rfc_headers"]
+    )
+    stats["threads_pending"] = conn.execute(
+        """
+        SELECT COUNT(DISTINCT te.thread_id)
+        FROM thread_emails te JOIN threads t ON t.id = te.thread_id
+        WHERE t.owner_id = ? AND te.body IS NULL AND te.body_fetched_at IS NULL
+        """,
+        (user_id,),
+    ).fetchone()[0]
+    return stats
+
+
+def _next_thread(conn: sqlite3.Connection, user_id: int, predicate: str, params: tuple) -> dict | None:
+    """The owned thread with the most outstanding work, and how much it has.
+
+    Most-first rather than oldest-first so the progress bar moves fastest at the
+    start, and so a single huge thread cannot be starved by a queue of small ones.
+    """
+    row = conn.execute(
+        f"""
+        SELECT te.thread_id AS thread_id, t.title AS title, COUNT(*) AS pending
+        FROM thread_emails te JOIN threads t ON t.id = te.thread_id
+        WHERE t.owner_id = ? AND {predicate}
+        GROUP BY te.thread_id, t.title
+        ORDER BY pending DESC, te.thread_id
+        LIMIT 1
+        """,
+        (user_id, *params),
+    ).fetchone()
+    return dict(row) if row is not None else None
+
+
+def next_thread_needing_bodies(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    return _next_thread(
+        conn, user_id, "te.body IS NULL AND te.body_fetched_at IS NULL", ()
+    )
+
+
+def next_thread_needing_summaries(conn: sqlite3.Connection, user_id: int) -> dict | None:
+    return _next_thread(
+        conn,
+        user_id,
+        "te.body IS NOT NULL AND te.ai_summary IS NULL AND length(te.body) >= ?",
+        (AI_SUMMARY_MIN_CHARS,),
+    )

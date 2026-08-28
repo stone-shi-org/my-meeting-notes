@@ -22,6 +22,7 @@ from app.routers import (
     calendar,
     chat,
     dev,
+    email_backfill,
     groups,
     home_chat,
     insight_types,
@@ -173,6 +174,7 @@ def create_app() -> FastAPI:
     app.include_router(calendar.router)
     app.include_router(jobs.router)
     app.include_router(settings_api.router)
+    app.include_router(email_backfill.router)
     app.include_router(chat.router)
     app.include_router(home_chat.router)
     app.include_router(notes.router)

@@ -269,6 +269,19 @@ spend and latency nobody asked for on a page load. The bulk body fetch returns `
 SPA loops until the thread is done — the first version stopped after one screenful per *page visit*,
 so a 40-email thread needed four visits to fill in.
 
+**Settings → Email backfill is where lazy stops being invisible.** `routers/email_backfill.py` +
+`email_bodies.account_stats`. Lazy hydration is the right default and a bad status report: an account
+with two hundred attached emails across threads nobody revisits stays mostly un-backfilled, and
+nothing in the app said so. The page shows the counts and drives the same bounded per-thread calls in
+a loop, so it needs no job and no new state — the existing predicates *are* the resume point.
+
+Two things it must keep getting right. **"Unavailable" is a third bucket, not pending**, or the bar
+can never reach 100% on an account with an MCP or Zoho row in it. And **the summaries bar is measured
+against messages that have a body**, not against every attached email — measured against the total it
+would show "Up to date" beside a two-thirds-full bar the moment the outstanding count hit zero. The
+run loop also stops on a `stalled` batch (work requested, none completed): a failed summary stays
+eligible *by design*, so without that flag the client would loop to its cap re-spending on every pass.
+
 **`pending_summaries` is a second predicate, not a flag on the first.** `pending` requires
 `body IS NULL`, so once a body is stored the row is invisible to it forever — including under
 `force=True`, which only relaxes the `body_fetched_at` half. That silently made a failed or skipped

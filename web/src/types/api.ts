@@ -486,6 +486,45 @@ export interface EmailHydrateResult {
   remaining: number;
 }
 
+/** GET /email-backfill/stats — account-wide, owner-scoped. */
+export interface EmailBackfillStats {
+  total: number;
+  /** Bodies stored. */
+  bodies: number;
+  /** Asked, and the account cannot supply one. A third state, not pending --
+   *  counting it as outstanding leaves the bar permanently short of 100%. */
+  unavailable: number;
+  body_pending: number;
+  summaries: number;
+  summary_pending: number;
+  /** Body too short to be worth a model call. */
+  summary_not_needed: number;
+  outbound: number;
+  inbound: number;
+  direction_unknown: number;
+  with_conversation_id: number;
+  with_rfc_headers: number;
+  /** In neither authoritative tier: grouped by subject + participants, a guess. */
+  subject_only: number;
+  threads_pending: number;
+}
+
+/** POST /email-backfill/bodies | /summaries — one bounded batch. */
+export interface BackfillRunResult {
+  done: boolean;
+  thread_id: number | null;
+  thread_title: string | null;
+  requested?: number;
+  fetched?: number;
+  unavailable?: number;
+  summarised?: number;
+  failed?: number;
+  remaining?: number;
+  /** Work was requested and none completed: the model is failing, and those rows
+   *  stay eligible by design, so the client must stop rather than loop. */
+  stalled?: boolean;
+}
+
 /** POST /threads/{id}/emails/summarise — the opt-in LLM pass. */
 export interface EmailSummariseResult {
   requested: number;
