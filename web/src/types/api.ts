@@ -434,6 +434,74 @@ export interface Email extends Attached {
   /** The real RFC 2822 Message-ID, for the Gmail fallback link. */
   rfc_message_id?: string | null;
   provider?: string | null;
+  /** The provider's own conversation identity, namespaced by integration. */
+  conversation_id?: string | null;
+  to_recipients?: string | null;
+  cc_recipients?: string | null;
+  /**
+   * Who sent it, relative to the account owner. **Null is genuinely unknown**
+   * (the MCP and dev providers supply no signal at all) and must never be
+   * rendered as a guess -- which is why there is no 'unknown' literal here: a
+   * third value would invite `direction === 'unknown' ? 'Unknown' : ...`.
+   */
+  direction?: EmailDirection | null;
+  /** One LLM sentence about the message. Attributed in the UI, never presented
+   *  as the sender's own words. */
+  ai_summary?: string | null;
+  ai_summary_model?: string | null;
+  /** Whether a body is stored. Never the body itself: the list stays light
+   *  because SQLite reads whole rows. */
+  has_body?: boolean;
+  /**
+   * When a body fetch was last *attempted*. Set while `has_body` is false means
+   * the account cannot supply one -- terminal, not "try again".
+   */
+  body_fetched_at?: string | null;
+  integration_id?: number | null;
+}
+
+export type EmailDirection = 'outbound' | 'inbound';
+
+/** GET /threads/{id}/emails/{email_id}/body */
+export interface EmailBody {
+  id: number;
+  /** Plain text: HTML was converted server-side, so no sanitizer runs here. */
+  body: string | null;
+  body_fetched_at: string | null;
+  has_body: boolean;
+  ai_summary: string | null;
+  ai_summary_model: string | null;
+}
+
+/** POST /threads/{id}/emails/hydrate */
+export interface EmailHydrateResult {
+  requested: number;
+  fetched: number;
+  unavailable: number;
+  summarised: number;
+}
+
+/** One conversation on a thread. Newest chain first; messages chronological. */
+export interface EmailChain {
+  /** Stable across hydration and across unrelated attachments -- React keys and
+   *  component state hang off it. */
+  key: string;
+  /** The row id of the *earliest* message, used as the timeline item's id so a
+   *  new reply does not remount the card. */
+  root_id: number;
+  /** How the conversation started, not the newest "Re: Re:" spelling. */
+  subject: string | null;
+  /** Addresses this conversation is *with* -- the account's own are excluded. */
+  participants: string[];
+  message_count: number;
+  first_message_at: string | null;
+  last_message_at: string | null;
+  /** Null when the newest message's direction is unknown. */
+  last_message_from: 'you' | 'them' | null;
+  /** Who the ball is with, or null when it cannot be told. */
+  awaiting: 'you' | 'them' | null;
+  unread_count: number;
+  messages: Email[];
 }
 
 export interface MatchRun {
@@ -502,10 +570,12 @@ export interface Note {
 }
 
 export interface TimelineItem {
-  kind: 'meeting' | 'event' | 'email' | 'note';
+  /** Emails arrive as `email_chain`; a lone email is a chain of one, so there is
+   *  one email renderer rather than two that could drift apart. */
+  kind: 'meeting' | 'event' | 'email_chain' | 'note';
   at: string | null;
   id: number;
-  payload: Meeting | CalendarEvent | Email | Note;
+  payload: Meeting | CalendarEvent | EmailChain | Note;
 }
 
 export interface ChatMessage {

@@ -17,25 +17,33 @@ import {
   RefreshCw,
   Sparkles,
   Trash2,
-  X,
 } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
 import { NoteCard, NoteComposer } from '@/components/notes/NoteCard';
+import { EmailChainCard } from '@/components/thread/EmailChainCard';
 import { MoveToThread } from '@/components/thread/MoveToThread';
 import { ThreadChatPanel } from '@/components/thread/ThreadChatPanel';
+import {
+  DetachButton,
+  MarkReadButton,
+  UnreadDot,
+  useDetach,
+  useMarkRead,
+  useMoveItem,
+} from '@/components/thread/threadItemActions';
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
+import { useEmailHydration } from '@/hooks/useEmailHydration';
 import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
-import { emailLink } from '@/lib/links';
 import { fmtClock, fmtRelative } from '@/lib/time';
 import type {
   CalendarEvent,
-  Email,
+  EmailChain,
   FollowUpResult,
   Meeting,
   NextStepResult,
@@ -51,6 +59,20 @@ const KIND_META: Record<Filter, { label: string; icon: typeof Mic; accent: strin
   event: { label: 'Events', icon: CalendarDays, accent: 'text-entity-event' },
   email: { label: 'Emails', icon: Mail, accent: 'text-entity-email' },
   note: { label: 'Notes', icon: NotebookPen, accent: 'text-entity-note' },
+};
+
+/**
+ * Timeline kind -> filter chip.
+ *
+ * The server sends `email_chain`, but the chip is still "Emails" and `Filter` is
+ * unchanged. Without this indirection `KIND_META[item.kind]` is `undefined` for a
+ * chain and destructuring it takes the whole page down.
+ */
+const FILTER_OF: Record<TimelineItem['kind'], Filter> = {
+  meeting: 'meeting',
+  event: 'event',
+  email_chain: 'email',
+  note: 'note',
 };
 
 function dayKey(iso: string | null): string {
@@ -74,6 +96,26 @@ function timeOf(iso: string | null): string {
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return '';
   return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+}
+
+/** The accessible name of one timeline row. */
+function timelineLabel(item: TimelineItem): string {
+  const kind = KIND_META[FILTER_OF[item.kind]].label.slice(0, -1);
+
+  if (item.kind === 'email_chain') {
+    const chain = item.payload as EmailChain;
+    const bits = [`${kind} conversation`, chain.subject || '(no subject)'];
+    if (chain.message_count > 1) bits.push(`${chain.message_count} messages`);
+    if (chain.unread_count > 0) bits.push(`${chain.unread_count} new`);
+    if (chain.awaiting === 'you') bits.push('awaiting your reply');
+    return bits.join(' · ');
+  }
+
+  const title =
+    (item.payload as Meeting).title ??
+    (item.payload as CalendarEvent).summary ??
+    '';
+  return `${kind} · ${title}`;
 }
 
 function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId: string }) {
@@ -170,111 +212,6 @@ function MeetingTimelineCard({ meeting, threadId }: { meeting: Meeting; threadId
   );
 }
 
-type Kind = 'emails' | 'calendar-events';
-
-/** Detach an attached item from its thread.
- *
- * Only the copy on the thread goes; nothing is touched in the actual calendar or
- * mailbox, which is why this needs no confirmation dialog -- re-running the match
- * offers it straight back. */
-function useDetach(threadId: string, kind: Kind) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.del(`/threads/${threadId}/${kind}/${id}`),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
-      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-    },
-  });
-}
-
-/** Move an attached item onto another thread.
- *
- * Invalidates both ends: the source loses the item from its timeline and
- * counts, the destination gains it -- and `threads` too, since both cards'
- * counts on the home screen are affected. */
-function useMoveItem(threadId: string, kind: Kind) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, targetThreadId }: { id: number; targetThreadId: number }) =>
-      api.post(`/threads/${threadId}/${kind}/${id}/move`, { target_thread_id: targetThreadId }),
-    onSuccess: (_data, { targetThreadId }) => {
-      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
-      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(targetThreadId)] });
-      void queryClient.invalidateQueries({ queryKey: ['thread', String(targetThreadId)] });
-      void queryClient.invalidateQueries({ queryKey: ['threads'] });
-    },
-  });
-}
-
-/** Clear the "arrived while you were away" mark on one item.
- *
- * Fired on the link the user actually clicks, which is the moment the mark stops
- * being true. Harmless to repeat: the backend only stamps a row that is still
- * unread, so a second click is a 200 with nothing changed. */
-function useMarkRead(threadId: string, kind: Kind) {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id: number) => api.post(`/threads/${threadId}/${kind}/${id}/read`),
-    onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
-      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
-      void queryClient.invalidateQueries({ queryKey: ['threads'] });
-    },
-  });
-}
-
-/** The unread mark on one row. Paired with bold text and a "New" label, never
- *  the only thing saying so. */
-function UnreadDot() {
-  return (
-    <span className="mt-1.5 size-2 shrink-0 rounded-full glow-dot" aria-hidden />
-  );
-}
-
-function MarkReadButton({ onClick, pending }: { onClick: () => void; pending: boolean }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={pending}
-      className="shrink-0 rounded px-1.5 py-0.5 text-2xs font-medium text-info-ink hover:bg-info-soft disabled:opacity-50"
-    >
-      Mark read
-    </button>
-  );
-}
-
-function DetachButton({
-  onClick,
-  pending,
-  label,
-}: {
-  onClick: () => void;
-  pending: boolean;
-  label: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      disabled={pending}
-      aria-label={label}
-      title={label}
-      // Revealed on hover, but always reachable by keyboard -- hover-only
-      // controls are invisible to anyone tabbing through.
-      className={cn(
-        'shrink-0 rounded p-1 text-fg-faint transition-opacity',
-        'opacity-0 group-hover:opacity-100 focus-visible:opacity-100',
-        'hover:text-danger-ink disabled:opacity-50',
-      )}
-    >
-      <X className="size-3.5" aria-hidden />
-    </button>
-  );
-}
-
 function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId: string }) {
   const detach = useDetach(threadId, 'calendar-events');
   const move = useMoveItem(threadId, 'calendar-events');
@@ -346,88 +283,6 @@ function EventTimelineCard({ event, threadId }: { event: CalendarEvent; threadId
   );
 }
 
-function EmailTimelineCard({ email, threadId }: { email: Email; threadId: string }) {
-  const href = emailLink(email);
-  const detach = useDetach(threadId, 'emails');
-  const move = useMoveItem(threadId, 'emails');
-  const markRead = useMarkRead(threadId, 'emails');
-  const unread = !!email.unread && typeof email.id === 'number';
-  const read = () => {
-    if (unread) markRead.mutate(email.id as number);
-  };
-
-  return (
-    <div
-      className={cn(
-        'group py-1.5 pl-3',
-        unread && 'rounded-md border-l-2 border-info bg-info-soft/30 pr-3',
-      )}
-    >
-      <div className="flex items-start gap-2">
-        {unread && <UnreadDot />}
-        <p className={cn('min-w-0 flex-1 text-sm', unread && 'font-semibold')}>
-          {href ? (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              onClick={read}
-              className="inline-flex items-center gap-1 text-primary hover:underline"
-            >
-              {email.subject || '(no subject)'}
-              <ExternalLink className="size-3" aria-hidden />
-            </a>
-          ) : (
-            email.subject || '(no subject)'
-          )}
-        </p>
-        {unread && <MarkReadButton onClick={read} pending={markRead.isPending} />}
-        {typeof email.id === 'number' && (
-          <>
-            <MoveToThread
-              currentThreadId={threadId}
-              pending={move.isPending}
-              label="Move this email to another thread"
-              onMove={(targetThreadId) => move.mutate({ id: email.id as number, targetThreadId })}
-            />
-            <DetachButton
-              onClick={() => detach.mutate(email.id as number)}
-              pending={detach.isPending}
-              label="Remove this email from the thread"
-            />
-          </>
-        )}
-      </div>
-      <div className="mt-0.5 flex flex-wrap items-center gap-x-3 text-xs text-fg-subtle">
-        {unread && <span className="font-medium text-info-ink">New · added for you</span>}
-        <span className="truncate">{email.sender}</span>
-        {email.tag && <Badge variant="outline" size="sm">{email.tag}</Badge>}
-        {move.error && (
-          <span className="text-danger-ink">{(move.error as Error).message}</span>
-        )}
-      </div>
-      {email.snippet && (
-        <p
-          className={cn(
-            'mt-1 line-clamp-1 text-xs',
-            // Unread rows read as a headline, so the preview steps up from the
-            // decorative faint token to one that is legal for text.
-            unread ? 'text-fg-muted' : 'text-fg-faint',
-          )}
-        >
-          {email.snippet}
-        </p>
-      )}
-    </div>
-  );
-}
-
-/**
- * Click-to-edit thread title, same interaction as a thread group's rename
- * (ThreadGroups.tsx): a pencil button swaps the heading for an input, Enter or
- * blur commits, Escape reverts. An empty or unchanged draft is a no-op rather
- * than a write -- there is nothing useful to save.
- */
 export function ThreadTitle({ thread }: { thread: Thread }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
@@ -521,6 +376,11 @@ export function ThreadDetailPage() {
     enabled: !!threadId,
   });
 
+  // Fetch email bodies once per visit. Called here rather than from the cards:
+  // N cards each deciding to hydrate would race and multiply the request the
+  // server deliberately bounds to one screenful.
+  useEmailHydration(threadId, timeline.data);
+
   const remove = useMutation({
     mutationFn: () => api.del(`/threads/${threadId}`),
     onSuccess: () => {
@@ -596,7 +456,7 @@ export function ThreadDetailPage() {
   }, [threadId, thread.data?.next_step_stale]);
 
   const grouped = useMemo(() => {
-    const items = (timeline.data ?? []).filter((i) => filters.has(i.kind as Filter));
+    const items = (timeline.data ?? []).filter((i) => filters.has(FILTER_OF[i.kind]));
     const groups: { day: string; items: TimelineItem[] }[] = [];
     for (const item of items) {
       const day = dayKey(item.at);
@@ -889,17 +749,15 @@ export function ThreadDetailPage() {
 
               <ol className="relative ml-[15px] border-l border-border pl-6">
                 {group.items.map((item) => {
-                  const { icon: Icon, accent } = KIND_META[item.kind as Filter];
+                  const { icon: Icon, accent } = KIND_META[FILTER_OF[item.kind]];
                   return (
                     <li
                       key={`${item.kind}-${item.id}`}
                       className="relative py-2"
-                      aria-label={`${KIND_META[item.kind as Filter].label.slice(0, -1)} · ${
-                        (item.payload as Meeting).title ??
-                        (item.payload as CalendarEvent).summary ??
-                        (item.payload as Email).subject ??
-                        ''
-                      }`}
+                      // A screen-reader user decides whether to expand from this
+                      // one string, so it carries the count and unread state --
+                      // otherwise those live only in a badge and a dot.
+                      aria-label={timelineLabel(item)}
                     >
                       <span
                         className="absolute -left-[31px] top-3 grid size-[30px] place-items-center rounded-full border border-border bg-surface"
@@ -909,9 +767,13 @@ export function ThreadDetailPage() {
                       </span>
 
                       <div className="flex items-baseline gap-2">
+                        {/* text-fg-subtle, not text-fg-faint: this is the only
+                            date on the row, so it is content rather than
+                            decoration, and --fg-faint is annotated
+                            DECORATIVE ONLY / fails AA by design. */}
                         <time
                           dateTime={item.at ?? undefined}
-                          className="w-12 shrink-0 font-mono text-xs text-fg-faint"
+                          className="w-12 shrink-0 font-mono text-xs text-fg-subtle"
                         >
                           {timeOf(item.at)}
                         </time>
@@ -928,8 +790,11 @@ export function ThreadDetailPage() {
                               threadId={threadId!}
                             />
                           )}
-                          {item.kind === 'email' && (
-                            <EmailTimelineCard email={item.payload as Email} threadId={threadId!} />
+                          {item.kind === 'email_chain' && (
+                            <EmailChainCard
+                              chain={item.payload as EmailChain}
+                              threadId={threadId!}
+                            />
                           )}
                           {item.kind === 'note' && (
                             <NoteCard note={item.payload as Note} scope={noteScope} />
