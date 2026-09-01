@@ -20,6 +20,19 @@ Deliberately its own small module rather than reusing diarize.py:
 - One error class per service (``TranscribeError`` vs ``DiarizationError``)
   keeps a failure pointing at the Settings panel that's actually misconfigured
   -- the two have separate URL/model/api-key fields and separate Test buttons.
+
+A "live-stt" backend (confirmed shape:
+``{"task", "language", "duration", "text", "words"}``) is an
+OpenAI-Whisper-API ``verbose_json`` variant with word-level timestamps
+instead of segments -- there is no ``segments`` key at all.
+``pipeline._combine_diarization_and_transcript`` only ever reads
+``start``/``end``/``text`` at segment granularity (it aligns against
+diarization turns by timestamp overlap, not word-by-word -- see its own
+docstring), so ``_segments_from_words`` below reconstructs that shape by
+grouping consecutive words into segments at >1s gaps, rather than emitting
+one segment per word: the latter would still be *correct* input to the
+overlap match, but it would also make every single word its own line in the
+rendered transcript, each carrying its own speaker header.
 """
 
 from __future__ import annotations
@@ -53,6 +66,55 @@ def build_form(model: str) -> dict[str, str]:
 
 def _headers(api_key: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"} if api_key else {}
+
+
+# Gap between two words' timestamps past which they belong to different
+# segments rather than the same run-on sentence. Not tuned against a real
+# live-stt transcript (none was available); chosen to be well above normal
+# inter-word pause and well below "the speaker stopped talking".
+_WORD_GAP_SEC = 1.0
+
+
+def _segments_from_words(words: list[dict], *, gap_sec: float = _WORD_GAP_SEC) -> list[dict]:
+    """Reconstruct segment-level ``{start, end, text}`` turns from a
+    word-timestamp list (see module docstring for why segment, not word,
+    granularity is what the rest of the pipeline needs).
+
+    Each word is assumed shaped ``{"word": ..., "start": ..., "end": ...}``,
+    the OpenAI Whisper API's own ``verbose_json`` word shape -- unconfirmed
+    against the actual live-stt service, so ``"text"`` is accepted as a
+    fallback key in case that assumption is wrong.
+    """
+    segments: list[dict] = []
+    bucket: list[dict] = []
+    prev_end: float | None = None
+
+    for w in words:
+        word_text = ((w.get("word") if w.get("word") is not None else w.get("text")) or "").strip()
+        if not word_text:
+            continue
+        start = w.get("start")
+        if bucket and prev_end is not None and start is not None and (start - prev_end) > gap_sec:
+            segments.append(_flush_bucket(bucket, len(segments)))
+            bucket = []
+        bucket.append(w)
+        prev_end = w.get("end")
+
+    if bucket:
+        segments.append(_flush_bucket(bucket, len(segments)))
+    return segments
+
+
+def _flush_bucket(bucket: list[dict], next_id: int) -> dict:
+    text = " ".join(
+        ((w.get("word") if w.get("word") is not None else w.get("text")) or "").strip()
+        for w in bucket
+    ).strip()
+    start = bucket[0].get("start") or 0.0
+    end = bucket[-1].get("end")
+    if end is None:
+        end = bucket[-1].get("start") or start
+    return {"id": next_id, "start": start, "end": end, "text": text}
 
 
 def transcribe_sync(
@@ -101,6 +163,16 @@ def transcribe_sync(
         raise TranscribeError(
             f"Transcription service returned non-JSON: {response.text[:200]}"
         ) from exc
+
+    if (
+        isinstance(payload, dict)
+        and "segments" not in payload
+        and isinstance(payload.get("words"), list)
+    ):
+        # live-stt's verbose_json variant: word-level timestamps, no
+        # `segments` key at all. Additive normalization -- every other shape
+        # falls through to the check below unchanged.
+        payload = {**payload, "segments": _segments_from_words(payload["words"])}
 
     if not isinstance(payload, dict) or "segments" not in payload:
         raise TranscribeError(

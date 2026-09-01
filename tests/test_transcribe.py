@@ -30,6 +30,24 @@ WHISPER_SAMPLE = {
     ],
 }
 
+# The "live-stt" service's response: an OpenAI-Whisper-API verbose_json
+# variant with word-level timestamps and no "segments" key at all. The two
+# words after the gap ("How"/"are"/"you?" start at 2.5, 1.9s after "there."
+# ends at 0.6) should land in a second reconstructed segment.
+LIVE_STT_SAMPLE = {
+    "task": "transcribe",
+    "language": "english",
+    "duration": 3.2,
+    "text": "Hello there. How are you?",
+    "words": [
+        {"word": "Hello", "start": 0.0, "end": 0.3},
+        {"word": "there.", "start": 0.3, "end": 0.6},
+        {"word": "How", "start": 2.5, "end": 2.7},
+        {"word": "are", "start": 2.7, "end": 2.9},
+        {"word": "you?", "start": 2.9, "end": 3.2},
+    ],
+}
+
 
 @pytest.fixture
 def wav(tmp_path):
@@ -107,6 +125,53 @@ class TestSuccess:
         )
         payload, _ = _call(wav)
         assert payload["segments"] == []
+
+
+class TestLiveSttWordShape:
+    """live-stt returns word-level timestamps and no `segments` key at all
+    (see the module docstring). transcribe_sync must normalize that into the
+    same segment-level shape every other backend already returns, since
+    that's the only granularity pipeline._combine_diarization_and_transcript
+    reads."""
+
+    @respx.mock
+    def test_words_only_response_is_not_unexpected_shape(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json=LIVE_STT_SAMPLE))
+        payload, _ = _call(wav)
+        assert "segments" in payload
+
+    @respx.mock
+    def test_words_are_grouped_into_segments_at_the_time_gap(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json=LIVE_STT_SAMPLE))
+        payload, _ = _call(wav)
+
+        assert len(payload["segments"]) == 2
+        first, second = payload["segments"]
+        assert first["text"] == "Hello there."
+        assert first["start"] == 0.0
+        assert first["end"] == 0.6
+        assert second["text"] == "How are you?"
+        assert second["start"] == 2.5
+        assert second["end"] == 3.2
+
+    @respx.mock
+    def test_original_words_and_text_are_preserved(self, wav):
+        respx.post(URL).mock(return_value=httpx.Response(200, json=LIVE_STT_SAMPLE))
+        payload, _ = _call(wav)
+        assert payload["words"] == LIVE_STT_SAMPLE["words"]
+        assert payload["text"] == LIVE_STT_SAMPLE["text"]
+
+    @respx.mock
+    def test_a_response_with_segments_already_is_never_touched(self, wav):
+        """A backend that already returns segments must not be re-derived
+        from `words`, even if it also happens to include one."""
+        shaped = {**WHISPER_SAMPLE, "words": [{"word": "ignored", "start": 0.0, "end": 0.1}]}
+        respx.post(URL).mock(return_value=httpx.Response(200, json=shaped))
+        payload, _ = _call(wav)
+        assert payload["segments"] == WHISPER_SAMPLE["segments"]
+
+    def test_empty_words_list_yields_no_segments(self):
+        assert transcribe_svc._segments_from_words([]) == []
 
 
 class TestFailures:
