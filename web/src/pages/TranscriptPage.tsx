@@ -1,7 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   CheckSquare,
-  Download,
   Eye,
   EyeOff,
   FileText,
@@ -17,11 +16,13 @@ import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { Button } from '@/components/ui/Button';
 import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
+import { JobErrorPanel } from '@/components/jobs/JobProgress';
 import { PlayerBar } from '@/components/transcript/PlayerBar';
 import { TranscriptChatPanel } from '@/components/transcript/TranscriptChatPanel';
 import { TranscriptView } from '@/components/transcript/TranscriptView';
 import { MatchPanel } from '@/components/match/MatchPanel';
 import { DeleteMeetingButton } from '@/components/meetings/DeleteMeetingButton';
+import { DownloadAudioButton } from '@/components/meetings/DownloadAudioButton';
 import { MeetingNotesCard } from '@/components/notes/MeetingNotesCard';
 import { AddRecordingCard } from '@/components/record/AddRecordingCard';
 import { PlayerProvider, usePlayer } from '@/player/PlayerProvider';
@@ -33,7 +34,15 @@ import { renderMarkdown } from '@/lib/markdown';
 import { initials, speakerVars } from '@/lib/speakerColors';
 import { useGenerateSummary } from '@/hooks/useGenerateSummary';
 import { useRediarize } from '@/hooks/useRediarize';
-import { ApiError, type ActionItem, type Meeting, type Summary, type Transcript } from '@/types/api';
+import { watchJob } from '@/hooks/useJob';
+import {
+  ApiError,
+  type ActionItem,
+  type Job,
+  type Meeting,
+  type Summary,
+  type Transcript,
+} from '@/types/api';
 
 const TRANSCRIPT_PREF_KEY = 'mmn.showTranscript';
 
@@ -656,11 +665,89 @@ function RedoTranscriptStatus({ rediarize }: { rediarize: ReturnType<typeof useR
   return null;
 }
 
+/**
+ * Stands in for the transcript when there isn't one yet: still processing,
+ * never recorded, or -- the gap this exists to close -- a recording sitting
+ * there with the ingest job that was supposed to turn it into a transcript
+ * having failed. That last case used to be a dead end: no way to hear the
+ * recording, no way to see why the run stopped, no way to try again short of
+ * re-uploading over it. The meeting itself carries no job id, so the job
+ * that failed is found by asking the job list rather than reading a field
+ * off `meeting`.
+ */
+export function NoTranscriptPanel({ meeting: m }: { meeting: Meeting }) {
+  const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const processing = m.status === 'processing';
+
+  const ingestJob = useQuery({
+    queryKey: ['jobs', 'ingest', m.id],
+    queryFn: () =>
+      api.get<{ items: Job[] }>('/jobs', { meeting_id: m.id, type: 'ingest', page_size: 1 }),
+    enabled: !processing,
+  });
+  const failedJob = ingestJob.data?.items.find((j) => j.status === 'failed');
+
+  const retry = useMutation({
+    mutationFn: (jobId: string) => api.post(`/jobs/${jobId}/retry`),
+    onSuccess: (_data, jobId) => {
+      watchJob(jobId);
+      navigate(`/jobs/${jobId}`);
+    },
+  });
+
+  return (
+    <div className="mx-auto max-w-2xl space-y-4">
+      <Link to={`/threads/${m.thread_id}`} className="text-sm text-fg-subtle hover:text-fg">
+        ← Back to thread
+      </Link>
+      <Card className="p-6">
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h1 className="font-display text-xl font-semibold">{m.title}</h1>
+            <p className="mt-2 text-sm text-fg-subtle">
+              {processing
+                ? 'This recording is still being processed.'
+                : m.has_audio
+                  ? 'This meeting has a recording but no transcript — the last run did not finish.'
+                  : 'No recording yet. Add one below and it will be transcribed and summarized.'}
+            </p>
+          </div>
+          <div className="flex shrink-0 items-center gap-2">
+            {m.has_audio && <DownloadAudioButton meeting={m} />}
+            <DeleteMeetingButton
+              meeting={m}
+              onDeleted={() => {
+                void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(m.thread_id)] });
+                void queryClient.invalidateQueries({ queryKey: ['threads'] });
+                navigate(`/threads/${m.thread_id}`, { replace: true });
+              }}
+            />
+          </div>
+        </div>
+      </Card>
+
+      {/* Names why the run stopped and offers the retry the job page
+          already has -- without this, the only way back in was navigating
+          to a job id nothing on this page linked to. */}
+      {failedJob && (
+        <JobErrorPanel
+          job={failedJob}
+          onRetry={() => retry.mutate(failedJob.id)}
+          retrying={retry.isPending}
+        />
+      )}
+
+      {/* The dead end this used to be: a meeting created from a calendar
+          event had no way to ever receive its audio. */}
+      {!processing && <AddRecordingCard meeting={m} />}
+    </div>
+  );
+}
+
 export function TranscriptPage() {
   const { meetingId } = useParams<{ meetingId: string }>();
   const speakersRef = useRef<HTMLDivElement>(null);
-  const navigate = useNavigate();
-  const queryClient = useQueryClient();
 
   // Collapsed by default -- the transcript is reference material, not the
   // headline. Remembered so anyone who does read along isn't re-opening it
@@ -716,40 +803,7 @@ export function TranscriptPage() {
   const m = meeting.data;
 
   if (!m.has_transcript) {
-    const processing = m.status === 'processing';
-    return (
-      <div className="mx-auto max-w-2xl space-y-4">
-        <Link to={`/threads/${m.thread_id}`} className="text-sm text-fg-subtle hover:text-fg">
-          ← Back to thread
-        </Link>
-        <Card className="p-6">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div className="min-w-0">
-              <h1 className="font-display text-xl font-semibold">{m.title}</h1>
-              <p className="mt-2 text-sm text-fg-subtle">
-                {processing
-                  ? 'This recording is still being processed.'
-                  : m.has_audio
-                    ? 'This meeting has a recording but no transcript — the last run did not finish.'
-                    : 'No recording yet. Add one below and it will be transcribed and summarized.'}
-              </p>
-            </div>
-            <DeleteMeetingButton
-              meeting={m}
-              onDeleted={() => {
-                void queryClient.invalidateQueries({ queryKey: ['thread-timeline', String(m.thread_id)] });
-                void queryClient.invalidateQueries({ queryKey: ['threads'] });
-                navigate(`/threads/${m.thread_id}`, { replace: true });
-              }}
-            />
-          </div>
-        </Card>
-
-        {/* The dead end this used to be: a meeting created from a calendar
-            event had no way to ever receive its audio. */}
-        {!processing && <AddRecordingCard meeting={m} />}
-      </div>
-    );
+    return <NoTranscriptPanel meeting={m} />;
   }
 
   return (
@@ -808,30 +862,7 @@ export function TranscriptPage() {
               <option value="json">JSON</option>
             </Select>
 
-            {m.audio_converted ? (
-              <Select
-                className="w-auto"
-                aria-label="Download audio"
-                defaultValue=""
-                onChange={(e) => {
-                  if (!e.target.value) return;
-                  window.open(`/api/meetings/${m.id}/audio?original=${e.target.value}`, '_blank');
-                  e.target.value = '';
-                }}
-              >
-                <option value="">Download audio…</option>
-                <option value="false">Converted (16kHz mono)</option>
-                <option value="true">Original recording</option>
-              </Select>
-            ) : (
-              <Button
-                variant="ghost"
-                onClick={() => window.open(`/api/meetings/${m.id}/audio`, '_blank')}
-              >
-                <Download />
-                Download audio
-              </Button>
-            )}
+            <DownloadAudioButton meeting={m} />
           </div>
 
           <RedoTranscriptStatus rediarize={rediarize} />
