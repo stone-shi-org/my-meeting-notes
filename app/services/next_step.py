@@ -129,6 +129,7 @@ def _payload(conn: sqlite3.Connection, thread_id: int) -> dict:
         "recent_notes": [
             {**dict(r), "body": (r["body"] or "")[:NOTE_BODY_LIMIT]} for r in notes
         ],
+        "current_next_step": thread["next_step"],
     }
 
 
@@ -208,9 +209,19 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
 
     try:
         parsed, _, _ = llm_svc.chat_json(config, system, user)
-        next_step = (parsed.get("next_step") or "").strip()
-        if not next_step:
-            raise llm_svc.LLMError("Model returned an empty next step")
+        raw_next_step = parsed.get("next_step")
+        if raw_next_step is None:
+            # Model indicated current_next_step is still valid and unchanged
+            if payload["current_next_step"]:
+                next_step = payload["current_next_step"]
+                is_changed = False
+            else:
+                raise llm_svc.LLMError("Model returned null next step for thread without an existing suggestion")
+        else:
+            next_step = str(raw_next_step).strip()
+            if not next_step:
+                raise llm_svc.LLMError("Model returned an empty next step")
+            is_changed = (next_step != payload["current_next_step"])
     except Exception as exc:
         log.warning("next-step generation failed for thread %s: %s", thread_id, exc)
         # Stamped even on failure, unlike next_step_generated_at -- this is
@@ -236,9 +247,10 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
             (next_step, generated_at, generated_at, fingerprint, config.model, thread_id),
         )
 
-    telegram_svc.notify_next_step(
-        db_path, thread_id=thread_id, thread_title=payload["thread_title"], next_step=next_step
-    )
+    if is_changed:
+        telegram_svc.notify_next_step(
+            db_path, thread_id=thread_id, thread_title=payload["thread_title"], next_step=next_step
+        )
 
     return {
         "next_step": next_step,

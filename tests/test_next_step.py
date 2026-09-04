@@ -353,7 +353,49 @@ class TestTelegramNotification:
         )
         refresh(user_client, meeting["thread_id"])
 
-        assert calls == []
+    def test_an_unchanged_next_step_does_not_trigger_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        thread_id = meeting["thread_id"]
+        refresh(user_client, thread_id)
+
+        # Second refresh where model returns null indicating no change
+        mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": json.dumps({"next_step": None})}}]},
+            )
+        )
+        calls = []
+        monkeypatch.setattr(
+            "app.services.next_step.telegram_svc.notify_next_step",
+            lambda db_path, **kw: calls.append(kw),
+        )
+        res = refresh(user_client, thread_id)
+        assert res["next_step"] == NEXT_STEP
+        assert len(calls) == 0
+
+    def test_an_identical_next_step_string_does_not_trigger_notification(
+        self, user_client, meeting, mock_llm, monkeypatch
+    ):
+        thread_id = meeting["thread_id"]
+        refresh(user_client, thread_id)
+
+        # Second refresh where model returns the exact same string
+        mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": json.dumps({"next_step": NEXT_STEP})}}]},
+            )
+        )
+        calls = []
+        monkeypatch.setattr(
+            "app.services.next_step.telegram_svc.notify_next_step",
+            lambda db_path, **kw: calls.append(kw),
+        )
+        res = refresh(user_client, thread_id)
+        assert res["next_step"] == NEXT_STEP
+        assert len(calls) == 0
 
 
 @pytest.mark.asyncio
@@ -507,3 +549,20 @@ class TestChainAwarePayload:
         chains = self._payload_sent(mock_llm)["email_chains"]
         assert len(chains) == next_step_svc.RECENT_EMAIL_CHAINS
         assert all(c["message_count"] >= 1 for c in chains)
+
+    def test_the_payload_carries_current_next_step(
+        self, user_client, meeting, mock_llm
+    ):
+        tid = meeting["thread_id"]
+        # Initial refresh to establish a current_next_step
+        refresh(user_client, tid)
+
+        # Invalidate fingerprint by adding a note
+        user_client.post(
+            f"/api/threads/{tid}/notes",
+            json={"title": "Some Note", "body": "Additional context"},
+        )
+
+        refresh(user_client, tid)
+        payload = self._payload_sent(mock_llm)
+        assert payload["current_next_step"] == NEXT_STEP
