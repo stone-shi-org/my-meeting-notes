@@ -641,6 +641,17 @@ now (previously env-only) — read via `effective()`, not `settings.diarize_chun
 run must still leave its report on disk, or Bamboo says "no test results" instead of naming the
 failure. `test-reports/` is wiped first, because Bamboo fails builds on stale result files.
 
+**Backend pytest runs under `pytest-xdist` (`-n auto`) with `hashlib.scrypt` patched down to a
+trivial cost.** `tests/conftest.py`'s `_cheap_scrypt` autouse fixture forces `n=2,r=1,p=1` on every
+real scrypt call the suite makes; `app/security.py` itself is untouched and still records the real
+`n=16384,...` cost in `password_params`, so `test_params_are_recorded_so_cost_can_be_raised_later`
+and the rest of `test_security.py` see production values. Without it, every `admin_client`/
+`user_client` fixture build pays a real login (and, for admin, a real password change) at production
+cost, and most of the ~1190 backend tests depend on one of those fixtures — `--durations` showed the
+time sitting almost entirely in fixture "setup", not test bodies. xdist is safe here because every
+test already gets its own `tmp_path` and sqlite db (`isolated_settings`); together the two cut a
+~1490-test run from ~5 minutes to under 30 seconds on a 6-core box. (MMN-2.)
+
 Everything network-facing is faked at two seams: `respx` for `httpx` (diarizer, LLM, Google, and
 CalDAV once it lands — respx routes arbitrary methods, which is why CalDAV must go over httpx rather
 than the `requests`-based `caldav` package) and a monkeypatched provider. The suite runs offline.
