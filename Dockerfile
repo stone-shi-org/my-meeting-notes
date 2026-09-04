@@ -70,5 +70,5 @@ COPY app/ ./app/
 COPY tests/ ./tests/
 RUN mkdir -p /app/test-reports
 
-CMD ["python", "-m", "pytest", "tests/", "-v", \
+CMD ["python", "-m", "pytest", "tests/", "-v", "-n", "auto", \
      "--junitxml=/app/test-reports/backend-results.xml", "--junit-prefix=backend"]

@@ -30,6 +30,10 @@ websockets>=13.0
 pytest>=7.0.0
 pytest-asyncio>=0.23.0
 pytest-mock>=3.10.0
+# Runs tests across worker processes. Safe here because every test gets its
+# own tmp data dir + sqlite db (tests/conftest.py's isolated_settings) and
+# there is no other shared mutable state across tests.
+pytest-xdist>=3.5.0
 respx>=0.21.0
 # gRPC client for live-stt streaming ASR service (app/routers/live_caption.py)
 grpcio>=1.60.0

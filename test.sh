@@ -75,6 +75,7 @@ run_backend_native() {
     setup_venv || return 1
     "$VENV_PYTHON" -m pytest tests/ -v \
         -m "not integration" \
+        -n auto \
         --junitxml="$REPORT_DIR/backend-results.xml" \
         --junit-prefix=backend \
         "${PYTEST_ARGS[@]}"

@@ -6,6 +6,7 @@ around each test so environment monkeypatching actually takes effect.
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -16,6 +17,31 @@ from app.db import get_conn, init_db
 from app.services import secretstore
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _cheap_scrypt(monkeypatch):
+    """Make every password hash/verify in the suite fast.
+
+    app/security.py deliberately hashes with production-cost scrypt params
+    (n=16384,r=8,p=1 -- tens of ms per call), and MMN-2's timeout traced back
+    to that: the client -> admin_client/user_client fixture chain logs in
+    (a verify) and, for admin, changes the bootstrap password (a hash) every
+    time it is built, and well over half the suite depends on one of those
+    fixtures. Patching the actual KDF primitive down to a trivial cost -- n
+    must stay a power of two above 1 -- exercises the exact same code path
+    (hash then verify) at a fraction of the cost. Only the real work changes:
+    `_derive` still records `params.encode()` (the real n=16384,... string)
+    in password_params, so tests asserting that value -- e.g.
+    test_params_are_recorded_so_cost_can_be_raised_later in test_security.py
+    -- are unaffected. Nothing here touches production code.
+    """
+    real_scrypt = hashlib.scrypt
+
+    def fast_scrypt(password, *, salt, n, r, p, dklen, maxmem=0):
+        return real_scrypt(password, salt=salt, n=2, r=1, p=1, dklen=dklen, maxmem=maxmem)
+
+    monkeypatch.setattr(hashlib, "scrypt", fast_scrypt)
 
 
 @pytest.fixture(autouse=True)
