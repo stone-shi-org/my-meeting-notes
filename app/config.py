@@ -68,6 +68,20 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "auto_match_threshold": ("float", False),
     "auto_match_max_threads_per_cycle": ("int", False),
     "auto_match_idle_days": ("int", False),
+    # Periodic, unattended email backfill (bodies + summaries) across every
+    # user's own threads -- the same "off by default, spends quota on its own
+    # schedule" reasoning as auto_match_enabled above. Global and admin-gated
+    # like every other app_settings row; the sweep itself still only ever acts
+    # on each user's own threads and connected accounts, exactly as the manual
+    # /api/email-backfill/* routes already do per request.
+    "auto_backfill_enabled": ("bool", False),
+    "auto_backfill_interval_minutes": ("int", False),
+    # Bounds one sweep, same role as auto_match_max_threads_per_cycle: whatever
+    # is skipped is oldest-swept-first next time, so nobody is starved.
+    "auto_backfill_max_users_per_cycle": ("int", False),
+    # Bounds how many bounded bodies/summaries batches one user's backfill
+    # runs per cycle, so one huge backlog cannot monopolize a tick.
+    "auto_backfill_max_rounds_per_user": ("int", False),
     "page_size_default": ("int", False),
     # Where this app is reachable, used to build OAuth redirect URIs. Google
     # only accepts https:// or http://localhost, so a LAN address here will be
@@ -302,6 +316,18 @@ class Settings(BaseSettings):
     # How often the loop wakes to look for due threads. Process-lifetime, not
     # runtime-editable: it only bounds the granularity of the interval above.
     auto_match_tick_seconds: int = 60
+
+    # --- automatic email backfill --------------------------------------------
+    auto_backfill_enabled: bool = False
+    # Per account, not global -- 120 means each account's backlog is revisited
+    # every two hours.
+    auto_backfill_interval_minutes: int = 120
+    auto_backfill_max_users_per_cycle: int = 20
+    auto_backfill_max_rounds_per_user: int = 20
+    # Process-lifetime, not runtime-editable -- same split as
+    # auto_match_tick_seconds above, it only bounds the granularity of the
+    # interval setting.
+    auto_backfill_tick_seconds: int = 60
 
     # --- jobs ---------------------------------------------------------------
     job_concurrency: int = 2

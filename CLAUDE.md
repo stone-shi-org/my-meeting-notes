@@ -287,6 +287,26 @@ with two hundred attached emails across threads nobody revisits stays mostly un-
 nothing in the app said so. The page shows the counts and drives the same bounded per-thread calls in
 a loop, so it needs no job and no new state — the existing predicates *are* the resume point.
 
+**Automatic backfill (`jobs/email_backfill_scheduler.py`) is a second, opt-in ticker over that same
+button.** Same shape as `AutoMatchScheduler` (see Automatic follow-ups below): one always-started
+`asyncio.Task`, gated on `auto_backfill_enabled` re-read every cycle, off by default. It operates at
+*user* granularity, not thread granularity — `due_users()` sweeps every active user whose
+`users.auto_backfill_at` is NULL or older than `auto_backfill_interval_minutes`, oldest-first, capped
+at `auto_backfill_max_users_per_cycle` per cycle — because the manual routes it drives
+(`next_thread_needing_bodies`/`hydrate_thread_emails` and their summary equivalents) already operate
+per-user, across all of that user's threads at once. One consequence worth remembering in a test: the
+bootstrap admin is itself always a due candidate (active, never swept, no threads of its own), so it
+counts toward `swept` as a true no-op on every cycle. Per user, one bounded round alternates a bodies
+batch and a summaries batch — the exact same two calls the manual buttons already make — until both
+report nothing left, a batch makes no progress, a summary batch `stalled`s (the same "LLM is down,
+attach/summarise nothing" interlock as the follow-up sweep's `rank_sync` returning `None`), or
+`auto_backfill_max_rounds_per_user` is hit. `auto_backfill_at` is stamped **even on failure**, same
+rule as `threads.auto_match_at`: a broken account must not turn into a request storm retried every
+tick. No job queue, for the identical reasons hydration itself already avoids one. The Settings UI
+lives on the same `/settings/email-backfill` page as the manual buttons — a `SettingsForm` block
+(exported from `SettingsPage.tsx` for this reuse) identical in shape to "Automatic follow-ups" on the
+Matching tab, admin-gated the same way since these are global `app_settings` rows, not per-user.
+
 Two things it must keep getting right. **"Unavailable" is a third bucket, not pending**, or the bar
 can never reach 100% on an account with an MCP or Zoho row in it. And **the summaries bar is measured
 against messages that have a body**, not against every attached email — measured against the total it

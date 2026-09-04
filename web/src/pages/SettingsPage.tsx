@@ -117,7 +117,7 @@ interface TestResult {
   note?: string | null;
 }
 
-function SettingsForm({
+export function SettingsForm({
   title,
   description,
   keys,

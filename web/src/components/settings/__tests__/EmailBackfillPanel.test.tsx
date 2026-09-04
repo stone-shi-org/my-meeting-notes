@@ -3,13 +3,20 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EmailBackfillPanel } from '../EmailBackfillPanel';
-import type { EmailBackfillStats } from '@/types/api';
+import type { EmailBackfillStats, SettingEntry } from '@/types/api';
 
 vi.mock('@/lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), del: vi.fn(), patch: vi.fn(), put: vi.fn() },
 }));
 
+// The "Automatic backfill" card is a `SettingsForm` (the same component the
+// Matching tab's "Automatic follow-ups" card uses), which reads `isAdmin`
+// from useAuth. Nothing else in this file needs a real AuthProvider, so the
+// hook is mocked directly rather than standing up the provider tree.
+vi.mock('@/hooks/useAuth', () => ({ useAuth: vi.fn() }));
+
 const { api } = await import('@/lib/api');
+const { useAuth } = await import('@/hooks/useAuth');
 
 function stats(over: Partial<EmailBackfillStats> = {}): EmailBackfillStats {
   return {
@@ -31,8 +38,25 @@ function stats(over: Partial<EmailBackfillStats> = {}): EmailBackfillStats {
   };
 }
 
-function renderPanel(s: EmailBackfillStats = stats()) {
-  vi.mocked(api.get).mockResolvedValue(s);
+function settingEntry(value: SettingEntry['value'], type = 'int'): SettingEntry {
+  return { value, type, is_secret: false, overridden: false };
+}
+
+const AUTO_BACKFILL_SETTINGS: Record<string, SettingEntry> = {
+  auto_backfill_enabled: settingEntry(false, 'bool'),
+  auto_backfill_interval_minutes: settingEntry(120),
+  auto_backfill_max_users_per_cycle: settingEntry(20),
+  auto_backfill_max_rounds_per_user: settingEntry(20),
+};
+
+function renderPanel(
+  s: EmailBackfillStats = stats(),
+  settingsEntries: Record<string, SettingEntry> = AUTO_BACKFILL_SETTINGS,
+) {
+  vi.mocked(api.get).mockImplementation((url: string) => {
+    if (url === '/settings') return Promise.resolve({ settings: settingsEntries });
+    return Promise.resolve(s);
+  });
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -43,7 +67,18 @@ function renderPanel(s: EmailBackfillStats = stats()) {
   );
 }
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  vi.mocked(useAuth).mockReturnValue({
+    isAdmin: true,
+    user: null,
+    status: 'authenticated',
+    mustChangePassword: false,
+    login: vi.fn(),
+    logout: vi.fn(),
+    refresh: vi.fn(),
+  });
+});
 
 describe('the numbers', () => {
   it('shows the headline counts', async () => {
@@ -210,5 +245,69 @@ describe('the bars agree with the buttons', () => {
 
     expect(screen.queryByRole('button', { name: /Fetch remaining/ })).not.toBeInTheDocument();
     expect(screen.getByText('100 / 100')).toBeInTheDocument();
+  });
+});
+
+describe('automatic backfill settings', () => {
+  it('is offered on this page, alongside the manual buttons', async () => {
+    renderPanel();
+    expect(await screen.findByText('Automatic backfill')).toBeInTheDocument();
+    expect(screen.getByLabelText('Run automatically')).toBeInTheDocument();
+    expect(screen.getByLabelText('Revisit each account every (minutes)')).toBeInTheDocument();
+    expect(screen.getByLabelText('Accounts per cycle')).toBeInTheDocument();
+    expect(screen.getByLabelText('Batches per account per cycle')).toBeInTheDocument();
+  });
+
+  it('is still offered when the account has no attached email yet', async () => {
+    // The early-return "nothing attached" card must not lose this -- it is a
+    // global setting, unrelated to this particular account's own stats.
+    renderPanel(stats({ total: 0 }));
+    expect(await screen.findByText('Automatic backfill')).toBeInTheDocument();
+  });
+
+  it('reflects the stored values', async () => {
+    renderPanel(stats(), {
+      auto_backfill_enabled: settingEntry(true, 'bool'),
+      auto_backfill_interval_minutes: settingEntry(90),
+      auto_backfill_max_users_per_cycle: settingEntry(5),
+      auto_backfill_max_rounds_per_user: settingEntry(10),
+    });
+
+    expect(await screen.findByLabelText('Run automatically')).toHaveValue('true');
+    expect(screen.getByLabelText('Revisit each account every (minutes)')).toHaveValue(90);
+  });
+
+  it('lets an admin change and save a value', async () => {
+    const user = userEvent.setup();
+    renderPanel();
+    vi.mocked(api.put).mockResolvedValue({});
+
+    const field = await screen.findByLabelText('Accounts per cycle');
+    await user.clear(field);
+    await user.type(field, '7');
+    await user.click(screen.getByRole('button', { name: 'Save changes' }));
+
+    await waitFor(() =>
+      expect(api.put).toHaveBeenCalledWith('/settings', {
+        values: { auto_backfill_max_users_per_cycle: '7' },
+      }),
+    );
+  });
+
+  it('is read-only for a non-admin', async () => {
+    vi.mocked(useAuth).mockReturnValue({
+      isAdmin: false,
+      user: null,
+      status: 'authenticated',
+      mustChangePassword: false,
+      login: vi.fn(),
+      logout: vi.fn(),
+      refresh: vi.fn(),
+    });
+    renderPanel();
+
+    expect(await screen.findByLabelText('Run automatically')).toBeDisabled();
+    expect(screen.getAllByText('Only administrators can change these.').length).toBeGreaterThan(0);
+    expect(screen.queryByRole('button', { name: 'Save changes' })).not.toBeInTheDocument();
   });
 });

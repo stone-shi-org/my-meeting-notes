@@ -113,6 +113,7 @@ def _columns(conn, table: str) -> set[str]:
         ("match_runs", "source_errors_json"),
         ("threads", "group_id"),
         ("thread_emails", "folder_id"),
+        ("users", "auto_backfill_at"),
     ],
 )
 def test_late_columns_are_applied(conn, table, column):
@@ -513,6 +514,24 @@ def test_init_db_is_idempotent_for_late_columns(initialised_db):
     with get_conn(initialised_db) as conn:
         present = {row[1] for row in conn.execute("PRAGMA table_info(thread_emails)")}
     assert EMAIL_THREADING_COLUMNS <= present
+
+
+def test_auto_backfill_at_survives_an_upgrade(initialised_db):
+    """A pre-existing database (no auto_backfill_at yet) upgrades cleanly, the
+    same guarantee test_late_columns_survive_a_second_init makes for
+    thread_emails.url -- and a fresh column must start out NULL, i.e. "never
+    swept", not some other default that would make every account look
+    already up to date."""
+    init_db(initialised_db)
+    init_db(initialised_db)
+    with get_conn(initialised_db) as conn:
+        present = {row[1] for row in conn.execute("PRAGMA table_info(users)")}
+        assert "auto_backfill_at" in present
+        _make_user(conn, 99, "late-column-check")
+        row = conn.execute(
+            "SELECT auto_backfill_at FROM users WHERE id = 99"
+        ).fetchone()
+        assert row["auto_backfill_at"] is None
 
 
 def test_no_late_column_is_not_null_without_a_default():

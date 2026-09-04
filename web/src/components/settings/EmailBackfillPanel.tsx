@@ -19,7 +19,51 @@ import { Badge, Card, Meter, Skeleton } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
+import { SettingsForm } from '@/pages/SettingsPage';
 import type { BackfillRunResult, EmailBackfillStats } from '@/types/api';
+
+/**
+ * On its own schedule, every user's own account is drained the same way the
+ * two buttons above do it by hand -- alternating bounded bodies/summaries
+ * batches until each account's backlog is empty, a batch stalls, or the
+ * per-cycle round cap is hit. Off by default and admin-gated, same posture as
+ * "Automatic follow-ups" on the Matching tab: this reuses that exact form
+ * component so the gating and draft/save behaviour never drifts between the
+ * two.
+ */
+function AutomaticBackfillSettings() {
+  return (
+    <SettingsForm
+      title="Automatic backfill"
+      description="Runs the two buttons above on their own schedule, across every user's own threads, so an account nobody revisits does not stay behind forever."
+      keys={[
+        {
+          key: 'auto_backfill_enabled',
+          label: 'Run automatically',
+          hint: 'Off by default. Spends provider and LLM quota on its own schedule.',
+        },
+        {
+          key: 'auto_backfill_interval_minutes',
+          label: 'Revisit each account every (minutes)',
+          type: 'number',
+          hint: 'Per account. 120 means each account’s backlog is looked at every two hours.',
+        },
+        {
+          key: 'auto_backfill_max_users_per_cycle',
+          label: 'Accounts per cycle',
+          type: 'number',
+          hint: 'Bounds one sweep. Whatever is skipped is first in line next time, so nobody is starved.',
+        },
+        {
+          key: 'auto_backfill_max_rounds_per_user',
+          label: 'Batches per account per cycle',
+          type: 'number',
+          hint: 'Caps how much of one account’s backlog is drained per sweep, so one huge account cannot crowd out everyone else’s turn.',
+        },
+      ]}
+    />
+  );
+}
 
 /**
  * A backstop on each loop. Bodies move a screenful per round and summaries
@@ -207,14 +251,17 @@ export function EmailBackfillPanel() {
 
   if (s.total === 0) {
     return (
-      <Card className="p-5">
-        <h2 className="font-display text-lg font-semibold">Email backfill</h2>
-        <p className="mt-1 text-sm text-fg-subtle">
-          No emails are attached to any of your threads yet. Once a match attaches
-          some, their full text is fetched as you open each thread — and this page
-          will show how far along that is.
-        </p>
-      </Card>
+      <div className="space-y-4">
+        <Card className="p-5">
+          <h2 className="font-display text-lg font-semibold">Email backfill</h2>
+          <p className="mt-1 text-sm text-fg-subtle">
+            No emails are attached to any of your threads yet. Once a match attaches
+            some, their full text is fetched as you open each thread — and this page
+            will show how far along that is.
+          </p>
+        </Card>
+        <AutomaticBackfillSettings />
+      </div>
     );
   }
 
@@ -326,6 +373,8 @@ export function EmailBackfillPanel() {
           </dl>
         </div>
       </Card>
+
+      <AutomaticBackfillSettings />
     </div>
   );
 }

@@ -807,6 +807,11 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("dev_emails", "conversation_id", "TEXT"),
     ("dev_emails", "to_recipients", "TEXT"),
     ("dev_emails", "outbound", "INTEGER NOT NULL DEFAULT 0"),
+    # When the automatic backfill sweep last finished this user's account,
+    # stamped even when it failed partway through -- same convention as
+    # threads.auto_match_at, and for the same reason: a broken account must
+    # not be retried on every tick.
+    ("users", "auto_backfill_at", "TEXT"),
 )
 
 # The two built-in insight_types rows, seeded once on a genuinely empty table

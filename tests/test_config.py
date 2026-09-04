@@ -90,3 +90,25 @@ def test_secret_keys_are_marked_secret():
     for key in ("llm_api_key", "diarization_api_key"):
         _, is_secret = RUNTIME_KEYS[key]
         assert is_secret is True
+
+
+def test_auto_backfill_keys_are_off_by_default_and_not_secret():
+    """Same posture as auto_match_enabled: unattended, quota-spending work
+    stays opt-in, and none of these are credentials."""
+    settings = Settings()
+    assert settings.auto_backfill_enabled is False
+    for key in (
+        "auto_backfill_enabled",
+        "auto_backfill_interval_minutes",
+        "auto_backfill_max_users_per_cycle",
+        "auto_backfill_max_rounds_per_user",
+    ):
+        _, is_secret = RUNTIME_KEYS[key]
+        assert is_secret is False
+
+
+def test_auto_backfill_tick_seconds_is_not_runtime_editable():
+    """Process-lifetime only, same split as auto_match_tick_seconds -- it only
+    bounds the granularity of auto_backfill_interval_minutes."""
+    assert "auto_backfill_tick_seconds" not in RUNTIME_KEYS
+    assert Settings().auto_backfill_tick_seconds == 60

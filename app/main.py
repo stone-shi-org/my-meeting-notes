@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.db import get_conn, init_db
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging, get_logger
+from app.jobs.email_backfill_scheduler import AutoBackfillScheduler, set_backfill_scheduler
 from app.jobs.queue import JobQueue, set_queue
 from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
 from app.jobs.telegram_poller import TelegramPoller, set_poller
@@ -94,8 +95,16 @@ async def lifespan(app: FastAPI):
     set_poller(poller)
     poller.start()
 
+    # Same reasoning again: always started, gated on auto_backfill_enabled
+    # inside each cycle rather than at startup.
+    backfill_scheduler = AutoBackfillScheduler()
+    set_backfill_scheduler(backfill_scheduler)
+    backfill_scheduler.start()
+
     yield
 
+    await backfill_scheduler.stop()
+    set_backfill_scheduler(None)
     await poller.stop()
     set_poller(None)
     await scheduler.stop()
