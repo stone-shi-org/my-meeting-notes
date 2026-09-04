@@ -355,13 +355,38 @@ export function ThreadTitle({ thread }: { thread: Thread }) {
   );
 }
 
+const TIMELINE_FILTERS_KEY = 'mmn.threadTimeline.filters';
+
+const ALL_FILTERS: Filter[] = ['meeting', 'event', 'email', 'note'];
+
+function readFilters(): Set<Filter> {
+  try {
+    const raw = window.localStorage.getItem(TIMELINE_FILTERS_KEY);
+    if (!raw) return new Set(ALL_FILTERS);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      const valid = parsed.filter((f): f is Filter => ALL_FILTERS.includes(f));
+      return new Set(valid);
+    }
+  } catch {
+    /* private mode, corrupted json, etc. */
+  }
+  return new Set(ALL_FILTERS);
+}
+
+function saveFilters(filters: Set<Filter>) {
+  try {
+    window.localStorage.setItem(TIMELINE_FILTERS_KEY, JSON.stringify([...filters]));
+  } catch {
+    /* private mode, quota exceeded, etc. */
+  }
+}
+
 export function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const [filters, setFilters] = useState<Set<Filter>>(
-    () => new Set(['meeting', 'event', 'email', 'note'] as Filter[]),
-  );
+  const [filters, setFilters] = useState<Set<Filter>>(readFilters);
   const [composing, setComposing] = useState(false);
   const noteScope: NoteScope = { kind: 'thread', threadId: threadId! };
   const thread = useQuery({
@@ -472,6 +497,7 @@ export function ThreadDetailPage() {
       const next = new Set(prev);
       if (next.has(kind)) next.delete(kind);
       else next.add(kind);
+      saveFilters(next);
       return next;
     });
   }
@@ -699,7 +725,11 @@ export function ThreadDetailPage() {
             setComposing(true);
             // Writing a note with the Notes chip off would file it somewhere
             // the page is not showing.
-            setFilters((prev) => new Set(prev).add('note'));
+            setFilters((prev) => {
+              const next = new Set(prev).add('note');
+              saveFilters(next);
+              return next;
+            });
           }}
         >
           <NotebookPen />
