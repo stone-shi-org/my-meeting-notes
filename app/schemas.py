@@ -119,6 +119,17 @@ class ThreadOut(BaseModel):
     next_step_stale: bool = False
     group_id: int | None = None
     """Which home-screen group the thread sits in. None is "Ungrouped"."""
+    auto_match_enabled: bool = True
+    """Per-thread override of the scheduled sweep. Does not affect the manual
+    "Check now" button -- same as the global auto_match_enabled setting."""
+    auto_match_calendar_enabled: bool = True
+    auto_match_email_enabled: bool = True
+    """Per-source filters. Gate both the scheduled sweep and "Check now"; both
+    False is what the SPA renders as "Notes only" -- there is no separate
+    notes column, since thread_notes are never fetched by the match pipeline."""
+    next_step_enabled: bool = True
+    """Per-thread override of automatic, staleness-triggered next-step
+    generation. Does not affect the manual "Refresh" button."""
 
 
 class ThreadCreateRequest(BaseModel):
@@ -130,6 +141,13 @@ class ThreadUpdateRequest(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=300)
     description: str | None = Field(default=None, max_length=5000)
     archived: bool | None = None
+    auto_match_enabled: bool | None = None
+    auto_match_calendar_enabled: bool | None = None
+    auto_match_email_enabled: bool | None = None
+    next_step_enabled: bool | None = None
+    """All four: None means "leave unchanged" (the existing PATCH convention --
+    see `archived`). Unlike group_id, none of these ever need to be cleared
+    back to NULL through the API, so this is unambiguous."""
 
 
 class MoveItemRequest(BaseModel):

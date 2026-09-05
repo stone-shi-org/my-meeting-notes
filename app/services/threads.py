@@ -144,6 +144,18 @@ def list_threads(
     return rows, total
 
 
+def _effective_bool(row: sqlite3.Row, column: str, *, default: bool = True) -> bool:
+    """Resolve a tri-state override column: NULL/missing -> default, else the
+    stored value. Only an explicit 0 means "off" -- see the LATE_COLUMNS
+    comment in db.py for why these are nullable rather than NOT NULL DEFAULT."""
+    if column not in row.keys():
+        return default
+    value = row[column]
+    if value is None:
+        return default
+    return bool(value)
+
+
 def row_to_thread(row: sqlite3.Row) -> dict:
     return {
         "id": row["id"],
@@ -174,6 +186,10 @@ def row_to_thread(row: sqlite3.Row) -> dict:
         # Only the single-thread GET computes this (it costs an extra query);
         # the list endpoint doesn't show the suggestion, so this default stands.
         "next_step_stale": False,
+        "auto_match_enabled": _effective_bool(row, "auto_match_enabled"),
+        "auto_match_calendar_enabled": _effective_bool(row, "auto_match_calendar_enabled"),
+        "auto_match_email_enabled": _effective_bool(row, "auto_match_email_enabled"),
+        "next_step_enabled": _effective_bool(row, "next_step_enabled"),
     }
 
 
@@ -262,12 +278,17 @@ def _minutes_since(timestamp: str) -> float:
 def next_step_needs_refresh(conn: sqlite3.Connection, row: sqlite3.Row) -> bool:
     """Whether the thread list should regenerate this thread's next step now.
 
-    Three independent reasons, checked cheapest first: no suggestion yet,
-    a recent failed attempt still in its cooldown window, the suggestion
-    aged past ``NEXT_STEP_MAX_AGE_DAYS``, or its fingerprint no longer
-    matches (``is_next_step_stale``, the only one costing an extra query).
+    Four independent reasons, checked cheapest first: the thread has opted out
+    of automatic generation (``next_step_enabled == 0`` -- the manual
+    "Refresh" button is unaffected, this only gates this auto-refresh path),
+    no suggestion yet, a recent failed attempt still in its cooldown window,
+    the suggestion aged past ``NEXT_STEP_MAX_AGE_DAYS``, or its fingerprint no
+    longer matches (``is_next_step_stale``, the only one costing an extra
+    query).
     """
     keys = row.keys()
+    if "next_step_enabled" in keys and row["next_step_enabled"] == 0:
+        return False
     checked_at = row["next_step_checked_at"] if "next_step_checked_at" in keys else None
     generated_at = row["next_step_generated_at"] if "next_step_generated_at" in keys else None
     # A successful generation stamps both columns with the exact same value.

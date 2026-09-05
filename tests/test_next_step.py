@@ -299,6 +299,23 @@ class TestListAutoRefresh:
         user_client.get("/api/threads")
         assert len(mock_llm.calls) == 2
 
+    def test_a_thread_with_next_step_disabled_is_not_auto_refreshed(
+        self, user_client, meeting, mock_llm
+    ):
+        """The per-thread override only gates this automatic path -- the manual
+        `POST /next-step` button (exercised below) is unaffected."""
+        thread_id = meeting["thread_id"]
+        user_client.patch(f"/api/threads/{thread_id}", json={"next_step_enabled": False})
+
+        items = user_client.get("/api/threads").json()["items"]
+        listed = next(t for t in items if t["id"] == thread_id)
+        assert listed["next_step"] is None
+        assert len(mock_llm.calls) == 0
+
+        # The manual button still works regardless of the toggle.
+        refresh(user_client, thread_id)
+        assert len(mock_llm.calls) == 1
+
     def test_a_failed_attempt_is_not_retried_within_the_cooldown(
         self, user_client, meeting, mock_llm
     ):

@@ -692,6 +692,25 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # same broken LLM call on every poll, the same request-storm risk the
     # sweep's auto_match_at guards against.
     ("threads", "next_step_checked_at", "TEXT"),
+    # Per-thread overrides for the auto-match sweep and next-step generation.
+    # NULL and 1 both mean "on" -- only 0 means "off" -- so every existing
+    # thread keeps today's behavior until a user opts one out explicitly.
+    # auto_match_enabled gates only the *scheduled* sweep (jobs/scheduler.py),
+    # mirroring the global auto_match_enabled setting, which also never blocks
+    # the manual "Check now" button. auto_match_calendar_enabled/
+    # auto_match_email_enabled gate both the scheduled sweep and "Check now"
+    # (services/matching.gather_candidates), because "this thread has nothing
+    # to match on this source" is true regardless of who triggered the search.
+    # There is no notes flag: thread_notes are never fetched by the matching
+    # pipeline, so "notes only" is the SPA-derived state of both source flags
+    # being off, not a column here.
+    ("threads", "auto_match_enabled", "INTEGER"),
+    ("threads", "auto_match_calendar_enabled", "INTEGER"),
+    ("threads", "auto_match_email_enabled", "INTEGER"),
+    # Gates only automatic, staleness-triggered generation
+    # (threads_svc.next_step_needs_refresh) -- the manual "Refresh" button
+    # keeps working, same manual-action-always-wins rationale as above.
+    ("threads", "next_step_enabled", "INTEGER"),
     # Which group the thread sits in on the home screen. NULL is "Ungrouped",
     # which is why this is nullable rather than pointing at a real default row:
     # every thread that predates groups is already in the right place.

@@ -88,6 +88,16 @@ export interface Thread {
   next_step_stale: boolean;
   /** Which home-screen group the thread sits in. null is "Ungrouped". */
   group_id: number | null;
+  /** Per-thread override of the scheduled sweep. Does not affect the manual
+   * "Check now" button — same as the global auto-match setting. */
+  auto_match_enabled: boolean;
+  /** Per-source filters for the sweep and "Check now". Both false is what the
+   * UI renders as "Notes only" — there is no separate notes flag. */
+  auto_match_calendar_enabled: boolean;
+  auto_match_email_enabled: boolean;
+  /** Per-thread override of automatic, staleness-triggered next-step
+   * generation. Does not affect the manual "Refresh" button. */
+  next_step_enabled: boolean;
 }
 
 /** A folder over threads on the home screen. "Ungrouped" is not one of these —

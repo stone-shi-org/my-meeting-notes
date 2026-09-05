@@ -138,6 +138,12 @@ as evidence. A test asserts `attached_context` still returns only events and ema
 immutable snapshots of something fetched; a note is rewritten in place, and rewriting one should make
 a cached suggestion stale.
 
+**`threads.next_step_enabled` gates only the automatic path.** `threads_svc.next_step_needs_refresh`
+returns `False` immediately for a thread with it set to `0`, so `GET /threads`'s "generate what's
+missing" pass skips it — but the manual `POST /threads/{id}/next-step` button (the "Refresh" button
+on the thread page) always runs regardless, same manual-action-always-wins rule as the sweep's own
+`auto_match_enabled` override next to it.
+
 **Title generation cannot fail the save.** No title supplied means one LLM call
 (`note_title_prompt.md`) run through `to_thread`; if it errors or comes back empty the note is filed
 under `derive_title` — its own first line, markdown stripped — with `title_model` NULL to record that
@@ -570,6 +576,21 @@ becomes a request storm.
 **It does not use the job queue.** A sweep per thread per half hour would bury the user's own
 uploads in the progress dock, and restart survival — the other reason to use the queue — buys
 nothing for work that is due again in thirty minutes anyway.
+
+**Three independent gates decide whether a thread is swept, and they `AND` together.** The global
+`auto_match_enabled` setting; the thread's own `auto_match_enabled` (`NULL`/`1` = watched, `0` =
+excluded from `jobs/scheduler.due_threads`); and, orthogonally, its `auto_match_calendar_enabled` /
+`auto_match_email_enabled`, which gate individual sources rather than the sweep as a whole. Both the
+global switch and the thread's own `auto_match_enabled` only ever gate the *scheduled* sweep — the
+manual "Check now" button (`POST /threads/{id}/follow-ups`) calls `followups.sweep_thread` directly
+and always runs, on purpose: a deliberate button press should not be silently vetoed by a background
+setting. The per-source flags are different — they gate `matching.gather_candidates` itself, so they
+apply to "Check now" too, because "this thread has nothing to match on this source" is true no
+matter who triggered the search. A thread with both source flags off degrades through the existing
+`NoIntegrationsError` → `skipped: "no_integrations"` path, the same one a user with no integrations
+at all already hits — there is no separate "notes only" column; the SPA's "Notes only" checkbox is
+just a shortcut that flips both source flags off together, since `thread_notes` were never fetched
+by this pipeline to begin with.
 
 ## Jobs
 
