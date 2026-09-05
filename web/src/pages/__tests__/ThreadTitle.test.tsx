@@ -33,6 +33,10 @@ function thread(over: Partial<Thread> = {}): Thread {
     next_step_generated_at: null,
     next_step_stale: false,
     group_id: null,
+    auto_match_enabled: true,
+    auto_match_calendar_enabled: true,
+    auto_match_email_enabled: true,
+    next_step_enabled: true,
     ...over,
   };
 }

@@ -87,7 +87,7 @@ run_frontend_native() {
         echo "--> Installing web dependencies"
         ( cd web && npm ci --silent ) || return 1
     fi
-    ( cd web && npx vitest run \
+    ( cd web && NODE_ENV=test npx vitest run \
         --reporter=verbose \
         --reporter=junit \
         --outputFile="$REPORT_DIR/frontend-results.xml" )
