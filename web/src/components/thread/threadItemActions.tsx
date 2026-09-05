@@ -71,6 +71,18 @@ export function useMarkRead(threadId: string, kind: Kind) {
   });
 }
 
+/** Dismiss the "Needs your reply" badge on an email conversation. */
+export function useDismissReply(threadId: string) {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => api.post(`/threads/${threadId}/emails/${id}/dismiss-reply`),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ['thread-timeline', threadId] });
+      void queryClient.invalidateQueries({ queryKey: ['thread', threadId] });
+    },
+  });
+}
+
 /** The unread mark on one row. Paired with bold text and a "New" label, never
  *  the only thing saying so. */
 export function UnreadDot() {

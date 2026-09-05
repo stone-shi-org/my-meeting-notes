@@ -831,3 +831,31 @@ def test_summarisable_is_decided_by_the_server_not_the_client(user_client, isola
         f"/api/threads/{t['id']}/emails/summarise"
     ).json()["requested"] == flagged
     assert flagged == 1
+
+
+def test_dismiss_reply_endpoint(user_client, isolated_settings):
+    t = make_thread(user_client)
+    email_id = _attach_email(
+        isolated_settings.db_path,
+        t["id"],
+        message_id="<needs-reply>",
+        direction="inbound",
+    )
+
+    # Initial state
+    timeline = user_client.get(f"/api/threads/{t['id']}/timeline").json()
+    assert timeline[0]["payload"]["awaiting"] == "you"
+
+    # Dismiss reply tag
+    resp = user_client.post(f"/api/threads/{t['id']}/emails/{email_id}/dismiss-reply")
+    assert resp.status_code == 200
+    assert resp.json() == {"ok": True}
+
+    # Timeline now shows awaiting is None
+    timeline = user_client.get(f"/api/threads/{t['id']}/timeline").json()
+    assert timeline[0]["payload"]["awaiting"] is None
+
+    # Emails list includes reply_dismissed_at
+    emails = user_client.get(f"/api/threads/{t['id']}/emails").json()
+    assert emails[0]["reply_dismissed_at"] is not None
+

@@ -472,6 +472,7 @@ export interface Email extends Attached {
    */
   body_fetched_at?: string | null;
   integration_id?: number | null;
+  reply_dismissed_at?: string | null;
 }
 
 export type EmailDirection = 'outbound' | 'inbound';

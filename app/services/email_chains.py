@@ -420,6 +420,8 @@ def _assemble(members: list[Mapping[str, Any]], mine: set[str]) -> dict:
     direction = last.get("direction")
     last_from = {"outbound": "you", "inbound": "them"}.get(direction or "")
     awaiting = {"outbound": "them", "inbound": "you"}.get(direction or "")
+    if awaiting == "you" and last.get("reply_dismissed_at"):
+        awaiting = None
 
     return {
         # Stable under additions that do not merge, and changing exactly when two

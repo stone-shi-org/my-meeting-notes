@@ -7,7 +7,7 @@
  * common case does not gain a click.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { ChevronRight, ExternalLink, Sparkles } from 'lucide-react';
+import { ChevronRight, ExternalLink, Sparkles, X } from 'lucide-react';
 import { useEffect, useId, useRef, useState } from 'react';
 import { EmailBody } from '@/components/thread/EmailBody';
 import { MoveToThread } from '@/components/thread/MoveToThread';
@@ -16,6 +16,7 @@ import {
   MarkReadButton,
   UnreadDot,
   useDetach,
+  useDismissReply,
   useMarkRead,
   useMoveItem,
 } from '@/components/thread/threadItemActions';
@@ -297,9 +298,11 @@ export function EmailChainCard({
   const markRead = useMarkRead(threadId, 'emails');
   const detach = useDetach(threadId, 'emails');
   const move = useMoveItem(threadId, 'emails');
+  const dismissReply = useDismissReply(threadId);
 
   const single = chain.message_count === 1;
   const newest = chain.messages[chain.messages.length - 1];
+  const newestId = typeof newest?.id === 'number' ? newest.id : null;
   const unread = chain.unread_count > 0;
   const preview = newest?.ai_summary || newest?.snippet || null;
   const soleId = single && typeof newest?.id === 'number' ? newest.id : null;
@@ -397,8 +400,23 @@ export function EmailChainCard({
             with "Waiting on them".
             Nothing at all when `awaiting` is null: the UI does not guess a side. */}
         {chain.awaiting === 'you' ? (
-          <Badge variant="warning" size="sm">
-            Needs your reply
+          <Badge variant="warning" size="sm" className="inline-flex items-center gap-1 pr-1">
+            <span>Needs your reply</span>
+            {newestId !== null ? (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  dismissReply.mutate(newestId);
+                }}
+                disabled={dismissReply.isPending}
+                aria-label="Dismiss reply tag"
+                title="Dismiss reply tag"
+                className="rounded p-0.5 hover:bg-warning-ink/10 focus-visible:outline-none disabled:opacity-50"
+              >
+                <X className="size-2.5" aria-hidden />
+              </button>
+            ) : null}
           </Badge>
         ) : null}
         {chain.awaiting === 'them' ? (

@@ -831,6 +831,9 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # threads.auto_match_at, and for the same reason: a broken account must
     # not be retried on every tick.
     ("users", "auto_backfill_at", "TEXT"),
+    # When the user explicitly dismissed the "Needs your reply" badge on this email.
+    # Stamped with utcnow() so it won't reappear as needing reply.
+    ("thread_emails", "reply_dismissed_at", "TEXT"),
 )
 
 # The two built-in insight_types rows, seeded once on a genuinely empty table

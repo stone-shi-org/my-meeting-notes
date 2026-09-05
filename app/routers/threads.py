@@ -279,6 +279,7 @@ def _row_to_email(row: sqlite3.Row) -> dict:
         "direction": _optional(row, "direction"),
         "ai_summary": _optional(row, "ai_summary"),
         "ai_summary_model": _optional(row, "ai_summary_model"),
+        "reply_dismissed_at": _optional(row, "reply_dismissed_at"),
         # `has_body` and `body_fetched_at` together are the three states the UI
         # needs: not fetched yet, fetched, or asked-and-this-account-cannot.
         # The body itself is deliberately absent -- see EMAIL_COLUMNS.
@@ -626,6 +627,23 @@ def mark_email_read(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     return _mark_read(conn, thread_id, user, "emails", email_id)
+
+
+@router.post("/{thread_id}/emails/{email_id}/dismiss-reply")
+def dismiss_reply(
+    thread_id: int,
+    email_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    assert_can_access(threads_svc.get_thread(conn, thread_id), user)
+    cur = conn.execute(
+        "UPDATE thread_emails SET reply_dismissed_at = ? WHERE id = ? AND thread_id = ?",
+        (utcnow(), email_id, thread_id),
+    )
+    if cur.rowcount == 0:
+        raise NotFoundError("Email not attached to this thread")
+    return {"ok": True}
 
 
 @router.post("/{thread_id}/calendar-events/{event_id}/read")

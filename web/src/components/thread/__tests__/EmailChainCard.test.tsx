@@ -554,4 +554,25 @@ describe('the awaiting badge says who owes what', () => {
     expect(screen.getByText('Waiting on them')).toBeInTheDocument();
     expect(screen.queryByText('Needs your reply')).not.toBeInTheDocument();
   });
+
+  it('allows dismissing the Needs your reply tag', async () => {
+    const user = userEvent.setup();
+    vi.mocked(api.post).mockResolvedValue({ ok: true });
+    renderCard(
+      chain({
+        awaiting: 'you',
+        last_message_from: 'them',
+        messages: [email({ id: 42, direction: 'inbound', sender: 'james@acme.com' })],
+      }),
+    );
+
+    expect(screen.getByText('Needs your reply')).toBeInTheDocument();
+    const dismissBtn = screen.getByRole('button', { name: 'Dismiss reply tag' });
+    expect(dismissBtn).toBeInTheDocument();
+
+    await user.click(dismissBtn);
+
+    expect(api.post).toHaveBeenCalledWith('/threads/7/emails/42/dismiss-reply');
+  });
 });
+

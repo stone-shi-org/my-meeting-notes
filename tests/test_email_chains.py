@@ -36,6 +36,7 @@ def email(
     conversation_id: str | None = None,
     direction: str | None = None,
     unread: bool = False,
+    reply_dismissed_at: str | None = None,
 ) -> dict:
     return {
         "message_id": message_id,
@@ -50,6 +51,7 @@ def email(
         "conversation_id": conversation_id,
         "direction": direction,
         "unread": unread,
+        "reply_dismissed_at": reply_dismissed_at,
     }
 
 
@@ -469,6 +471,21 @@ def test_awaiting_is_you_when_they_spoke_last():
     chain = build_chains(rows, account_addresses=[ME])[0]
 
     assert chain["awaiting"] == "you"
+
+
+def test_awaiting_is_none_when_reply_is_dismissed():
+    rows = [
+        email("a", rfc="<a@x>", subject="Atlas", sender=ME, to="alice@x.com",
+              date="2026-08-01T10:00:00+00:00", direction="outbound"),
+        email("b", rfc="<b@x>", in_reply_to="<a@x>", subject="Re: Atlas",
+              sender="alice@x.com", to=ME, date="2026-08-02T10:00:00+00:00",
+              direction="inbound", reply_dismissed_at="2026-08-02T11:00:00+00:00"),
+    ]
+    chain = build_chains(rows, account_addresses=[ME])[0]
+
+    assert chain["last_message_from"] == "them"
+    assert chain["awaiting"] is None
+
 
 
 def test_messages_are_chronological_and_the_subject_is_the_earliest():
