@@ -38,11 +38,14 @@ log = get_logger("scheduler")
 def due_threads(conn: sqlite3.Connection, *, now: datetime) -> list[sqlite3.Row]:
     """Watched threads whose turn it is, oldest-swept first.
 
-    Excluded: archived threads, threads belonging to a deactivated user, and
-    threads nobody has touched in ``auto_match_idle_days``. The last one is what
-    keeps the sweep from growing without bound -- a thread from last year has no
-    follow-ups coming, and searching for them costs the same as searching for
-    real ones.
+    Excluded: archived threads, threads belonging to a deactivated user,
+    threads nobody has touched in ``auto_match_idle_days``, and threads with
+    their own ``auto_match_enabled`` set to 0 -- a per-thread override of this
+    scheduled sweep that, like the global setting it sits alongside, never
+    touches the manual "Check now" button. The idle-days exclusion is what
+    keeps the sweep from growing without bound -- a thread from last year has
+    no follow-ups coming, and searching for them costs the same as searching
+    for real ones.
 
     Ordering by ``auto_match_at`` with NULLs first means a newly created thread
     is looked at on the next tick, and no thread can be starved by the per-cycle
@@ -64,6 +67,7 @@ def due_threads(conn: sqlite3.Connection, *, now: datetime) -> list[sqlite3.Row]
            AND u.is_active = 1
            AND t.updated_at >= ?
            AND (t.auto_match_at IS NULL OR t.auto_match_at < ?)
+           AND (t.auto_match_enabled IS NULL OR t.auto_match_enabled = 1)
          ORDER BY t.auto_match_at IS NOT NULL, t.auto_match_at, t.id
          LIMIT ?
         """,

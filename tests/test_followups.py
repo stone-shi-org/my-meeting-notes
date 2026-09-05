@@ -274,6 +274,50 @@ class TestSweep:
         assert result["skipped"] == "no_integrations"
         assert result["error"] is None
 
+    def test_calendar_disabled_for_the_thread_still_lets_email_through(
+        self, user_client, meeting, mock_llm
+    ):
+        """The per-thread source filter, not a dead account: calendar is skipped
+        even though FakeProvider would have happily answered."""
+        thread_id = meeting["thread_id"]
+        user_client.patch(
+            f"/api/threads/{thread_id}", json={"auto_match_calendar_enabled": False}
+        )
+
+        result = sweep(user_client, thread_id)
+
+        assert result["attached_events"] == 0
+        assert result["attached_emails"] == 1
+
+    def test_email_disabled_for_the_thread_still_lets_calendar_through(
+        self, user_client, meeting, mock_llm
+    ):
+        thread_id = meeting["thread_id"]
+        user_client.patch(
+            f"/api/threads/{thread_id}", json={"auto_match_email_enabled": False}
+        )
+
+        result = sweep(user_client, thread_id)
+
+        assert result["attached_events"] == 1
+        assert result["attached_emails"] == 0
+
+    def test_notes_only_thread_skips_the_search_entirely(self, user_client, meeting, mock_llm):
+        """Both source filters off -- the "notes only" state the SPA renders as
+        one checkbox -- degrades the same way as no integrations connected."""
+        thread_id = meeting["thread_id"]
+        user_client.patch(
+            f"/api/threads/{thread_id}",
+            json={"auto_match_calendar_enabled": False, "auto_match_email_enabled": False},
+        )
+
+        result = sweep(user_client, thread_id)
+
+        assert result["skipped"] == "no_integrations"
+        assert result["error"] is None
+        assert result["attached_events"] == 0
+        assert result["attached_emails"] == 0
+
     def test_sweeping_twice_neither_duplicates_nor_re_marks(
         self, user_client, meeting, mock_llm
     ):
@@ -515,6 +559,29 @@ class TestScheduler:
         assert run_due(db_path)["swept"] == 0
 
         user_client.patch(f"/api/threads/{thread_id}", json={"archived": False})
+        assert run_due(db_path)["swept"] == 1
+
+    def test_a_thread_with_auto_match_disabled_is_not_watched(
+        self, user_client, admin_client, meeting, mock_llm, db_path
+    ):
+        """The per-thread override, alongside the global switch it never
+        overrides: the global switch stays on, only this one thread opts out."""
+        configure(admin_client, auto_match_enabled=True)
+        user_client.patch(
+            f"/api/threads/{meeting['thread_id']}", json={"auto_match_enabled": False}
+        )
+
+        assert run_due(db_path)["swept"] == 0
+
+    def test_re_enabling_a_thread_puts_it_back_under_watch(
+        self, user_client, admin_client, meeting, mock_llm, db_path
+    ):
+        configure(admin_client, auto_match_enabled=True)
+        thread_id = meeting["thread_id"]
+        user_client.patch(f"/api/threads/{thread_id}", json={"auto_match_enabled": False})
+        assert run_due(db_path)["swept"] == 0
+
+        user_client.patch(f"/api/threads/{thread_id}", json={"auto_match_enabled": True})
         assert run_due(db_path)["swept"] == 1
 
     def test_a_thread_nobody_has_touched_in_weeks_is_not_watched(

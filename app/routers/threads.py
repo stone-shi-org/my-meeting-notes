@@ -155,6 +155,14 @@ def update_thread(
         updates["description"] = payload.description
     if payload.archived is not None:
         updates["archived"] = int(payload.archived)
+    if payload.auto_match_enabled is not None:
+        updates["auto_match_enabled"] = int(payload.auto_match_enabled)
+    if payload.auto_match_calendar_enabled is not None:
+        updates["auto_match_calendar_enabled"] = int(payload.auto_match_calendar_enabled)
+    if payload.auto_match_email_enabled is not None:
+        updates["auto_match_email_enabled"] = int(payload.auto_match_email_enabled)
+    if payload.next_step_enabled is not None:
+        updates["next_step_enabled"] = int(payload.next_step_enabled)
 
     if updates:
         updates["updated_at"] = utcnow()

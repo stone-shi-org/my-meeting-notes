@@ -152,6 +152,8 @@ async def gather_candidates(
     user_id: int | None = None,
     calendar_start: datetime | None = None,
     calendar_end: datetime | None = None,
+    include_calendar: bool = True,
+    include_email: bool = True,
 ) -> dict:
     """Search every calendar and inbox this user has connected, concurrently.
 
@@ -171,10 +173,15 @@ async def gather_candidates(
     Scoped to a thread, not a meeting: what has already been attached is a
     property of the thread, and the periodic sweep in ``followups`` has a thread
     but no meeting to anchor on.
+
+    ``include_calendar``/``include_email`` default to ``True`` so every
+    existing caller (the manual on-demand match against a meeting) is
+    unaffected; only ``followups.sweep_thread`` passes a thread's own
+    per-source override through.
     """
     with conn_factory() as conn:
-        calendar_sources = providers_svc.load_for_user(conn, user_id, kind="calendar")
-        email_sources = providers_svc.load_for_user(conn, user_id, kind="email")
+        calendar_sources = providers_svc.load_for_user(conn, user_id, kind="calendar") if include_calendar else []
+        email_sources = providers_svc.load_for_user(conn, user_id, kind="email") if include_email else []
 
         attached_uids = {
             r["uid"]

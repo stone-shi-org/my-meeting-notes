@@ -141,6 +141,14 @@ async def sweep_thread(
         keywords = _keywords(conn, thread_id, effective(conn, "match_max_keywords"))
         context = watch_context(conn, thread_id, keywords)
 
+        # Per-thread source filters. NULL/1 both mean "search it"; only an
+        # explicit 0 turns a source off. Applies here rather than only in the
+        # scheduler so the manual "Check now" button honors the same "this
+        # thread has nothing to match on this source" declaration.
+        thread_row = threads_svc.require_thread(conn, thread_id)
+        include_calendar = thread_row["auto_match_calendar_enabled"] != 0
+        include_email = thread_row["auto_match_email_enabled"] != 0
+
         meeting_rows = conn.execute(
             "SELECT meeting_at FROM meetings WHERE thread_id = ?",
             (thread_id,),
@@ -179,6 +187,8 @@ async def sweep_thread(
             calendar_end=calendar_end,
             max_candidates=max_candidates,
             user_id=user_id,
+            include_calendar=include_calendar,
+            include_email=include_email,
         )
     except NoIntegrationsError:
         # Not an error worth surfacing: the user simply has nothing connected.

@@ -38,6 +38,48 @@ def test_update_fields(user_client):
     assert resp.json()["archived"] is True
 
 
+def test_new_threads_default_every_match_toggle_to_enabled(user_client):
+    t = make_thread(user_client)
+    assert t["auto_match_enabled"] is True
+    assert t["auto_match_calendar_enabled"] is True
+    assert t["auto_match_email_enabled"] is True
+    assert t["next_step_enabled"] is True
+
+
+def test_match_toggles_can_be_disabled_and_re_enabled_independently(user_client):
+    t = make_thread(user_client)
+    resp = user_client.patch(
+        f"/api/threads/{t['id']}",
+        json={"auto_match_calendar_enabled": False, "next_step_enabled": False},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["auto_match_calendar_enabled"] is False
+    assert body["next_step_enabled"] is False
+    # Untouched fields keep their existing (default) value.
+    assert body["auto_match_enabled"] is True
+    assert body["auto_match_email_enabled"] is True
+
+    resp = user_client.patch(
+        f"/api/threads/{t['id']}", json={"auto_match_calendar_enabled": True}
+    )
+    assert resp.json()["auto_match_calendar_enabled"] is True
+    # Re-enabling one flag must not disturb the other that's still off.
+    assert resp.json()["next_step_enabled"] is False
+
+
+def test_patch_with_only_title_leaves_match_toggles_alone(user_client):
+    t = make_thread(user_client)
+    user_client.patch(f"/api/threads/{t['id']}", json={"auto_match_enabled": False})
+
+    resp = user_client.patch(f"/api/threads/{t['id']}", json={"title": "Renamed again"})
+    assert resp.status_code == 200
+    assert resp.json()["title"] == "Renamed again"
+    # None (omitted) means "leave alone" for every boolean toggle, the same
+    # convention already used for `archived`.
+    assert resp.json()["auto_match_enabled"] is False
+
+
 def test_delete_removes_the_thread(user_client):
     t = make_thread(user_client)
     assert user_client.delete(f"/api/threads/{t['id']}").status_code == 200

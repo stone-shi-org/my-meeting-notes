@@ -447,6 +447,29 @@ export function ThreadDetailPage() {
     onSuccess: refresh,
   });
 
+  /**
+   * The four per-thread overrides: whether the scheduled sweep watches this
+   * thread at all, whether it (and "Check now") search calendar/email, and
+   * whether the list/detail pages auto-generate a next-step suggestion for
+   * it. None of these affect the manual "Check now"/"Refresh" buttons except
+   * the two source filters, which apply everywhere on purpose -- "nothing to
+   * match on this source" is true regardless of who triggered the search.
+   */
+  const matchSettings = useMutation({
+    mutationFn: (
+      fields: Partial<
+        Pick<
+          Thread,
+          | 'auto_match_enabled'
+          | 'auto_match_calendar_enabled'
+          | 'auto_match_email_enabled'
+          | 'next_step_enabled'
+        >
+      >,
+    ) => api.patch<Thread>(`/threads/${threadId}`, fields),
+    onSuccess: refresh,
+  });
+
   // The cached "next step" suggestion. Patched into the thread query directly
   // rather than refetching it, since a refetch would also re-derive
   // next_step_stale from a fingerprint that (by definition) hasn't moved.
@@ -608,6 +631,64 @@ export function ThreadDetailPage() {
       )}
 
       {thread.data && (
+        <div className="flex flex-wrap items-center gap-x-5 gap-y-2 rounded-lg border border-border-strong bg-surface-2/60 p-3 text-sm">
+          <span className="text-xs font-semibold uppercase tracking-wide text-fg-subtle">
+            Match settings
+          </span>
+          <label className="flex items-center gap-2" title="Whether the periodic sweep watches this thread. Does not affect Check now.">
+            <input
+              type="checkbox"
+              checked={thread.data.auto_match_enabled}
+              onChange={(e) => matchSettings.mutate({ auto_match_enabled: e.target.checked })}
+              className="size-4 rounded border-border-strong"
+            />
+            Auto-match this thread
+          </label>
+          <label className="flex items-center gap-2" title="Search calendar events for this thread, on the sweep and Check now">
+            <input
+              type="checkbox"
+              checked={thread.data.auto_match_calendar_enabled}
+              onChange={(e) =>
+                matchSettings.mutate({ auto_match_calendar_enabled: e.target.checked })
+              }
+              className="size-4 rounded border-border-strong"
+            />
+            Include calendar
+          </label>
+          <label className="flex items-center gap-2" title="Search email for this thread, on the sweep and Check now">
+            <input
+              type="checkbox"
+              checked={thread.data.auto_match_email_enabled}
+              onChange={(e) =>
+                matchSettings.mutate({ auto_match_email_enabled: e.target.checked })
+              }
+              className="size-4 rounded border-border-strong"
+            />
+            Include email
+          </label>
+          <label
+            className="flex items-center gap-2"
+            title="Shortcut for turning off both calendar and email matching — for a thread that is only ever notes"
+          >
+            <input
+              type="checkbox"
+              checked={
+                !thread.data.auto_match_calendar_enabled && !thread.data.auto_match_email_enabled
+              }
+              onChange={(e) =>
+                matchSettings.mutate({
+                  auto_match_calendar_enabled: !e.target.checked,
+                  auto_match_email_enabled: !e.target.checked,
+                })
+              }
+              className="size-4 rounded border-border-strong"
+            />
+            Notes only
+          </label>
+        </div>
+      )}
+
+      {thread.data && (
         <div className="flex flex-wrap items-start gap-3 rounded-lg border border-border-strong bg-surface-2/60 p-3">
           <Sparkles className="mt-0.5 size-4 shrink-0 text-primary" aria-hidden />
           <div className="min-w-0 flex-1">
@@ -638,6 +719,18 @@ export function ThreadDetailPage() {
               <p className="mt-1 text-xs text-danger-ink">{(nextStep.error as Error).message}</p>
             )}
           </div>
+          <label
+            className="flex items-center gap-2 text-xs text-fg-subtle"
+            title="Auto-generate a new suggestion when the thread changes. Does not affect the Refresh button."
+          >
+            <input
+              type="checkbox"
+              checked={thread.data.next_step_enabled}
+              onChange={(e) => matchSettings.mutate({ next_step_enabled: e.target.checked })}
+              className="size-4 rounded border-border-strong"
+            />
+            Auto-generate
+          </label>
           <Button
             size="sm"
             variant="ghost"
