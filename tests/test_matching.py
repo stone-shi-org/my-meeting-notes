@@ -565,6 +565,168 @@ class TestMatchingModelSetting:
         assert body["model"] == "test/model"
 
 
+# Default embedding_base_url (app/config.py); embedding_enabled defaults False
+# in every other test in this file, so none of them ever hit this URL.
+EMBEDDING_URL = "https://llm.internal.example/v1/embeddings"
+
+# context, uid-standup, uid-dentist, g1 (cutover), g2 (spam) -- see EVENTS/EMAILS
+# above. The on-topic pair embeds alongside the context; the noise pair is
+# orthogonal to it.
+ON_TOPIC_EMBEDDING_RESPONSE = {
+    "data": [
+        {"index": 0, "embedding": [1.0, 0.0]},
+        {"index": 1, "embedding": [1.0, 0.0]},
+        {"index": 2, "embedding": [0.0, 1.0]},
+        {"index": 3, "embedding": [1.0, 0.0]},
+        {"index": 4, "embedding": [0.0, 1.0]},
+    ]
+}
+
+# Everything, including the context itself, points the same direction --
+# nothing is on-topic enough to clear even a generous threshold... except here
+# every candidate agrees with the context, so used instead to prove "nothing
+# survives" by pointing every *candidate* away from the context.
+NOTHING_ON_TOPIC_EMBEDDING_RESPONSE = {
+    "data": [
+        {"index": 0, "embedding": [1.0, 0.0]},
+        {"index": 1, "embedding": [0.0, 1.0]},
+        {"index": 2, "embedding": [0.0, 1.0]},
+        {"index": 3, "embedding": [0.0, 1.0]},
+        {"index": 4, "embedding": [0.0, 1.0]},
+    ]
+}
+
+
+def _enable_embedding(admin_client, **extra):
+    resp = admin_client.put(
+        "/api/settings", json={"values": {"embedding_enabled": True, **extra}}
+    )
+    assert resp.status_code == 200, resp.text
+
+
+class TestEmbeddingPrefilter:
+    """The semantic pre-filter ahead of the ranking LLM call (MMN-7 Part B)."""
+
+    def test_disabled_by_default_makes_no_embedding_request(
+        self, user_client, meeting, mock_llm
+    ):
+        """No route is mocked for EMBEDDING_URL at all in this test -- if the
+        pre-filter fired anyway, respx's assert_all_mocked default would fail
+        the request instead of quietly no-op'ing it."""
+        job = run_match(user_client, meeting["id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+    def test_low_similarity_candidates_are_dropped_before_ranking(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        _enable_embedding(admin_client)
+        mock_llm.post(EMBEDDING_URL).mock(
+            return_value=httpx.Response(200, json=ON_TOPIC_EMBEDDING_RESPONSE)
+        )
+        rank_route = mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": json.dumps(RANKING)}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+                },
+            )
+        )
+
+        job = run_match(user_client, meeting["id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        # The actual token saving: the filtered-out candidates never made it
+        # into the ranking prompt at all.
+        rank_request_text = rank_route.calls[-1].request.content.decode()
+        assert "Dentist" not in rank_request_text
+        assert "Atlas Migration" in rank_request_text
+        assert "50% off everything" not in rank_request_text
+        assert "cutover window" in rank_request_text
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        events_by_uid = {e["uid"]: e for e in latest["events"]}
+        assert events_by_uid["uid-standup"]["relevance_score"] == 0.94
+        assert events_by_uid["uid-dentist"]["relevance_score"] == 0.0
+        assert events_by_uid["uid-dentist"]["relevance_reason"] == "filtered by embedding pre-filter"
+        assert events_by_uid["uid-dentist"]["suggested"] is False
+
+        emails_by_msg = {m["message_id"]: m for m in latest["emails"]}
+        assert emails_by_msg["<cutover@x>"]["relevance_score"] == 0.81
+        assert emails_by_msg["<spam@x>"]["relevance_score"] == 0.0
+        assert emails_by_msg["<spam@x>"]["relevance_reason"] == "filtered by embedding pre-filter"
+        assert emails_by_msg["<spam@x>"]["suggested"] is False
+
+    def test_ranking_is_skipped_entirely_when_everything_is_filtered_out(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        _enable_embedding(admin_client)
+        mock_llm.post(EMBEDDING_URL).mock(
+            return_value=httpx.Response(200, json=NOTHING_ON_TOPIC_EMBEDDING_RESPONSE)
+        )
+        rank_route = mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(RANKING)}}]}
+            )
+        )
+
+        job = run_match(user_client, meeting["id"])
+        assert job["status"] == "succeeded", job.get("error")
+        assert len(rank_route.calls) == 0
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        assert latest["model"] is None
+        assert all(
+            e["relevance_reason"] == "filtered by embedding pre-filter" for e in latest["events"]
+        )
+        assert all(
+            m["relevance_reason"] == "filtered by embedding pre-filter" for m in latest["emails"]
+        )
+
+    def test_a_broken_embedding_endpoint_fails_open_and_ranks_everything(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        _enable_embedding(admin_client)
+        mock_llm.post(EMBEDDING_URL).mock(return_value=httpx.Response(500, text="embedding down"))
+        rank_route = mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(RANKING)}}]}
+            )
+        )
+
+        job = run_match(user_client, meeting["id"])
+        assert job["status"] == "succeeded", job.get("error")
+        assert len(rank_route.calls) == 1
+
+        latest = user_client.get(f"/api/meetings/{meeting['id']}/match/latest").json()
+        assert len(latest["events"]) == 2
+        assert len(latest["emails"]) == 2
+        assert all(
+            e["relevance_reason"] != "filtered by embedding pre-filter" for e in latest["events"]
+        )
+
+    def test_the_similarity_floor_is_configurable(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        """At min_score 0.0 even the orthogonal pair clears the bar."""
+        _enable_embedding(admin_client, embedding_min_score=0.0)
+        mock_llm.post(EMBEDDING_URL).mock(
+            return_value=httpx.Response(200, json=ON_TOPIC_EMBEDDING_RESPONSE)
+        )
+        rank_route = mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200, json={"choices": [{"message": {"content": json.dumps(RANKING)}}]}
+            )
+        )
+
+        job = run_match(user_client, meeting["id"])
+        assert job["status"] == "succeeded", job.get("error")
+
+        rank_request_text = rank_route.calls[-1].request.content.decode()
+        assert "Dentist" in rank_request_text
+        assert "50% off everything" in rank_request_text
+
+
 class TestAttachEmail:
     def test_folder_id_round_trips(self, conn):
         """Zoho's content endpoint needs this later -- attach_email is the one

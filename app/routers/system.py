@@ -249,3 +249,33 @@ def transcribe_models(
         return {"models": [], "error": exc.message, "base_url": url}
 
     return {"models": models, "error": None, "base_url": url}
+
+
+@router.get("/embedding/models")
+def embedding_models(
+    refresh: bool = False,
+    _: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Backs the semantic pre-filter's model field -- queries embedding_base_url/
+    embedding_api_key, never llm_base_url/llm_api_key: the embedding model can
+    be served from a different deployment than the chat model (see
+    services/embeddings.py). Same OpenAI-compatible {base_url}/models shape as
+    /llm/models, so it reuses llm_svc.list_models rather than a new client."""
+    from app.config import effective
+    from app.services import llm as llm_svc
+
+    base_url = effective(conn, "embedding_base_url")
+    api_key = effective(conn, "embedding_api_key")
+
+    if refresh:
+        _MODEL_CACHE.pop("embedding", None)
+
+    try:
+        models = _cached(
+            "embedding", lambda: llm_svc.list_models(base_url, api_key)
+        )
+    except AppError as exc:
+        return {"models": [], "error": exc.message, "base_url": base_url}
+
+    return {"models": models, "error": None, "base_url": base_url}

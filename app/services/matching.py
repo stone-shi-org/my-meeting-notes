@@ -21,6 +21,7 @@ from app.config import effective
 from app.db import get_conn, utcnow
 from app.errors import NoIntegrationsError, NotFoundError
 from app.logging_config import get_logger
+from app.services import embeddings as embeddings_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
@@ -492,6 +493,113 @@ def rank_candidates_sync(
     return rank_sync(db_path, context, gathered, model)
 
 
+EMBEDDING_FILTERED_REASON = "filtered by embedding pre-filter"
+# Bounds the one context string embedded per rank_sync call -- a long thread
+# description shouldn't blow up the embedding request the way DESCRIPTION_LIMIT/
+# SNIPPET_LIMIT already bound each candidate's own text below.
+CONTEXT_TEXT_LIMIT = 2000
+
+
+def _embedding_prefilter(
+    embedding_enabled: bool,
+    embedding_config: embeddings_svc.EmbeddingConfig | None,
+    context: dict,
+    events: list[dict],
+    emails: list[dict],
+) -> tuple[list[dict], list[dict], list[dict], list[dict]]:
+    """Drop candidates whose embedding is far from the meeting/thread context,
+    before the ranking LLM ever sees them -- the actual token saving this
+    exists for (MMN-7 Part B). Returns
+    ``(kept_events, kept_emails, filtered_events, filtered_emails)``; the
+    filtered lists already carry the same relevance fields ``apply_ranking``
+    would, scored 0.0, so a dropped candidate still shows up in the UI
+    instead of silently vanishing.
+
+    Fails open on anything -- disabled, no config, no context to embed
+    against, a request error, or a response that doesn't line up with what
+    was sent: every failure path returns every candidate unfiltered, exactly
+    as if the pre-filter were off. See services/embeddings.py's module
+    docstring for why "fail open" (not rank_sync's own "LLM down => rank
+    nothing" interlock) is the right rule here.
+    """
+    if not embedding_enabled or embedding_config is None or not (events or emails):
+        return events, emails, [], []
+
+    context_text = " ".join(
+        str(v) for v in (
+            context.get("thread_title"),
+            context.get("thread_description"),
+            context.get("meeting_title"),
+            context.get("meeting_tldr"),
+            " ".join(context.get("keywords") or []),
+        )
+        if v
+    ).strip()[:CONTEXT_TEXT_LIMIT]
+    if not context_text:
+        return events, emails, [], []
+
+    def event_text(e: dict) -> str:
+        return " ".join(
+            str(v) for v in (
+                e.get("summary"),
+                _truncate(e.get("description"), DESCRIPTION_LIMIT),
+                e.get("location"),
+            )
+            if v
+        )
+
+    def email_text(m: dict) -> str:
+        return " ".join(
+            str(v) for v in (m.get("subject"), _truncate(m.get("snippet"), SNIPPET_LIMIT))
+            if v
+        )
+
+    texts = [context_text] + [event_text(e) for e in events] + [email_text(m) for m in emails]
+
+    try:
+        vectors = embeddings_svc.embed_texts(embedding_config, texts)
+    except Exception as exc:
+        log.warning("embedding pre-filter unavailable, ranking everything: %s", exc)
+        return events, emails, [], []
+
+    if len(vectors) != len(texts):
+        log.warning(
+            "embedding pre-filter returned %d vector(s) for %d input(s), ranking everything",
+            len(vectors), len(texts),
+        )
+        return events, emails, [], []
+
+    context_vec = vectors[0]
+    event_vecs = vectors[1 : 1 + len(events)]
+    email_vecs = vectors[1 + len(events) :]
+
+    kept_events: list[dict] = []
+    filtered_events: list[dict] = []
+    for e, vec in zip(events, event_vecs):
+        score = embeddings_svc.cosine_similarity(context_vec, vec)
+        if score >= embedding_config.min_score:
+            kept_events.append(e)
+        else:
+            filtered_events.append(
+                {**e, "relevance_score": 0.0, "relevance_reason": EMBEDDING_FILTERED_REASON,
+                 "suggested": False}
+            )
+
+    kept_emails: list[dict] = []
+    filtered_emails: list[dict] = []
+    for m, vec in zip(emails, email_vecs):
+        score = embeddings_svc.cosine_similarity(context_vec, vec)
+        if score >= embedding_config.min_score:
+            kept_emails.append(m)
+        else:
+            filtered_emails.append(
+                {**m, "relevance_score": 0.0, "relevance_reason": EMBEDDING_FILTERED_REASON,
+                 "suggested": False}
+            )
+
+    return kept_events, kept_emails, filtered_events, filtered_emails
+
+
 def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) -> dict:
     """One LLM call. On failure the candidates come back unranked, not lost.
 
@@ -508,11 +616,33 @@ def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) 
     with get_conn(db_path) as conn:
         resolved_model = model or effective(conn, "matching_model") or None
         config = llm_svc.LLMConfig.from_db(conn, model_override=resolved_model)
+        embedding_enabled = effective(conn, "embedding_enabled")
+        embedding_config = (
+            embeddings_svc.EmbeddingConfig.from_db(conn) if embedding_enabled else None
+        )
 
     events, emails = gathered["events"], gathered["emails"]
     if not events and not emails:
         return {"events": [], "emails": [], "model": None, "prompt_sha256": None,
                 "error": None, "notes": ""}
+
+    events, emails, filtered_events, filtered_emails = _embedding_prefilter(
+        embedding_enabled, embedding_config, context, events, emails
+    )
+
+    if not events and not emails:
+        # Everything cleared by keyword search failed the semantic pre-filter --
+        # skip the ranking LLM call entirely. This is the actual token saving
+        # the pre-filter exists for; trimming the candidate list but still
+        # calling the ranker would save less.
+        return {
+            "events": filtered_events,
+            "emails": filtered_emails,
+            "model": None,
+            "prompt_sha256": None,
+            "error": None,
+            "notes": "",
+        }
 
     prompt = prompts_svc.load("match_rank_prompt")
     if prompt.temperature is not None:
@@ -531,11 +661,11 @@ def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) 
             "events": [
                 {**e, "relevance_score": None, "relevance_reason": "", "suggested": False}
                 for e in events
-            ],
+            ] + filtered_events,
             "emails": [
                 {**m, "relevance_score": None, "relevance_reason": "", "suggested": False}
                 for m in emails
-            ],
+            ] + filtered_emails,
             "model": config.model,
             "prompt_sha256": prompt.sha256,
             "error": str(exc),
@@ -543,8 +673,11 @@ def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) 
         }
 
     return {
-        "events": apply_ranking(events, parsed.get("calendar") or [], "c"),
-        "emails": apply_ranking(emails, parsed.get("email") or [], "e"),
+        # filtered_* are always scored 0.0, the floor apply_ranking's own
+        # descending sort already ends on -- appending them after keeps the
+        # combined list sorted without a second pass.
+        "events": apply_ranking(events, parsed.get("calendar") or [], "c") + filtered_events,
+        "emails": apply_ranking(emails, parsed.get("email") or [], "e") + filtered_emails,
         "model": config.model,
         "prompt_sha256": prompt.sha256,
         "error": None,

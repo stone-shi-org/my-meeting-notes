@@ -982,6 +982,37 @@ export function MatchingSettingsPage() {
       />
 
       <SettingsForm
+        title="Semantic pre-filter (embeddings)"
+        description="Before the ranking model ever sees a candidate, embed it and the meeting/thread it's being matched against, and drop anything below the similarity floor -- the actual saving is that a candidate list that filters down to nothing skips the ranking call entirely. Applies to both the manual Match button and Automatic follow-ups below. Uses its own base URL, API key and model rather than the Language model panel's, since the embedding model can live on a different deployment even behind the same gateway. On any error here (unreachable, wrong key, wrong model) matching falls back to ranking every candidate, exactly as if this were off -- a broken embedding endpoint is a cost optimization failing, not a reason to drop something nobody reviewed."
+        modelsPath="/embedding/models"
+        modelKey="embedding_model"
+        testPath="/embedding/test"
+        testKeyMap={{
+          embedding_base_url: 'base_url',
+          embedding_api_key: 'api_key',
+          embedding_model: 'model',
+        }}
+        keys={[
+          {
+            key: 'embedding_enabled',
+            label: 'Enable semantic pre-filter',
+            hint: 'Off by default -- a misconfigured endpoint would otherwise start silently dropping real candidates the moment it\'s turned on.',
+          },
+          { key: 'embedding_base_url', label: 'Base URL', hint: 'OpenAI-compatible, ending in /v1' },
+          { key: 'embedding_api_key', label: 'API key' },
+          { key: 'embedding_model', label: 'Model' },
+          {
+            key: 'embedding_min_score',
+            label: 'Minimum similarity to keep (0-1)',
+            type: 'number',
+            step: '0.05',
+            hint: 'Cosine similarity floor, not a tuned value -- there\'s no labelled dataset to calibrate against here. Tune per deployment; a candidate below this is dropped before ranking, not scored low by it.',
+          },
+          { key: 'embedding_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
+        ]}
+      />
+
+      <SettingsForm
         title="Automatic follow-ups"
         description={
           'On a timer, every thread is re-searched and anything the ranker is confident ' +

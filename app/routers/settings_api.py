@@ -18,6 +18,7 @@ from app.deps import CurrentUser, active_user, get_db, require_admin
 from app.errors import ValidationError
 from app.logging_config import get_logger
 from app.services import diarize as diarize_svc
+from app.services import embeddings as embeddings_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
 from app.services import telegram as telegram_svc
@@ -82,6 +83,12 @@ class TelegramTestRequest(BaseModel):
 class WebSearchTestRequest(BaseModel):
     base_url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
+
+
+class EmbeddingTestRequest(BaseModel):
+    base_url: str | None = Field(default=None, max_length=500)
+    api_key: str | None = Field(default=None, max_length=500)
+    model: str | None = Field(default=None, max_length=200)
 
 
 # A cheap connectivity probe (GET /v1/models) doesn't need the multi-minute
@@ -353,6 +360,32 @@ def test_web_search(
     log.info(
         "admin %s tested web search: ok=%s %sms",
         admin.username, result["ok"], result["latency_ms"],
+    )
+    return result
+
+
+@router.post("/embedding/test")
+def test_embedding(
+    payload: EmbeddingTestRequest | None = None,
+    admin: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Independent of embedding_enabled, same as every other Test button here:
+    lets an admin verify the endpoint before flipping the setting on."""
+    config = embeddings_svc.EmbeddingConfig.from_db(conn)
+
+    if payload is not None:
+        if payload.base_url:
+            config.base_url = payload.base_url.rstrip("/")
+        if payload.model:
+            config.model = payload.model
+        if payload.api_key is not None and not payload.api_key.startswith(MASK):
+            config.api_key = payload.api_key
+
+    result = embeddings_svc.test_connection(config)
+    log.info(
+        "admin %s tested embeddings (%s): ok=%s %sms",
+        admin.username, config.model, result["ok"], result["latency_ms"],
     )
     return result
 

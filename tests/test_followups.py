@@ -225,6 +225,43 @@ class TestSweep:
         body = json.loads(mock_llm.calls[-1].request.content)
         assert body["model"] == "cheap/matcher"
 
+    def test_the_embedding_prefilter_applies_to_the_sweep_too(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        """Same rank_sync, same pre-filter -- proves the sweep doesn't bypass
+        it just because it never passes a model override (see MMN-7 Part B)."""
+        embedding_url = "https://llm.internal.example/v1/embeddings"
+        configure(admin_client, embedding_enabled=True)
+        mock_llm.post(embedding_url).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {"index": 0, "embedding": [1.0, 0.0]},  # context
+                        {"index": 1, "embedding": [1.0, 0.0]},  # uid-review
+                        {"index": 2, "embedding": [0.0, 1.0]},  # uid-dentist
+                        {"index": 3, "embedding": [1.0, 0.0]},  # g1 (followup)
+                        {"index": 4, "embedding": [0.0, 1.0]},  # g2 (spam)
+                    ]
+                },
+            )
+        )
+        rank_route = mock_llm.post(LLM_URL).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "choices": [{"message": {"content": json.dumps(RANKING)}}],
+                    "usage": {"prompt_tokens": 10, "completion_tokens": 10},
+                },
+            )
+        )
+
+        sweep(user_client, meeting["thread_id"])
+
+        rank_request_text = rank_route.calls[-1].request.content.decode()
+        assert "Dentist" not in rank_request_text
+        assert "50% off everything" not in rank_request_text
+
     def test_attached_items_are_marked_unread(self, user_client, meeting, mock_llm):
         sweep(user_client, meeting["thread_id"])
 

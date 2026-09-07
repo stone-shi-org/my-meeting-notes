@@ -126,6 +126,22 @@ class WebSearchAuthError(WebSearchError):
     code = "WEB_SEARCH_AUTH_FAILED"
 
 
+class EmbeddingError(AppError):
+    """The semantic pre-filter's own service (matching.rank_sync's
+    embedding_enabled path), separate from LLMError: a broken embedding
+    endpoint is a cost-optimization failing, not the ranking LLM itself, and
+    the pre-filter fails *open* on this rather than blocking a match -- see
+    services/embeddings.py's module docstring.
+    """
+
+    status_code = 502
+    code = "embedding_error"
+
+
+class EmbeddingAuthError(EmbeddingError):
+    code = "EMBEDDING_AUTH_FAILED"
+
+
 class ProviderError(AppError):
     """A connected calendar or inbox failed.
 

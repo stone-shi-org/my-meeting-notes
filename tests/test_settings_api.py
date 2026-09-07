@@ -20,6 +20,8 @@ def test_settings_list_every_runtime_key(user_client):
         "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
         "diarize_only", "transcribe_url", "transcribe_model", "transcribe_api_key",
         "transcribe_timeout_sec", "diarize_chunk_threshold_sec", "diarize_chunk_size_sec",
+        "embedding_enabled", "embedding_base_url", "embedding_api_key", "embedding_model",
+        "embedding_timeout_sec", "embedding_min_score",
     ):
         assert key in body
 
@@ -100,6 +102,42 @@ def test_matching_model_is_a_plain_unmasked_string_that_round_trips(admin_client
     body = admin_client.get("/api/settings").json()["settings"]
     assert body["matching_model"]["value"] == "cheap/matcher"
     assert body["matching_model"]["overridden"] is True
+
+
+def test_embedding_enabled_round_trips_as_a_bool_and_defaults_off(admin_client):
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["embedding_enabled"]["value"] is False
+    assert body["embedding_enabled"]["type"] == "bool"
+
+    admin_client.put("/api/settings", json={"values": {"embedding_enabled": True}})
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["embedding_enabled"]["value"] is True
+
+
+def test_embedding_api_key_is_masked_like_every_other_secret(admin_client, isolated_settings):
+    admin_client.put(
+        "/api/settings", json={"values": {"embedding_api_key": "sk-embedding-real"}}
+    )
+
+    shown = admin_client.get("/api/settings").json()["settings"]["embedding_api_key"]
+    assert shown["is_secret"] is True
+    assert shown["value"].startswith("••••")
+    assert "sk-embedding-real" not in shown["value"]
+
+    # And the masked round-trip convention holds for it too.
+    admin_client.put("/api/settings", json={"values": {"embedding_api_key": shown["value"]}})
+    with get_conn(isolated_settings.db_path) as conn:
+        stored = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'embedding_api_key'"
+        ).fetchone()[0]
+    assert stored == "sk-embedding-real"
+
+
+def test_embedding_min_score_round_trips_as_a_float(admin_client):
+    admin_client.put("/api/settings", json={"values": {"embedding_min_score": 0.5}})
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["embedding_min_score"]["value"] == 0.5
+    assert body["embedding_min_score"]["type"] == "float"
 
 
 def test_types_survive_the_round_trip(admin_client):

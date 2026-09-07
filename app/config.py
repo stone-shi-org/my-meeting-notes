@@ -61,6 +61,25 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # matching.rank_sync. Worth a cheaper model of its own: matching runs far
     # more often than a summary does, especially with auto_match_enabled on.
     "matching_model": ("str", False),
+    # Semantic pre-filter ahead of the ranking LLM call (MMN-7 Part B): embeds
+    # the meeting/thread context and each gathered candidate, drops anything
+    # below embedding_min_score *before* paying for a ranking prompt on it,
+    # and skips the ranking call entirely when everything is filtered out --
+    # see matching._embedding_prefilter. Own base_url/api_key/model/timeout,
+    # not llm_base_url/llm_api_key: confirmed on MMN-7 that the embedding
+    # model can be served from a different deployment than the chat model,
+    # even behind the same gateway. Off by default, same reasoning as
+    # auto_match_enabled -- it spends its own quota and a misconfigured
+    # endpoint would otherwise start silently dropping real candidates the
+    # moment it's turned on.
+    "embedding_enabled": ("bool", False),
+    "embedding_base_url": ("str", False),
+    "embedding_api_key": ("str", True),
+    "embedding_model": ("str", False),
+    "embedding_timeout_sec": ("int", False),
+    # Cosine-similarity floor, not a tuned value -- there's no labelled
+    # dataset in this repo to calibrate against. Admin-tunable per deployment.
+    "embedding_min_score": ("float", False),
     "match_window_days_before": ("int", False),
     "match_window_days_after": ("int", False),
     "match_window_calendar_days_before": ("int", False),
@@ -296,6 +315,17 @@ class Settings(BaseSettings):
     mcp_email_token: str = ""
     mcp_profile: str = "default"
     mcp_timeout_sec: int = 60
+
+    # --- embeddings (matching's semantic pre-filter) -------------------------
+    # See RUNTIME_KEYS above. Off by default; base_url/model default to a
+    # deployment confirmed to serve embeddings on MMN-7, but only take effect
+    # once embedding_enabled is switched on.
+    embedding_enabled: bool = False
+    embedding_base_url: str = "https://llm.internal.example/v1"
+    embedding_api_key: str = ""
+    embedding_model: str = "lmstudio/text-embedding-qwen3-embedding-0.6b"
+    embedding_timeout_sec: int = 20
+    embedding_min_score: float = 0.3
 
     # --- matching -----------------------------------------------------------
     # See RUNTIME_KEYS above -- blank means "use llm_model", resolved in
