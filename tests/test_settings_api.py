@@ -15,7 +15,8 @@ from app.db import get_conn
 def test_settings_list_every_runtime_key(user_client):
     body = user_client.get("/api/settings").json()["settings"]
     for key in (
-        "llm_base_url", "llm_model", "diarization_url", "match_max_candidates",
+        "llm_base_url", "llm_model", "matching_model", "diarization_url",
+        "match_max_candidates",
         "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
         "diarize_only", "transcribe_url", "transcribe_model", "transcribe_api_key",
         "transcribe_timeout_sec", "diarize_chunk_threshold_sec", "diarize_chunk_size_sec",
@@ -81,6 +82,24 @@ def test_updating_a_setting_takes_effect(admin_client):
     body = admin_client.get("/api/settings").json()["settings"]
     assert body["llm_model"]["value"] == "changed/model"
     assert body["llm_model"]["overridden"] is True
+
+
+def test_matching_model_is_a_plain_unmasked_string_that_round_trips(admin_client):
+    """Same shape as insights_model: not a secret, blank by default (falls
+    back to llm_model in matching.rank_sync, not asserted here)."""
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["matching_model"]["is_secret"] is False
+    assert body["matching_model"]["value"] == ""
+
+    resp = admin_client.put(
+        "/api/settings", json={"values": {"matching_model": "cheap/matcher"}}
+    )
+    assert resp.status_code == 200
+    assert resp.json()["updated"] == ["matching_model"]
+
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["matching_model"]["value"] == "cheap/matcher"
+    assert body["matching_model"]["overridden"] is True
 
 
 def test_types_survive_the_round_trip(admin_client):

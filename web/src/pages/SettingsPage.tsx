@@ -922,6 +922,26 @@ export function MatchingSettingsPage() {
   return (
     <div className="space-y-4">
       <SettingsForm
+        title="Matching model"
+        description="A separate, optionally cheaper/faster model for ranking calendar and email candidates against a meeting or thread. Reuses the base URL and API key from the Language model panel. Matching runs far more often than a summary does, especially with Automatic follow-ups on below."
+        modelsPath="/llm/models"
+        modelKey="matching_model"
+        testPath="/llm/test"
+        testKeyMap={{
+          llm_base_url: 'base_url',
+          llm_api_key: 'api_key',
+          matching_model: 'model',
+        }}
+        keys={[
+          {
+            key: 'matching_model',
+            label: 'Model',
+            hint: 'Leave blank to use the main Language model setting.',
+          },
+        ]}
+      />
+
+      <SettingsForm
         title="Matching"
         description="How far around a meeting the search for related email reaches."
         keys={[

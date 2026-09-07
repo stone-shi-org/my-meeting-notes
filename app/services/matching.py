@@ -497,9 +497,17 @@ def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) 
 
     Takes the context rather than a meeting id so the periodic thread sweep can
     reuse it: same prompt, same scores, same "unranked beats nothing" fallback.
+
+    Model precedence: an explicit ``model`` argument (a per-request override,
+    e.g. from the manual Match button) wins; otherwise the persisted
+    ``matching_model`` setting; otherwise ``LLMConfig.from_db`` falls back to
+    ``llm_model`` itself. This is what lets the automatic follow-up sweep --
+    which never passes ``model`` -- pick up a dedicated, optionally cheaper
+    matching model without any change on its end.
     """
     with get_conn(db_path) as conn:
-        config = llm_svc.LLMConfig.from_db(conn, model_override=model)
+        resolved_model = model or effective(conn, "matching_model") or None
+        config = llm_svc.LLMConfig.from_db(conn, model_override=resolved_model)
 
     events, emails = gathered["events"], gathered["emails"]
     if not events and not emails:

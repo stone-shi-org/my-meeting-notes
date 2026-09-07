@@ -213,6 +213,18 @@ class TestSweep:
         assert result["attached_events"] == 1
         assert result["attached_emails"] == 0
 
+    def test_the_sweep_picks_up_a_dedicated_matching_model(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        """The sweep never passes a per-request model override -- unlike the
+        manual Match button -- so this is the only way it ever sees anything
+        other than llm_model."""
+        configure(admin_client, matching_model="cheap/matcher")
+        sweep(user_client, meeting["thread_id"])
+
+        body = json.loads(mock_llm.calls[-1].request.content)
+        assert body["model"] == "cheap/matcher"
+
     def test_attached_items_are_marked_unread(self, user_client, meeting, mock_llm):
         sweep(user_client, meeting["thread_id"])
 

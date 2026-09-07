@@ -54,6 +54,13 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "web_search_api_key": ("str", True),
     "web_search_timeout_sec": ("int", False),
     "summary_prompt_name": ("str", False),
+    # A separate model for ranking match candidates, reusing llm_base_url/
+    # llm_api_key/llm_ssl_verify/llm_timeout_sec (same idea as insights_model).
+    # Unlike insights_model, empty does NOT mean "feature off" -- matching
+    # always needs a model -- it means "fall back to llm_model", resolved in
+    # matching.rank_sync. Worth a cheaper model of its own: matching runs far
+    # more often than a summary does, especially with auto_match_enabled on.
+    "matching_model": ("str", False),
     "match_window_days_before": ("int", False),
     "match_window_days_after": ("int", False),
     "match_window_calendar_days_before": ("int", False),
@@ -291,6 +298,9 @@ class Settings(BaseSettings):
     mcp_timeout_sec: int = 60
 
     # --- matching -----------------------------------------------------------
+    # See RUNTIME_KEYS above -- blank means "use llm_model", resolved in
+    # matching.rank_sync, not here.
+    matching_model: str = ""
     match_window_days_before: int = 7
     match_window_days_after: int = 14
     # Calendars are cheap to search broadly (a date-range list call, not a

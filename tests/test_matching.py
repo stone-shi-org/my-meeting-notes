@@ -528,6 +528,43 @@ class TestMatchJob:
         ).status_code == 404
 
 
+class TestMatchingModelSetting:
+    """matching_model's precedence: explicit override > setting > llm_model."""
+
+    def test_the_setting_is_used_when_no_override_is_passed(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        resp = admin_client.put(
+            "/api/settings", json={"values": {"matching_model": "cheap/matcher"}}
+        )
+        assert resp.status_code == 200, resp.text
+
+        run_match(user_client, meeting["id"])
+
+        body = json.loads(mock_llm.calls[-1].request.content)
+        assert body["model"] == "cheap/matcher"
+
+    def test_an_explicit_override_still_wins_over_the_setting(
+        self, user_client, admin_client, meeting, mock_llm
+    ):
+        admin_client.put(
+            "/api/settings", json={"values": {"matching_model": "cheap/matcher"}}
+        )
+
+        run_match(user_client, meeting["id"], model="explicit/model")
+
+        body = json.loads(mock_llm.calls[-1].request.content)
+        assert body["model"] == "explicit/model"
+
+    def test_a_blank_setting_falls_back_to_llm_model(
+        self, user_client, meeting, mock_llm
+    ):
+        run_match(user_client, meeting["id"])
+
+        body = json.loads(mock_llm.calls[-1].request.content)
+        assert body["model"] == "test/model"
+
+
 class TestAttachEmail:
     def test_folder_id_round_trips(self, conn):
         """Zoho's content endpoint needs this later -- attach_email is the one
