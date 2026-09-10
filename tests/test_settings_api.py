@@ -16,6 +16,7 @@ def test_settings_list_every_runtime_key(user_client):
     body = user_client.get("/api/settings").json()["settings"]
     for key in (
         "llm_base_url", "llm_model", "matching_model", "diarization_url",
+        "diarization_backend", "pyannote_ai_api_key",
         "match_max_candidates",
         "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
         "diarize_only", "transcribe_url", "transcribe_model", "transcribe_api_key",
@@ -58,6 +59,60 @@ def test_transcribe_api_key_is_masked_like_every_other_secret(admin_client, isol
             "SELECT value FROM app_settings WHERE key = 'transcribe_api_key'"
         ).fetchone()[0]
     assert stored == "sk-transcribe-real"
+
+
+def test_diarization_backend_round_trips_and_defaults_to_live_stt(admin_client):
+    """live_stt is the backward-compatible default -- an existing deployment
+    that has never touched this setting must keep behaving exactly as it did
+    before pyannote.ai support existed."""
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["diarization_backend"]["value"] == "live_stt"
+
+    admin_client.put("/api/settings", json={"values": {"diarization_backend": "pyannote_ai"}})
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["diarization_backend"]["value"] == "pyannote_ai"
+
+
+def test_pyannote_ai_api_key_is_masked_like_every_other_secret(admin_client, isolated_settings):
+    admin_client.put("/api/settings", json={"values": {"pyannote_ai_api_key": "pyk-real-key"}})
+
+    shown = admin_client.get("/api/settings").json()["settings"]["pyannote_ai_api_key"]
+    assert shown["is_secret"] is True
+    assert shown["value"].startswith("••••")
+    assert "pyk-real-key" not in shown["value"]
+
+    admin_client.put("/api/settings", json={"values": {"pyannote_ai_api_key": shown["value"]}})
+    with get_conn(isolated_settings.db_path) as conn:
+        stored = conn.execute(
+            "SELECT value FROM app_settings WHERE key = 'pyannote_ai_api_key'"
+        ).fetchone()[0]
+    assert stored == "pyk-real-key"
+
+
+def test_diarization_backend_switch_keeps_the_local_backend_settings_intact(admin_client):
+    """Switching to pyannote_ai and back must not clobber the self-hosted
+    backend's own url/model/api_key -- same independence guarantee
+    test_live_caption_backends_keep_independent_settings_across_switches
+    already holds the three live-caption backends to."""
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "diarization_backend": "live_stt",
+                "diarization_url": "http://my-diarizer.test/v1/audio/diarization",
+                "diarization_model": "vibevoice-cpp-asr",
+                "pyannote_ai_api_key": "pyk-real-key",
+            }
+        },
+    )
+
+    admin_client.put("/api/settings", json={"values": {"diarization_backend": "pyannote_ai"}})
+    admin_client.put("/api/settings", json={"values": {"diarization_backend": "live_stt"}})
+
+    body = admin_client.get("/api/settings").json()["settings"]
+    assert body["diarization_url"]["value"] == "http://my-diarizer.test/v1/audio/diarization"
+    assert body["diarization_model"]["value"] == "vibevoice-cpp-asr"
+    assert body["pyannote_ai_api_key"]["value"].startswith("••••")
 
 
 def test_secrets_are_masked_on_read(user_client):

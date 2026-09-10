@@ -23,10 +23,26 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # Keys that live in the app_settings table and may be overridden at runtime.
 # value_type drives coercion on the way out; is_secret drives masking in the API.
 RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
+    # Which backend the batch diarizer talks to: "live_stt" (default) is the
+    # existing self-hosted OpenAI-compatible service below (diarization_url/
+    # _model/_api_key) -- the name is a historical accident (that service
+    # happens to be hosted at a host literally named "live-stt" on at least
+    # one deployment) and has nothing to do with live_caption_backend's own
+    # "live_stt" value, which is a completely different gRPC streaming
+    # protocol used only by Live Captions. "pyannote_ai" is the real
+    # api.pyannote.ai cloud service (pyannote_ai_api_key below) -- an async
+    # job-submission REST API, not a multipart POST to a configurable URL,
+    # so it has no diarization_url/diarization_model equivalent of its own.
+    "diarization_backend": ("str", False),
     "diarization_url": ("str", False),
     "diarization_model": ("str", False),
     "diarization_api_key": ("str", True),
     "diarization_timeout_sec": ("int", False),
+    # Bearer token for api.pyannote.ai, only read while diarization_backend
+    # is "pyannote_ai". No base URL setting -- pyannote.ai has exactly one
+    # hosted endpoint (see services/pyannote_cloud.BASE_URL), unlike the
+    # self-hosted backend above which can be pointed at any deployment.
+    "pyannote_ai_api_key": ("str", True),
     # A recording past this length is diarized in pieces instead of one
     # request -- see pipeline._diarize_in_chunks. Unused entirely while
     # diarize_only is on (see below).
@@ -255,10 +271,13 @@ class Settings(BaseSettings):
     password_min_length: int = 10
 
     # --- diarization --------------------------------------------------------
+    # See RUNTIME_KEYS above for what "live_stt" vs "pyannote_ai" means here.
+    diarization_backend: str = "live_stt"
     diarization_url: str = "http://diarization.internal.example:4012/v1/audio/diarization"
     diarization_model: str = "vibevoice-cpp-asr"
     diarization_api_key: str = ""
     diarization_timeout_sec: int = 1800
+    pyannote_ai_api_key: str = ""
     diarize_fake: bool = False
     diarize_fake_delay_sec: float = 2.0
     # Wall-clock seconds of processing per second of audio; used to synthesise a

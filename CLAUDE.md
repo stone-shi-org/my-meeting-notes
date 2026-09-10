@@ -660,6 +660,25 @@ checkpoint. `diarize_chunk_threshold_sec`/`diarize_chunk_size_sec` are runtime-e
 now (previously env-only) — read via `effective()`, not `settings.diarize_chunk_*_sec`, inside
 `_diarize_stage`, or a DB override would be silently ignored.
 
+**`diarization_backend` (`"live_stt"` default | `"pyannote_ai"`) picks the wire protocol, checked in
+`_diarize_stage` ahead of even `diarize_only`.** `"live_stt"` is every diarize_only/chunking/settings
+behaviour described above, kept as the default so an existing deployment needs no migration — the
+name is a historical accident (that self-hosted service happens to be hosted at a host literally
+named `live-stt` on at least one deployment) and is unrelated to `live_caption_backend`'s own
+`"live_stt"` value, a completely different gRPC streaming protocol Live Captions uses;
+`diarize.test_connection`'s `backend` parameter already means that second thing, which is why
+`/api/diarization/test` dispatches pyannote.ai itself rather than ever passing `backend="pyannote_ai"`
+into it. `"pyannote_ai"` is the real `api.pyannote.ai` cloud service (`services/pyannote_cloud.py`) —
+an async job-submission REST API, not a multipart POST to a configurable URL: upload the file via a
+presigned `media://` URL (`POST /media/input` then a raw `PUT`), submit the job
+(`POST /diarize {"url": "media://...", "transcription": true}`), then poll `GET /jobs/{id}` until it
+leaves "running". `transcription: true` returns a speaker-attributed transcript
+(`turnLevelTranscription`) in the same job, so this backend needs no pairing with `diarize_only` or
+`transcribe_*` and bypasses both entirely, along with chunking — pyannote.ai's own job handles any
+length. Only one setting, `pyannote_ai_api_key` — no URL, since there is exactly one hosted endpoint.
+Checkpointed under the fixed label `"pyannote_ai"` (not `chosen_model`, which only means something for
+the local backend) so switching backends never makes a stale run from the other one look reusable.
+
 ## Conventions
 
 - Timestamps: ISO-8601 UTC `TEXT` via `db.utcnow()`. Never `datetime.now()` bare.

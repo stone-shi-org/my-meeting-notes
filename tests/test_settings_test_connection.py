@@ -428,6 +428,68 @@ def test_diarization_test_endpoint_is_admin_only(user_client):
     assert user_client.post("/api/diarization/test").status_code == 403
 
 
+def test_diarization_test_endpoint_dispatches_pyannote_ai_to_the_cloud_probe(admin_client, monkeypatch):
+    """When diarization_backend is pyannote_ai, /api/diarization/test must go
+    through pyannote_cloud_svc.test_connection -- not diarize_svc.test_connection,
+    whose own `backend` parameter already means something unrelated (Live
+    Captions' gRPC probe) and must never be given "pyannote_ai" instead."""
+    admin_client.put(
+        "/api/settings",
+        json={"values": {"diarization_backend": "pyannote_ai", "pyannote_ai_api_key": "pyk-saved"}},
+    )
+    seen = {}
+
+    def fake_test_connection(api_key, timeout=15):
+        seen["api_key"] = api_key
+        return {"ok": True, "latency_ms": 3, "error": None, "models_count": 1, "model_found": True}
+
+    from app.services import pyannote_cloud as pyannote_cloud_svc
+
+    monkeypatch.setattr(pyannote_cloud_svc, "test_connection", fake_test_connection)
+
+    resp = admin_client.post("/api/diarization/test")
+    assert resp.status_code == 200
+    assert resp.json()["ok"] is True
+    assert seen == {"api_key": "pyk-saved"}
+
+
+def test_diarization_test_endpoint_pyannote_ai_can_try_an_unsaved_key(admin_client, monkeypatch):
+    admin_client.put("/api/settings", json={"values": {"diarization_backend": "pyannote_ai"}})
+    seen = {}
+
+    def fake_test_connection(api_key, timeout=15):
+        seen["api_key"] = api_key
+        return {"ok": True, "latency_ms": 3, "error": None, "models_count": 1, "model_found": True}
+
+    from app.services import pyannote_cloud as pyannote_cloud_svc
+
+    monkeypatch.setattr(pyannote_cloud_svc, "test_connection", fake_test_connection)
+
+    resp = admin_client.post("/api/diarization/test", json={"pyannote_api_key": "pyk-unsaved"})
+    assert resp.status_code == 200
+    assert seen == {"api_key": "pyk-unsaved"}
+
+
+def test_diarization_test_endpoint_pyannote_ai_ignores_a_masked_key_echo(admin_client, monkeypatch):
+    admin_client.put(
+        "/api/settings",
+        json={"values": {"diarization_backend": "pyannote_ai", "pyannote_ai_api_key": "pyk-saved"}},
+    )
+    seen = {}
+
+    def fake_test_connection(api_key, timeout=15):
+        seen["api_key"] = api_key
+        return {"ok": True, "latency_ms": 3, "error": None, "models_count": 1, "model_found": True}
+
+    from app.services import pyannote_cloud as pyannote_cloud_svc
+
+    monkeypatch.setattr(pyannote_cloud_svc, "test_connection", fake_test_connection)
+
+    resp = admin_client.post("/api/diarization/test", json={"pyannote_api_key": "••••aved"})
+    assert resp.status_code == 200
+    assert seen == {"api_key": "pyk-saved"}
+
+
 # --------------------------------------------------------------------------- #
 # /api/live-caption/test -- each of the three backends independently, with no
 # diarization_url/diarization_api_key fallback (see config.RUNTIME_KEYS on why

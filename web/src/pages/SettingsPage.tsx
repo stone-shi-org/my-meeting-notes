@@ -659,99 +659,170 @@ function DiarizeOnlyToggle() {
   );
 }
 
+/**
+ * Which service the batch diarizer talks to. Its own immediate-save control,
+ * same pattern as DiarizeOnlyToggle/LiveCaptionBackendSelect -- it gates
+ * which form(s) below are shown, and a half-saved draft value would leave
+ * the visible form not matching what's actually configured.
+ *
+ * The "live_stt" value here is unrelated to live_caption_backend's own
+ * "live_stt" value (a completely different gRPC streaming protocol) -- it
+ * just names the existing self-hosted OpenAI-compatible service below,
+ * kept for backward compatibility as the default so an existing deployment
+ * needs no migration.
+ */
+function DiarizationBackendSelect() {
+  const { isAdmin } = useAuth();
+  const queryClient = useQueryClient();
+  const settings = useSettings();
+  const value = String(settings.data?.settings.diarization_backend?.value ?? 'live_stt');
+
+  const save = useMutation({
+    mutationFn: (next: string) => api.put('/settings', { values: { diarization_backend: next } }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['settings'] }),
+  });
+
+  if (settings.isLoading) return <Skeleton className="h-24 w-full" />;
+
+  return (
+    <Card className="p-5">
+      <Label htmlFor="diarization_backend">Backend</Label>
+      <Select
+        id="diarization_backend"
+        className="mt-2"
+        value={value}
+        disabled={!isAdmin || save.isPending}
+        onChange={(e) => save.mutate(e.target.value)}
+      >
+        <option value="live_stt">Self-hosted (OpenAI-compatible)</option>
+        <option value="pyannote_ai">pyannote.ai (cloud)</option>
+      </Select>
+    </Card>
+  );
+}
+
 export function DiarizationSettingsPage() {
   const settings = useSettings();
+  const backend = String(settings.data?.settings.diarization_backend?.value ?? 'live_stt');
   const diarizeOnly = String(settings.data?.settings.diarize_only?.value) === 'true';
 
   return (
     <div className="space-y-4">
-      <DiarizeOnlyToggle />
+      <DiarizationBackendSelect />
 
-      <SettingsForm
-        title="Diarization"
-        description={
-          diarizeOnly
-            ? 'With "Diarization only" on above, this service only needs to produce speaker turns -- the words come from Transcription below.'
-            : 'The speech-to-text service that splits a recording into speakers and turns.'
-        }
-        modelsPath="/diarization/models"
-        modelKey="diarization_model"
-        testPath="/diarization/test"
-        testKeyMap={{
-          diarization_url: 'url',
-          diarization_api_key: 'api_key',
-          diarization_model: 'model',
-        }}
-        keys={[
-          {
-            key: 'diarization_url',
-            label: 'Endpoint URL',
-            hint: 'Full path, e.g. http://host:4012/v1/audio/diarization',
-          },
-          { key: 'diarization_api_key', label: 'API key', hint: 'Leave blank if not required' },
-          { key: 'diarization_model', label: 'Model' },
-          {
-            key: 'diarization_timeout_sec',
-            label: 'Timeout (seconds)',
-            type: 'number',
-            hint: 'A 20-minute recording can take several minutes.',
-          },
-          {
-            key: 'diarize_chunk_threshold_sec',
-            label: 'Chunk if longer than (seconds)',
-            type: 'number',
-            hint:
-              'A recording past this length is split and diarized in pieces so one request ' +
-              'never risks the model\'s own output budget (see meeting 24: a real ~59 minute ' +
-              'recording that overran it). 3000 = 50 minutes.',
-            disabled: diarizeOnly,
-            disabledHint:
-              'Unused while "Diarization only" is on -- that path handles any length in one request.',
-          },
-          {
-            key: 'diarize_chunk_size_sec',
-            label: 'Chunk size (seconds)',
-            type: 'number',
-            hint: 'How long each piece is once chunking kicks in. 1500 = 25 minutes.',
-            disabled: diarizeOnly,
-            disabledHint: 'Unused while "Diarization only" is on.',
-          },
-        ]}
-      />
-
-      {diarizeOnly && (
+      {backend === 'pyannote_ai' && (
         <SettingsForm
-          title="Transcription"
+          title="pyannote.ai (cloud)"
           description={
-            'Supplies the words the diarization service above doesn\'t. Combined with its ' +
-            'speaker turns by timestamp overlap; a stretch with no matching turn at all -- the ' +
-            'signature of a model hallucinating during silence, confirmed on whisper-large-' +
-            'turbo-q8_0 -- is dropped rather than shown unattributed.'
+            'Uploads the recording to api.pyannote.ai and runs diarization with speaker-' +
+            'attributed transcription in one job -- no self-hosted service, no separate ' +
+            'transcription backend, and no length-based chunking (pyannote.ai handles a ' +
+            'recording of any length itself). "Diarization only" and the chunk settings ' +
+            'below only apply to the self-hosted backend.'
           }
-          modelsPath="/transcribe/models"
-          modelKey="transcribe_model"
-          testPath="/transcribe/test"
-          testKeyMap={{
-            transcribe_url: 'url',
-            transcribe_api_key: 'api_key',
-            transcribe_model: 'model',
-          }}
+          testPath="/diarization/test"
+          testKeyMap={{ pyannote_ai_api_key: 'pyannote_api_key' }}
           keys={[
             {
-              key: 'transcribe_url',
-              label: 'Endpoint URL',
-              hint: 'Full path, e.g. http://host:4012/v1/audio/transcriptions',
-            },
-            { key: 'transcribe_api_key', label: 'API key', hint: 'Leave blank if not required' },
-            { key: 'transcribe_model', label: 'Model' },
-            {
-              key: 'transcribe_timeout_sec',
-              label: 'Timeout (seconds)',
-              type: 'number',
-              hint: 'A 20-minute recording can take several minutes.',
+              key: 'pyannote_ai_api_key',
+              label: 'API key',
+              hint: 'From your pyannote.ai account. No URL to configure -- there is only one hosted endpoint.',
             },
           ]}
         />
+      )}
+
+      {backend === 'live_stt' && (
+        <>
+          <DiarizeOnlyToggle />
+
+          <SettingsForm
+            title="Diarization"
+            description={
+              diarizeOnly
+                ? 'With "Diarization only" on above, this service only needs to produce speaker turns -- the words come from Transcription below.'
+                : 'The speech-to-text service that splits a recording into speakers and turns.'
+            }
+            modelsPath="/diarization/models"
+            modelKey="diarization_model"
+            testPath="/diarization/test"
+            testKeyMap={{
+              diarization_url: 'url',
+              diarization_api_key: 'api_key',
+              diarization_model: 'model',
+            }}
+            keys={[
+              {
+                key: 'diarization_url',
+                label: 'Endpoint URL',
+                hint: 'Full path, e.g. http://host:4012/v1/audio/diarization',
+              },
+              { key: 'diarization_api_key', label: 'API key', hint: 'Leave blank if not required' },
+              { key: 'diarization_model', label: 'Model' },
+              {
+                key: 'diarization_timeout_sec',
+                label: 'Timeout (seconds)',
+                type: 'number',
+                hint: 'A 20-minute recording can take several minutes.',
+              },
+              {
+                key: 'diarize_chunk_threshold_sec',
+                label: 'Chunk if longer than (seconds)',
+                type: 'number',
+                hint:
+                  'A recording past this length is split and diarized in pieces so one request ' +
+                  'never risks the model\'s own output budget (see meeting 24: a real ~59 minute ' +
+                  'recording that overran it). 3000 = 50 minutes.',
+                disabled: diarizeOnly,
+                disabledHint:
+                  'Unused while "Diarization only" is on -- that path handles any length in one request.',
+              },
+              {
+                key: 'diarize_chunk_size_sec',
+                label: 'Chunk size (seconds)',
+                type: 'number',
+                hint: 'How long each piece is once chunking kicks in. 1500 = 25 minutes.',
+                disabled: diarizeOnly,
+                disabledHint: 'Unused while "Diarization only" is on.',
+              },
+            ]}
+          />
+
+          {diarizeOnly && (
+            <SettingsForm
+              title="Transcription"
+              description={
+                'Supplies the words the diarization service above doesn\'t. Combined with its ' +
+                'speaker turns by timestamp overlap; a stretch with no matching turn at all -- the ' +
+                'signature of a model hallucinating during silence, confirmed on whisper-large-' +
+                'turbo-q8_0 -- is dropped rather than shown unattributed.'
+              }
+              modelsPath="/transcribe/models"
+              modelKey="transcribe_model"
+              testPath="/transcribe/test"
+              testKeyMap={{
+                transcribe_url: 'url',
+                transcribe_api_key: 'api_key',
+                transcribe_model: 'model',
+              }}
+              keys={[
+                {
+                  key: 'transcribe_url',
+                  label: 'Endpoint URL',
+                  hint: 'Full path, e.g. http://host:4012/v1/audio/transcriptions',
+                },
+                { key: 'transcribe_api_key', label: 'API key', hint: 'Leave blank if not required' },
+                { key: 'transcribe_model', label: 'Model' },
+                {
+                  key: 'transcribe_timeout_sec',
+                  label: 'Timeout (seconds)',
+                  type: 'number',
+                  hint: 'A 20-minute recording can take several minutes.',
+                },
+              ]}
+            />
+          )}
+        </>
       )}
     </div>
   );

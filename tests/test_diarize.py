@@ -10,7 +10,10 @@ import respx
 
 from app.db import get_conn, utcnow
 from app.errors import DiarizationError, DiarizationUnreachableError
+from app.jobs import queue as queue_mod
+from app.jobs.queue import JobContext
 from app.services import diarize as diarize_svc
+from app.services import pyannote_cloud as pyannote_cloud_svc
 from tests.conftest import FIXTURES
 
 URL = "http://diarizer.test/v1/audio/diarization"
@@ -223,6 +226,103 @@ class TestFailures:
         assert diarize_svc.looks_like_embedded_turns_dump(
             '  [{"start": 0, "end": 1.0}'
         )
+
+
+def _diarize_ctx(conn, db_path) -> JobContext:
+    """Same helper as test_pipeline.py's _diarize_job_context -- job_events
+    has a foreign key onto jobs.id, so ctx.event()/.heartbeat() need a real
+    row to point at."""
+    now = utcnow()
+    conn.execute(
+        "INSERT INTO users (id, username, password_hash, password_salt, created_at, updated_at) "
+        "VALUES (1, 'u', 'h', 's', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO threads (id, owner_id, title, created_at, updated_at) VALUES (1, 1, 'T', ?, ?)",
+        (now, now),
+    )
+    conn.execute(
+        "INSERT INTO meetings (id, thread_id, owner_id, title, created_at, updated_at) "
+        "VALUES (1, 1, 1, 'M', ?, ?)",
+        (now, now),
+    )
+    conn.commit()
+    job_id = queue_mod.create_job(
+        conn, job_type="diarize", user_id=1, meeting_id=1, thread_id=1, payload={},
+    )
+    conn.commit()
+    return JobContext(job_id, "diarize", {}, db_path=db_path)
+
+
+class TestDiarizeFileBackendDispatch:
+    """diarize_file is the one place that reads diarization_backend and
+    picks a wire protocol -- pipeline.py just calls it. These monkeypatch
+    the underlying sync call rather than mocking HTTP, since the cloud
+    upload/submit/poll flow itself is covered in test_pyannote_cloud.py."""
+
+    @pytest.mark.asyncio
+    async def test_pyannote_ai_backend_calls_the_cloud_client_not_diarize_sync(
+        self, conn, initialised_db, monkeypatch, wav
+    ):
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('diarization_backend', 'pyannote_ai', 'str', 0, ?)",
+            (utcnow(),),
+        )
+        conn.execute(
+            "INSERT INTO app_settings (key, value, value_type, is_secret, updated_at) "
+            "VALUES ('pyannote_ai_api_key', 'pyk-configured', 'str', 1, ?)",
+            (utcnow(),),
+        )
+        conn.commit()
+
+        seen = {}
+
+        def fake_diarize_sync_cloud(path, *, api_key, timeout):
+            seen["path"] = path
+            seen["api_key"] = api_key
+            return {"segments": [], "speakers": [], "num_speakers": 0}, 5
+
+        sync_called = False
+
+        def fake_diarize_sync(*a, **kw):
+            nonlocal sync_called
+            sync_called = True
+            raise AssertionError("diarize_sync must not run for the pyannote_ai backend")
+
+        monkeypatch.setattr(pyannote_cloud_svc, "diarize_sync_cloud", fake_diarize_sync_cloud)
+        monkeypatch.setattr(diarize_svc, "diarize_sync", fake_diarize_sync)
+
+        ctx = _diarize_ctx(conn, initialised_db)
+        payload, elapsed_ms = await diarize_svc.diarize_file(ctx, wav, model="irrelevant")
+
+        assert sync_called is False
+        assert seen == {"path": wav, "api_key": "pyk-configured"}
+        assert elapsed_ms == 5
+
+    @pytest.mark.asyncio
+    async def test_default_backend_still_calls_diarize_sync(self, conn, initialised_db, monkeypatch, wav):
+        """No diarization_backend row at all (an existing deployment that
+        predates this setting) must keep working exactly as before."""
+        cloud_called = False
+
+        def fake_diarize_sync_cloud(*a, **kw):
+            nonlocal cloud_called
+            cloud_called = True
+            return {"segments": [], "speakers": [], "num_speakers": 0}, 0
+
+        def fake_diarize_sync(path, *, url, model, api_key, timeout, expect_text=True):
+            return {"segments": [], "speakers": [], "num_speakers": 0}, 7
+
+        monkeypatch.setattr(pyannote_cloud_svc, "diarize_sync_cloud", fake_diarize_sync_cloud)
+        monkeypatch.setattr(diarize_svc, "diarize_sync", fake_diarize_sync)
+
+        ctx = _diarize_ctx(conn, initialised_db)
+        payload, elapsed_ms = await diarize_svc.diarize_file(ctx, wav, model="vibevoice-cpp-asr")
+
+        assert cloud_called is False
+        assert elapsed_ms == 7
 
 
 class TestListModels:

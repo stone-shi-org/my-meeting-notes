@@ -147,6 +147,13 @@ async def _diarize_stage(
 
     ``diarize_only`` (a Settings toggle, checked ahead of the chunk-duration
     branch) bypasses chunking entirely too: see ``_diarize_and_transcribe``.
+
+    The ``pyannote_ai`` backend (``diarization_backend``, checked ahead of
+    even ``diarize_only``) bypasses both chunking and the diarize_only/
+    transcribe_* pairing: pyannote.ai's own job accepts a recording of any
+    length and returns a speaker-attributed transcript in one call
+    (``transcription: true``, see pyannote_cloud.py), so there is nothing
+    here for either of those to do.
     """
     settings = get_settings()
 
@@ -156,6 +163,7 @@ async def _diarize_stage(
         duration = row["audio_duration_sec"]
         chosen_model = model or effective(conn, "diarization_model")
         provider_url = effective(conn, "diarization_url")
+        backend = effective(conn, "diarization_backend")
         diarize_only = effective(conn, "diarize_only")
         transcribe_model = effective(conn, "transcribe_model")
         # Runtime-overridable (see config.RUNTIME_KEYS), so read via
@@ -169,9 +177,16 @@ async def _diarize_stage(
         # services' output is a materially different result from either
         # alone, so it gets its own label rather than colliding with (or
         # never matching) a plain run of the diarization model by itself --
-        # switching "Diarization only" on/off must not make a stale
-        # same-model diarization from before the switch look reusable.
-        model_label = f"{chosen_model}+{transcribe_model}" if diarize_only else chosen_model
+        # switching "Diarization only" on/off, or the backend, must not make
+        # a stale run from before the switch look reusable. pyannote.ai gets
+        # a fixed label rather than chosen_model: chosen_model is whatever
+        # diarization_model happens to hold for the local backend and is
+        # meaningless for this one.
+        model_label = (
+            "pyannote_ai"
+            if backend == "pyannote_ai"
+            else f"{chosen_model}+{transcribe_model}" if diarize_only else chosen_model
+        )
 
         # Checkpoint: an existing diarization for this model means a previous
         # attempt got this far. Skipped entirely when force=True.
@@ -206,6 +221,15 @@ async def _diarize_stage(
             # exactly the single-call path it always has.
             payload = await _fake_diarize(ctx, duration)
             request_ms = 0
+        elif backend == "pyannote_ai":
+            from app.services.diarize import diarize_file
+
+            payload, request_ms = await diarize_file(
+                ctx,
+                Path(audio_path),
+                model=chosen_model,
+                duration_sec=duration,
+            )
         elif diarize_only:
             payload, request_ms = await _diarize_and_transcribe(
                 ctx,

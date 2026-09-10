@@ -234,12 +234,20 @@ async def diarize_file(
     test_jobs.py's progress tests assert it never does).
 
     ``expect_text=False`` is "Diarization only" mode -- see diarize_sync.
+
+    When ``diarization_backend`` is ``"pyannote_ai"`` this ignores ``model``/
+    ``url``/``expect_text`` entirely and runs the real cloud API instead (see
+    pyannote_cloud.diarize_sync_cloud) -- a fundamentally different upload +
+    submit + poll flow, not a multipart POST, so the two paths only share
+    this function's progress/heartbeat plumbing and return shape.
     """
     settings = get_settings()
     with get_conn(ctx.db_path) as conn:
+        backend = effective(conn, "diarization_backend")
         url = effective(conn, "diarization_url")
         api_key = effective(conn, "diarization_api_key")
         timeout = effective(conn, "diarization_timeout_sec")
+        pyannote_api_key = effective(conn, "pyannote_ai_api_key")
 
     window_start, window_span = progress_window[0], progress_window[1] - progress_window[0]
 
@@ -271,15 +279,25 @@ async def diarize_file(
 
     ticker = asyncio.create_task(heartbeat())
     try:
-        payload, elapsed_ms = await asyncio.to_thread(
-            diarize_sync,
-            path,
-            url=url,
-            model=model,
-            api_key=api_key or None,
-            timeout=timeout,
-            expect_text=expect_text,
-        )
+        if backend == "pyannote_ai":
+            from app.services import pyannote_cloud
+
+            payload, elapsed_ms = await asyncio.to_thread(
+                pyannote_cloud.diarize_sync_cloud,
+                path,
+                api_key=pyannote_api_key or None,
+                timeout=timeout,
+            )
+        else:
+            payload, elapsed_ms = await asyncio.to_thread(
+                diarize_sync,
+                path,
+                url=url,
+                model=model,
+                api_key=api_key or None,
+                timeout=timeout,
+                expect_text=expect_text,
+            )
     finally:
         stop.set()
         await asyncio.gather(ticker, return_exceptions=True)

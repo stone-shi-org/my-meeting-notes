@@ -21,6 +21,7 @@ from app.services import diarize as diarize_svc
 from app.services import embeddings as embeddings_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import pyannote_cloud as pyannote_cloud_svc
 from app.services import telegram as telegram_svc
 from app.services import transcribe as transcribe_svc
 from app.services import web_search as web_search_svc
@@ -56,6 +57,9 @@ class DiarizationTestRequest(BaseModel):
     url: str | None = Field(default=None, max_length=500)
     api_key: str | None = Field(default=None, max_length=500)
     model: str | None = Field(default=None, max_length=200)
+    # Only consulted when diarization_backend is "pyannote_ai" -- that
+    # backend has no url/model of its own, see config.RUNTIME_KEYS.
+    pyannote_api_key: str | None = Field(default=None, max_length=500)
 
 
 class TranscribeTestRequest(BaseModel):
@@ -203,6 +207,31 @@ def test_diarization(
     admin: CurrentUser = Depends(require_admin),
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
+    backend = effective(conn, "diarization_backend")
+
+    # pyannote.ai has an entirely different wire protocol (an authenticated
+    # cloud REST call, no url/model of its own) -- dispatched here rather
+    # than by passing backend="pyannote_ai" into diarize_svc.test_connection,
+    # whose own `backend` parameter already means something else (Live
+    # Captions' gRPC probe) and must not be reused for a second meaning.
+    if backend == "pyannote_ai":
+        pyannote_api_key = effective(conn, "pyannote_ai_api_key")
+        if (
+            payload is not None
+            and payload.pyannote_api_key is not None
+            and not payload.pyannote_api_key.startswith(MASK)
+        ):
+            pyannote_api_key = payload.pyannote_api_key
+
+        result = pyannote_cloud_svc.test_connection(
+            pyannote_api_key or None, timeout=DIARIZATION_TEST_TIMEOUT_SEC
+        )
+        log.info(
+            "admin %s tested diarization (pyannote.ai): ok=%s %sms",
+            admin.username, result["ok"], result["latency_ms"],
+        )
+        return result
+
     url = effective(conn, "diarization_url")
     model = effective(conn, "diarization_model")
     api_key = effective(conn, "diarization_api_key")
