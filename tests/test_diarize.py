@@ -279,9 +279,11 @@ class TestDiarizeFileBackendDispatch:
 
         seen = {}
 
-        def fake_diarize_sync_cloud(path, *, api_key, timeout):
+        def fake_diarize_sync_cloud(path, *, api_key, timeout, model, transcribe_model):
             seen["path"] = path
             seen["api_key"] = api_key
+            seen["model"] = model
+            seen["transcribe_model"] = transcribe_model
             return {"segments": [], "speakers": [], "num_speakers": 0}, 5
 
         sync_called = False
@@ -298,7 +300,15 @@ class TestDiarizeFileBackendDispatch:
         payload, elapsed_ms = await diarize_svc.diarize_file(ctx, wav, model="irrelevant")
 
         assert sync_called is False
-        assert seen == {"path": wav, "api_key": "pyk-configured"}
+        # model/transcribe_model fall back to their env defaults (precision-2 /
+        # parakeet-tdt-0.6b-v3) since this test never overrides them -- the
+        # point here is that diarize_file passes *something* through from
+        # settings, not diarize_file's own `model` kwarg (which is for the
+        # local backend and irrelevant to this one).
+        assert seen["path"] == wav
+        assert seen["api_key"] == "pyk-configured"
+        assert seen["model"] == "precision-2"
+        assert seen["transcribe_model"] == "parakeet-tdt-0.6b-v3"
         assert elapsed_ms == 5
 
     @pytest.mark.asyncio

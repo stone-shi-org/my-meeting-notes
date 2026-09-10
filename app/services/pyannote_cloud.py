@@ -47,12 +47,18 @@ BASE_URL = "https://api.pyannote.ai/v1"
 # job that has no progress endpoint of its own, so it stays coarser.
 POLL_INTERVAL_SEC = 5.0
 
-# precision-2 is pyannote.ai's current flagship model (community-1 is the
-# lighter, self-hostable one already covered by the "live_stt"/local backend
-# via diarize_only). Not exposed as a setting: the whole point of this
-# backend, per how it was asked for, is "just an API key" -- add a setting
-# here if a deployment ever needs to choose otherwise.
-MODEL = "precision-2"
+# The two `model` values pyannote.ai's own /diarize accepts. "precision-2"
+# is their default when the field is omitted; "community-1" is the lighter,
+# self-hostable model already covered by the "live_stt"/local backend via
+# diarize_only, offered here too since choosing it against the *cloud* API
+# still means "no self-hosted service to run", unlike running it locally.
+DIARIZE_MODELS = ("precision-2", "community-1")
+
+# The two `transcriptionConfig.model` values pyannote.ai's own STT
+# orchestration accepts. "parakeet-tdt-0.6b-v3" (Nvidia) is their default
+# when transcriptionConfig is omitted entirely; "faster-whisper-large-v3-turbo"
+# is the other one they document.
+TRANSCRIBE_MODELS = ("parakeet-tdt-0.6b-v3", "faster-whisper-large-v3-turbo")
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -114,15 +120,25 @@ def _upload(path: Path, api_key: str, object_key: str, timeout: int) -> None:
         )
 
 
-def _submit(object_key: str, api_key: str, timeout: int) -> str:
-    """Step 3: submit the diarization job, transcription included."""
+def _submit(
+    object_key: str, api_key: str, timeout: int, *, model: str, transcribe_model: str
+) -> str:
+    """Step 3: submit the diarization job, transcription included.
+
+    ``transcriptionConfig`` is sent explicitly rather than only when
+    ``transcribe_model`` differs from pyannote.ai's own default: an explicit
+    value is deterministic under a future change to what their default even
+    is, and it means this deployment's Settings page always reflects what a
+    job actually asked for.
+    """
     try:
         response = httpx.post(
             f"{BASE_URL}/diarize",
             json={
                 "url": f"media://{object_key}",
-                "model": MODEL,
+                "model": model,
                 "transcription": True,
+                "transcriptionConfig": {"model": transcribe_model},
             },
             headers={**_headers(api_key), "Content-Type": "application/json"},
             timeout=timeout,
@@ -249,7 +265,14 @@ def _to_app_payload(output: dict) -> dict:
     }
 
 
-def diarize_sync_cloud(path: Path, *, api_key: str | None, timeout: int) -> tuple[dict, int]:
+def diarize_sync_cloud(
+    path: Path,
+    *,
+    api_key: str | None,
+    timeout: int,
+    model: str = "precision-2",
+    transcribe_model: str = "parakeet-tdt-0.6b-v3",
+) -> tuple[dict, int]:
     """Blocking end-to-end pyannote.ai run: upload, submit, poll, map.
 
     Same ``(payload, elapsed_ms)`` return shape as diarize.diarize_sync, so
@@ -266,7 +289,7 @@ def diarize_sync_cloud(path: Path, *, api_key: str | None, timeout: int) -> tupl
     object_key = f"mmn-{uuid.uuid4().hex}"
 
     _upload(path, key, object_key, timeout)
-    job_id = _submit(object_key, key, timeout)
+    job_id = _submit(object_key, key, timeout, model=model, transcribe_model=transcribe_model)
     output = _poll(job_id, key, timeout)
     payload = _to_app_payload(output)
 

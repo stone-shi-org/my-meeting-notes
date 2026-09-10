@@ -643,7 +643,7 @@ class TestDiarizeStageChunkingDecision:
             model = c.execute(
                 "SELECT model FROM diarizations WHERE id = ?", (diar_id,)
             ).fetchone()["model"]
-        assert model == "pyannote_ai"
+        assert model == "pyannote_ai:precision-2+parakeet-tdt-0.6b-v3"
 
     @pytest.mark.asyncio
     async def test_pyannote_ai_backend_ignores_diarize_only(self, seeded, initialised_db, monkeypatch):
@@ -724,4 +724,48 @@ class TestDiarizeStageChunkingDecision:
                 for r in c.execute("SELECT id, model FROM diarizations WHERE meeting_id = 1")
             }
         assert models[local_id] == "vibevoice-cpp-asr"
-        assert models[cloud_id] == "pyannote_ai"
+        assert models[cloud_id] == "pyannote_ai:precision-2+parakeet-tdt-0.6b-v3"
+
+    @pytest.mark.asyncio
+    async def test_pyannote_ai_own_model_choices_are_checkpointed_separately(
+        self, seeded, initialised_db, monkeypatch
+    ):
+        """precision-2 vs community-1 (or either transcription model) are
+        materially different results too -- switching one must not make a
+        run from the other look reusable, same rule as the backend switch
+        above."""
+        monkeypatch.setenv("MMN_DIARIZE_FAKE", "false")
+        monkeypatch.setenv("MMN_DIARIZATION_BACKEND", "pyannote_ai")
+        from app.config import reset_settings_cache
+
+        _meeting(seeded, audio_path="/tmp/does-not-need-to-exist.wav", duration_sec=10.0)
+
+        async def fake_diarize_file(ctx, path, *, model, duration_sec=None,
+                                     progress_window=(0.0, 1.0), expect_text=True):
+            return {
+                "segments": [{"id": 0, "speaker": "SPEAKER_00", "start": 0, "end": 1, "text": "hi"}],
+                "speakers": [{"id": "SPEAKER_00"}],
+                "num_speakers": 1,
+            }, 0
+
+        monkeypatch.setattr("app.services.diarize.diarize_file", fake_diarize_file)
+
+        monkeypatch.setenv("MMN_PYANNOTE_AI_MODEL", "precision-2")
+        reset_settings_cache()
+        ctx1 = _diarize_job_context(seeded, initialised_db, payload={"meeting_id": 1})
+        precision_id = await pipeline_mod._diarize_stage(ctx1, 1, force=True)
+
+        monkeypatch.setenv("MMN_PYANNOTE_AI_MODEL", "community-1")
+        reset_settings_cache()
+        ctx2 = _diarize_job_context(seeded, initialised_db, payload={"meeting_id": 1})
+        community_id = await pipeline_mod._diarize_stage(ctx2, 1, force=False)
+
+        assert community_id != precision_id
+
+        with get_conn(initialised_db) as c:
+            models = {
+                r["id"]: r["model"]
+                for r in c.execute("SELECT id, model FROM diarizations WHERE meeting_id = 1")
+            }
+        assert models[precision_id] == "pyannote_ai:precision-2+parakeet-tdt-0.6b-v3"
+        assert models[community_id] == "pyannote_ai:community-1+parakeet-tdt-0.6b-v3"

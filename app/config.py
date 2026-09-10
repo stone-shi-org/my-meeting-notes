@@ -43,6 +43,16 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # hosted endpoint (see services/pyannote_cloud.BASE_URL), unlike the
     # self-hosted backend above which can be pointed at any deployment.
     "pyannote_ai_api_key": ("str", True),
+    # The `model` field on POST /diarize -- pyannote.ai's own two choices,
+    # not a free-text field/dropdown like diarization_model above, since
+    # there is no /v1/models catalog to populate one from. "precision-2" is
+    # pyannote.ai's own default when this is omitted.
+    "pyannote_ai_model": ("str", False),
+    # The `transcriptionConfig.model` field, sent alongside `transcription:
+    # true` -- which STT model pyannote.ai runs to produce the words, not
+    # which diarization model above. "parakeet-tdt-0.6b-v3" is pyannote.ai's
+    # own default when transcriptionConfig is omitted entirely.
+    "pyannote_ai_transcribe_model": ("str", False),
     # A recording past this length is diarized in pieces instead of one
     # request -- see pipeline._diarize_in_chunks. Unused entirely while
     # diarize_only is on (see below).
@@ -278,6 +288,8 @@ class Settings(BaseSettings):
     diarization_api_key: str = ""
     diarization_timeout_sec: int = 1800
     pyannote_ai_api_key: str = ""
+    pyannote_ai_model: str = "precision-2"
+    pyannote_ai_transcribe_model: str = "parakeet-tdt-0.6b-v3"
     diarize_fake: bool = False
     diarize_fake_delay_sec: float = 2.0
     # Wall-clock seconds of processing per second of audio; used to synthesise a

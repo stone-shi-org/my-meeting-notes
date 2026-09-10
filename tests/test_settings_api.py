@@ -16,7 +16,8 @@ def test_settings_list_every_runtime_key(user_client):
     body = user_client.get("/api/settings").json()["settings"]
     for key in (
         "llm_base_url", "llm_model", "matching_model", "diarization_url",
-        "diarization_backend", "pyannote_ai_api_key",
+        "diarization_backend", "pyannote_ai_api_key", "pyannote_ai_model",
+        "pyannote_ai_transcribe_model",
         "match_max_candidates",
         "web_search_base_url", "web_search_api_key", "web_search_timeout_sec",
         "diarize_only", "transcribe_url", "transcribe_model", "transcribe_api_key",

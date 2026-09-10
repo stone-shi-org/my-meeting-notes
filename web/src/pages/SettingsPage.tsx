@@ -728,6 +728,23 @@ export function DiarizationSettingsPage() {
               label: 'API key',
               hint: 'From your pyannote.ai account. No URL to configure -- there is only one hosted endpoint.',
             },
+            {
+              key: 'pyannote_ai_model',
+              label: 'Diarization model',
+              options: [
+                { value: 'precision-2', label: 'precision-2 (pyannote.ai default)' },
+                { value: 'community-1', label: 'community-1' },
+              ],
+            },
+            {
+              key: 'pyannote_ai_transcribe_model',
+              label: 'Transcription model',
+              hint: 'Which STT model pyannote.ai runs alongside diarization to produce the words.',
+              options: [
+                { value: 'parakeet-tdt-0.6b-v3', label: 'Parakeet (Nvidia, pyannote.ai default)' },
+                { value: 'faster-whisper-large-v3-turbo', label: 'Whisper large-v3-turbo' },
+              ],
+            },
           ]}
         />
       )}

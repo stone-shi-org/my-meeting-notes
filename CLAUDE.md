@@ -675,9 +675,16 @@ presigned `media://` URL (`POST /media/input` then a raw `PUT`), submit the job
 leaves "running". `transcription: true` returns a speaker-attributed transcript
 (`turnLevelTranscription`) in the same job, so this backend needs no pairing with `diarize_only` or
 `transcribe_*` and bypasses both entirely, along with chunking — pyannote.ai's own job handles any
-length. Only one setting, `pyannote_ai_api_key` — no URL, since there is exactly one hosted endpoint.
-Checkpointed under the fixed label `"pyannote_ai"` (not `chosen_model`, which only means something for
-the local backend) so switching backends never makes a stale run from the other one look reusable.
+length. No URL setting, since there is exactly one hosted endpoint — but two model choices, both
+pyannote.ai's own, sent explicitly on every job rather than only when non-default: `pyannote_ai_model`
+(`"precision-2"` default | `"community-1"`, pyannote.ai's `model` field) and
+`pyannote_ai_transcribe_model` (`"parakeet-tdt-0.6b-v3"` default | `"faster-whisper-large-v3-turbo"`,
+their `transcriptionConfig.model`) — the STT model run *alongside* diarization, not a choice about the
+diarization model itself. Neither is a free-text field/dropdown backed by a `/v1/models` catalog like
+`diarization_model`: pyannote.ai has no such catalog, just these two fixed values each. Checkpointed
+under `"pyannote_ai:{model}+{transcribe_model}"` (not `chosen_model`, which only means something for
+the local backend) so switching backends, or either of pyannote.ai's own two model choices, never
+makes a stale run from before the switch look reusable.
 
 ## Conventions
 

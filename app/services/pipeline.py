@@ -177,16 +177,20 @@ async def _diarize_stage(
         # services' output is a materially different result from either
         # alone, so it gets its own label rather than colliding with (or
         # never matching) a plain run of the diarization model by itself --
-        # switching "Diarization only" on/off, or the backend, must not make
-        # a stale run from before the switch look reusable. pyannote.ai gets
-        # a fixed label rather than chosen_model: chosen_model is whatever
-        # diarization_model happens to hold for the local backend and is
-        # meaningless for this one.
-        model_label = (
-            "pyannote_ai"
-            if backend == "pyannote_ai"
-            else f"{chosen_model}+{transcribe_model}" if diarize_only else chosen_model
-        )
+        # switching "Diarization only" on/off, the backend, or (for
+        # pyannote.ai) either of its own two model choices, must not make a
+        # stale run from before the switch look reusable. pyannote.ai's
+        # label is built from its own settings, not chosen_model: that's
+        # whatever diarization_model happens to hold for the local backend
+        # and is meaningless for this one.
+        if backend == "pyannote_ai":
+            pyannote_model = effective(conn, "pyannote_ai_model")
+            pyannote_transcribe_model = effective(conn, "pyannote_ai_transcribe_model")
+            model_label = f"pyannote_ai:{pyannote_model}+{pyannote_transcribe_model}"
+        elif diarize_only:
+            model_label = f"{chosen_model}+{transcribe_model}"
+        else:
+            model_label = chosen_model
 
         # Checkpoint: an existing diarization for this model means a previous
         # attempt got this far. Skipped entirely when force=True.

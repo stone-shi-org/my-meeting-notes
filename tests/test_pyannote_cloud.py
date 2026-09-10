@@ -104,7 +104,11 @@ class TestDiarizeSyncCloud:
         )
 
         payload, elapsed_ms = pyannote_cloud.diarize_sync_cloud(
-            wav, api_key="pyk-test", timeout=30
+            wav,
+            api_key="pyk-test",
+            timeout=30,
+            model="community-1",
+            transcribe_model="faster-whisper-large-v3-turbo",
         )
 
         assert len(payload["segments"]) == 1
@@ -112,15 +116,51 @@ class TestDiarizeSyncCloud:
 
         # The upload is a raw PUT with the file's own bytes, not multipart.
         assert upload_route.calls[0].request.headers["content-type"] == "application/octet-stream"
-        # The job is submitted with transcription on -- that's what makes this
-        # backend a one-call replacement for diarize_only + a separate
-        # transcribe_* service, not just a bare diarization.
+        # The job is submitted with transcription on and the chosen models --
+        # that's what makes this backend a one-call replacement for
+        # diarize_only + a separate transcribe_* service, not just a bare
+        # diarization, and what makes the model choice actually take effect.
         import json
 
         body = json.loads(diarize_route.calls[0].request.content)
         assert body["transcription"] is True
+        assert body["model"] == "community-1"
+        assert body["transcriptionConfig"] == {"model": "faster-whisper-large-v3-turbo"}
         assert body["url"].startswith("media://")
         assert media_route.calls[0].request.headers["authorization"] == "Bearer pyk-test"
+
+    @respx.mock
+    def test_defaults_to_pyannote_ais_own_default_models_when_not_specified(self, wav):
+        """diarize_sync_cloud's own defaults (precision-2 / parakeet) --
+        exercised separately from the explicit-choice test above, so a
+        caller that forgets to pass either still gets pyannote.ai's
+        documented defaults rather than an unrelated value."""
+        respx.post(MEDIA_URL).mock(return_value=httpx.Response(200, json={"url": PRESIGNED_URL}))
+        respx.put(PRESIGNED_URL).mock(return_value=httpx.Response(200))
+        diarize_route = respx.post(DIARIZE_URL).mock(
+            return_value=httpx.Response(200, json={"jobId": "job-defaults"})
+        )
+        respx.get(jobs_url("job-defaults")).mock(
+            return_value=httpx.Response(
+                200,
+                json={
+                    "status": "succeeded",
+                    "output": {
+                        "turnLevelTranscription": [
+                            {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00", "text": "hi"},
+                        ]
+                    },
+                },
+            )
+        )
+
+        pyannote_cloud.diarize_sync_cloud(wav, api_key="pyk-test", timeout=30)
+
+        import json
+
+        body = json.loads(diarize_route.calls[0].request.content)
+        assert body["model"] == "precision-2"
+        assert body["transcriptionConfig"] == {"model": "parakeet-tdt-0.6b-v3"}
 
     @respx.mock
     def test_polls_again_when_the_job_is_still_running(self, wav, monkeypatch):

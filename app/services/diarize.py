@@ -248,6 +248,8 @@ async def diarize_file(
         api_key = effective(conn, "diarization_api_key")
         timeout = effective(conn, "diarization_timeout_sec")
         pyannote_api_key = effective(conn, "pyannote_ai_api_key")
+        pyannote_model = effective(conn, "pyannote_ai_model")
+        pyannote_transcribe_model = effective(conn, "pyannote_ai_transcribe_model")
 
     window_start, window_span = progress_window[0], progress_window[1] - progress_window[0]
 
@@ -287,6 +289,8 @@ async def diarize_file(
                 path,
                 api_key=pyannote_api_key or None,
                 timeout=timeout,
+                model=pyannote_model,
+                transcribe_model=pyannote_transcribe_model,
             )
         else:
             payload, elapsed_ms = await asyncio.to_thread(
