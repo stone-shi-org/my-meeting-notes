@@ -471,7 +471,7 @@ export function InsightsPanel({
   // an admin who deletes it entirely must not leave the picker stuck on a
   // slug that no longer exists.
   useEffect(() => {
-    if (meetingType || !types.data?.length) return;
+    if (meetingType || !Array.isArray(types.data) || !types.data.length) return;
     setMeetingType(types.data.find((t) => t.slug === 'general')?.slug ?? types.data[0].slug);
   }, [meetingType, types.data]);
 
@@ -494,10 +494,10 @@ export function InsightsPanel({
     staleTime: 60_000,
   });
 
-  const configuredModel = settings.data?.settings.insights_model?.value;
+  const configuredModel = settings.data?.settings?.insights_model?.value;
   const insightsConfigured = typeof configuredModel === 'string' && configuredModel.length > 0;
   const intervalSec =
-    Number(settings.data?.settings.insights_interval_sec?.value) || DEFAULT_INSIGHTS_INTERVAL_SEC;
+    Number(settings.data?.settings?.insights_interval_sec?.value) || DEFAULT_INSIGHTS_INTERVAL_SEC;
 
   const { topics, questions, actionItems, error, loading, clear } = useInsights(
     captions,
@@ -601,16 +601,17 @@ export function InsightsPanel({
           id="insights-meeting-type"
           className="mt-1.5"
           value={meetingType}
-          disabled={!types.data?.length}
+          disabled={!Array.isArray(types.data) || !types.data.length}
           onChange={(e) => setMeetingType(e.target.value)}
         >
-          {types.data?.map((t) => (
-            <option key={t.slug} value={t.slug}>
-              {t.name}
-            </option>
-          ))}
+          {Array.isArray(types.data) &&
+            types.data.map((t) => (
+              <option key={t.slug} value={t.slug}>
+                {t.name}
+              </option>
+            ))}
         </Select>
-        {!types.isLoading && !types.data?.length && (
+        {!types.isLoading && (!Array.isArray(types.data) || !types.data.length) && (
           <p className="mt-1 text-xs text-fg-subtle">
             No meeting types configured. Add one in Settings → Meeting types.
           </p>

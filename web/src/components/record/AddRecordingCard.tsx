@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { AudioInput, type FileMeta } from '@/components/record/AudioInput';
 import { Button } from '@/components/ui/Button';
@@ -16,7 +16,13 @@ import type { Meeting } from '@/types/api';
  * meeting and leave the calendar event, the attendee-derived speaker names and
  * the place on the thread's timeline attached to the empty one.
  */
-export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
+export function AddRecordingCard({
+  meeting,
+  onModeChange,
+}: {
+  meeting: Meeting;
+  onModeChange?: (mode: 'upload' | 'record') => void;
+}) {
   const navigate = useNavigate();
   const [file, setFile] = useState<File | null>(null);
   const [speakerNames, setSpeakerNames] = useState('');
@@ -29,6 +35,16 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
   // Hints seeded from the calendar event's attendees are already on the
   // meeting; offering the field again would only let them be overwritten.
   const askForSpeakers = meeting.speaker_count === 0;
+
+  const pick = useCallback((next: File | null, meta: FileMeta) => {
+    setFile(next);
+    setError(null);
+    if (!next) return;
+
+    if (meta.recorded && meta.durationSec < 1) {
+      setError('That recording is under a second long — it will not transcribe to much.');
+    }
+  }, []);
 
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -61,20 +77,9 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
     }
   }
 
-  return (
-    <Card className="p-5">
-      <h2 className="font-display text-lg font-semibold">Add the recording</h2>
-      <p className="mt-1 text-sm text-fg-subtle">
-        It joins this meeting, so whatever is already attached to it stays attached.
-      </p>
-
-      <form onSubmit={submit} className="mt-4 space-y-5">
-        <AudioInput
-          file={file}
-          onFile={(next: File | null, _meta: FileMeta) => setFile(next)}
-          progress={progress}
-        />
-
+  const metaForm = (
+    <>
+      <Card className="space-y-4 p-5">
         {askForSpeakers && (
           <div>
             <Label htmlFor="add-speakers">Speakers (optional)</Label>
@@ -102,31 +107,57 @@ export function AddRecordingCard({ meeting }: { meeting: Meeting }) {
           />
           Summarize automatically when the transcript is ready
         </label>
+      </Card>
 
-        {error && (
-          <p role="alert" className="text-sm text-danger-ink">
-            {error}
-          </p>
-        )}
+      {error && (
+        <p role="alert" className="text-sm text-danger-ink">
+          {error}
+        </p>
+      )}
 
-        <div className="flex justify-end gap-2">
-          {uploading && (
-            <Button
-              type="button"
-              variant="ghost"
-              onClick={() => {
-                abort.current?.abort();
-                setProgress(null);
-              }}
-            >
-              Cancel upload
-            </Button>
-          )}
-          <Button type="submit" variant="primary" loading={uploading} disabled={!file}>
-            Start processing
+      <div className="flex justify-end gap-2">
+        {uploading ? (
+          <Button
+            type="button"
+            variant="ghost"
+            onClick={() => {
+              abort.current?.abort();
+              setProgress(null);
+            }}
+          >
+            Cancel upload
           </Button>
-        </div>
+        ) : (
+          <Button type="button" variant="ghost" onClick={() => navigate(-1)}>
+            Cancel
+          </Button>
+        )}
+        <Button type="submit" variant="primary" loading={uploading} disabled={!file}>
+          Start processing
+        </Button>
+      </div>
+    </>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h2 className="font-display text-lg font-semibold">Add the recording</h2>
+        <p className="mt-1 text-sm text-fg-subtle">
+          It joins this meeting, so whatever is already attached to it stays attached.
+        </p>
+      </div>
+
+      <form onSubmit={submit} className="space-y-5">
+        <AudioInput
+          file={file}
+          onFile={pick}
+          progress={progress}
+          onModeChange={onModeChange}
+          recorderLayout="wide"
+          rightExtra={metaForm}
+        />
       </form>
-    </Card>
+    </div>
   );
 }

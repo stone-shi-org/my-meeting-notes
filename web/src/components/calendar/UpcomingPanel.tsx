@@ -112,7 +112,7 @@ function CreateFromEventDialog({
               <Link to={`/threads/${thread_id}`}>Open thread</Link>
             </Button>
             <Button variant="primary" asChild>
-              <Link to={`/meetings/new?threadId=${thread_id}`}>Upload recording</Link>
+              <Link to={`/meetings/${meeting.id}`}>Add recording</Link>
             </Button>
           </div>
         </Card>

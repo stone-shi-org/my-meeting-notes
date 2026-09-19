@@ -273,7 +273,7 @@ class TestEventSearch:
     async def test_a_weekly_series_shares_one_source_uid(self, seeded):
         """Distinct uids, one series identity -- what dedupe_events has to keep
         apart. The cheap stand-in for icloud_recurring.ics."""
-        add_event(seeded, repeat_weekly=4)
+        add_event(seeded, repeat_weekly=4, date_mode="absolute", at=NOW.isoformat())
         found = await provider().search_events(query="", start=WIDE_START, end=WIDE_END)
         assert len(found) == 4
         assert len({e.uid for e in found}) == 4

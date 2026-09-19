@@ -678,6 +678,7 @@ function RedoTranscriptStatus({ rediarize }: { rediarize: ReturnType<typeof useR
 export function NoTranscriptPanel({ meeting: m }: { meeting: Meeting }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const [audioMode, setAudioMode] = useState<'upload' | 'record'>('upload');
   const processing = m.status === 'processing';
 
   const ingestJob = useQuery({
@@ -697,7 +698,12 @@ export function NoTranscriptPanel({ meeting: m }: { meeting: Meeting }) {
   });
 
   return (
-    <div className="mx-auto max-w-2xl space-y-4">
+    <div
+      className={cn(
+        'mx-auto space-y-4',
+        audioMode === 'record' ? 'max-w-[1800px] px-4 sm:px-6 lg:px-8' : 'max-w-2xl',
+      )}
+    >
       <Link to={`/threads/${m.thread_id}`} className="text-sm text-fg-subtle hover:text-fg">
         ← Back to thread
       </Link>
@@ -740,7 +746,7 @@ export function NoTranscriptPanel({ meeting: m }: { meeting: Meeting }) {
 
       {/* The dead end this used to be: a meeting created from a calendar
           event had no way to ever receive its audio. */}
-      {!processing && <AddRecordingCard meeting={m} />}
+      {!processing && <AddRecordingCard meeting={m} onModeChange={setAudioMode} />}
     </div>
   );
 }

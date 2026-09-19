@@ -10,6 +10,25 @@ vi.mock('@/lib/api', () => ({
   api: { get: vi.fn(), post: vi.fn(), patch: vi.fn(), del: vi.fn(), put: vi.fn() },
 }));
 
+vi.mock('@/lib/recording', async () => {
+  const actual = await vi.importActual<typeof import('@/lib/recording')>('@/lib/recording');
+  return {
+    ...actual,
+    detectPlatform: () => ({
+      browser: 'chrome',
+      os: 'mac',
+      hasDisplayMedia: true,
+      hasRecorder: true,
+      hasMediaDevices: true,
+      isSecureContext: true,
+      chromium: true,
+      firefox: false,
+      safari: false,
+    }),
+    blockedReason: () => null,
+  };
+});
+
 const { api } = await import('@/lib/api');
 
 function meeting(over: Partial<Meeting> = {}): Meeting {
@@ -66,7 +85,7 @@ function job(over: Partial<Job> = {}): Job {
 
 function renderPanel(m: Meeting = meeting()) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  render(
+  return render(
     <QueryClientProvider client={client}>
       <MemoryRouter>
         <NoTranscriptPanel meeting={m} />
@@ -130,5 +149,22 @@ describe('NoTranscriptPanel', () => {
 
     await screen.findByRole('combobox', { name: 'Download audio' });
     expect(screen.queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument();
+  });
+
+  it('switches to wide layout when record mode is selected', async () => {
+    const user = userEvent.setup();
+    const { container } = renderPanel(meeting({ has_audio: false, status: 'new' }));
+
+    const outer = container.firstElementChild as HTMLElement;
+    expect(outer).toHaveClass('max-w-2xl');
+
+    const recordTab = screen.getByRole('tab', { name: /Record now/ });
+    await user.click(recordTab);
+
+    expect(outer).toHaveClass('max-w-[1800px]');
+    // Confirms the wide layout's Insights panel header is rendered
+    expect(screen.getByText('Insights')).toBeInTheDocument();
+    // Confirms the wide layout's Live transcript panel header is rendered
+    expect(screen.getByText('Live transcript')).toBeInTheDocument();
   });
 });

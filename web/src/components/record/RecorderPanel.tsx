@@ -176,11 +176,9 @@ export function RecorderPanel({
   onRecorded: (file: File | null, durationSec: number) => void;
   disabled?: boolean;
   /** 'wide' puts a bigger, always-mounted LiveTranscriptPanel on the left and
-   * shrinks these controls to a right-hand column -- see NewMeetingPage,
-   * which is the only caller with room to spare. Everywhere else (adding a
-   * recording to an existing meeting, which shares a narrower column with
-   * the rest of that page) stays 'compact': the inline LiveCaptionStrip
-   * beneath the controls, same as before this existed. */
+   * shrinks these controls to a right-hand column -- used by NewMeetingPage
+   * and AddRecordingCard. Compact layout keeps the inline LiveCaptionStrip
+   * beneath the controls. */
   layout?: 'compact' | 'wide';
   /** Only rendered in 'wide' layout, stacked below the controls in the same
    * right-hand column -- see AudioInput's doc comment. */
@@ -218,7 +216,7 @@ export function RecorderPanel({
     queryFn: () => api.get<{ settings: Record<string, SettingEntry> }>('/settings'),
   });
   const defaultCaptionLanguage = String(
-    settingsQuery.data?.settings.live_caption_language?.value ?? '',
+    settingsQuery.data?.settings?.live_caption_language?.value ?? '',
   );
   const [captionLanguageChoice, setCaptionLanguageChoice] = useState<string | null>(null);
   const captionLanguage = captionLanguageChoice ?? defaultCaptionLanguage;
@@ -229,10 +227,10 @@ export function RecorderPanel({
   // free-text fallback, so captionLanguagesForModel's generic-list default
   // is what an unknown/unbounded model falls back to.
   const liveCaptionBackend = String(
-    settingsQuery.data?.settings.live_caption_backend?.value ?? 'live_stt',
+    settingsQuery.data?.settings?.live_caption_backend?.value ?? 'live_stt',
   );
   const liveCaptionModel = String(
-    settingsQuery.data?.settings[`live_caption_${liveCaptionBackend}_model`]?.value ?? '',
+    settingsQuery.data?.settings?.[`live_caption_${liveCaptionBackend}_model`]?.value ?? '',
   );
   const captionLanguageOptions = captionLanguagesForModel(liveCaptionModel);
 
