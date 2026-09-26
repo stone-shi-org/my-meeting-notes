@@ -1,5 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { PlugZap, Plus, Trash2, X } from 'lucide-react';
+import {
+  Calendar,
+  CheckCircle2,
+  ListTodo,
+  PlugZap,
+  Plus,
+  Search,
+  Trash2,
+  Users as UsersIcon,
+  X,
+} from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
@@ -17,17 +27,18 @@ import { useAuth } from '@/hooks/useAuth';
 import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import { restrictedLanguagesForModel } from '@/lib/recording';
+import { fmtRelative } from '@/lib/time';
 import type {
   Integration,
   IntegrationTestResult,
   InsightTypeDetail,
-  Paginated,
   PromptDetail,
   PromptSummary,
   ProviderSpec,
   SettingEntry,
   TelegramLink,
   User,
+  UserStatisticsDashboard,
 } from '@/types/api';
 
 const TABS = [
@@ -2480,17 +2491,18 @@ export function UsersSettingsPage() {
   const [password, setPassword] = useState('');
   const [isAdminNew, setIsAdminNew] = useState(false);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
 
-  const users = useQuery({
-    queryKey: ['users'],
-    queryFn: () => api.get<Paginated<User>>('/users', { page_size: 100 }),
+  const stats = useQuery({
+    queryKey: ['users-statistics'],
+    queryFn: () => api.get<UserStatisticsDashboard>('/users/statistics'),
   });
 
   const create = useMutation({
     mutationFn: () =>
       api.post<User>('/users', { username, password, is_admin: isAdminNew }),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ['users'] });
+      void queryClient.invalidateQueries({ queryKey: ['users-statistics'] });
       setUsername('');
       setPassword('');
       setIsAdminNew(false);
@@ -2505,67 +2517,212 @@ export function UsersSettingsPage() {
 
   const deactivate = useMutation({
     mutationFn: (id: number) => api.del(`/users/${id}`),
-    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['users'] }),
+    onSuccess: () => void queryClient.invalidateQueries({ queryKey: ['users-statistics'] }),
+  });
+
+  const filteredUsers = (stats.data?.users ?? []).filter((u) => {
+    if (!search.trim()) return true;
+    const q = search.toLowerCase();
+    return (
+      u.username.toLowerCase().includes(q) ||
+      (u.display_name && u.display_name.toLowerCase().includes(q))
+    );
   });
 
   return (
     <div className="space-y-4">
       <Card className="p-5">
-        <h2 className="font-display text-lg font-semibold">Users</h2>
+        <div>
+          <h2 className="font-display text-lg font-semibold">User Statistic Dashboard</h2>
+          <p className="text-xs text-fg-subtle">
+            Overview of user activity, last login timestamps, problem resolution metrics, and meetings.
+          </p>
+        </div>
 
-        {users.isLoading && <Skeleton className="mt-4 h-32 w-full" />}
-        {users.isError && <ErrorState error={users.error} className="mt-4" />}
+        {stats.isLoading && <Skeleton className="mt-4 h-32 w-full" />}
+        {stats.isError && <ErrorState error={stats.error} className="mt-4" />}
 
-        {users.data && (
-          <ul className="mt-4 divide-y divide-border">
-            {users.data.items.map((user) => (
-              <li key={user.id} className="flex flex-wrap items-center gap-3 py-3">
-                <div className="min-w-0 flex-1">
-                  <p className="font-medium">
-                    {user.display_name || user.username}
-                    {user.is_admin && (
-                      <Badge variant="primary" size="sm" className="ml-2">
-                        admin
-                      </Badge>
-                    )}
-                    {!user.is_active && (
-                      <Badge variant="neutral" size="sm" className="ml-2">
-                        inactive
-                      </Badge>
-                    )}
-                    {user.must_change_password && (
-                      <Badge variant="warning" size="sm" className="ml-2">
-                        must change password
-                      </Badge>
-                    )}
-                  </p>
-                  <p className="text-xs text-fg-subtle">{user.username}</p>
+        {stats.data && (
+          <>
+            <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5">
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3.5">
+                <div className="flex items-center gap-2 text-xs font-medium text-fg-muted">
+                  <UsersIcon className="size-4 text-primary" aria-hidden />
+                  <span>Total Users</span>
                 </div>
+                <p className="mt-2 text-2xl font-bold tracking-tight text-fg">
+                  {stats.data.summary.total_users}
+                </p>
+                <p className="mt-0.5 text-xs text-fg-subtle">
+                  {stats.data.summary.active_users} active
+                </p>
+              </div>
 
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => reset.mutate(user.id)}
-                  loading={reset.isPending}
-                >
-                  Reset password
-                </Button>
-                {user.is_active && (
-                  <Button
-                    size="sm"
-                    variant="ghost"
-                    onClick={() => {
-                      if (window.confirm(`Deactivate ${user.username}?`)) {
-                        deactivate.mutate(user.id);
-                      }
-                    }}
-                  >
-                    Deactivate
-                  </Button>
-                )}
-              </li>
-            ))}
-          </ul>
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3.5">
+                <div className="flex items-center gap-2 text-xs font-medium text-fg-muted">
+                  <CheckCircle2 className="size-4 text-success" aria-hidden />
+                  <span>Solved (7d)</span>
+                </div>
+                <p className="mt-2 text-2xl font-bold tracking-tight text-fg">
+                  {stats.data.summary.problems_solved_7d}
+                </p>
+                <p className="mt-0.5 text-xs text-fg-subtle">Last 7 days</p>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3.5">
+                <div className="flex items-center gap-2 text-xs font-medium text-fg-muted">
+                  <CheckCircle2 className="size-4 text-success" aria-hidden />
+                  <span>Solved (Total)</span>
+                </div>
+                <p className="mt-2 text-2xl font-bold tracking-tight text-fg">
+                  {stats.data.summary.problems_solved_total}
+                </p>
+                <p className="mt-0.5 text-xs text-fg-subtle">All-time completed</p>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3.5">
+                <div className="flex items-center gap-2 text-xs font-medium text-fg-muted">
+                  <ListTodo className="size-4 text-warning" aria-hidden />
+                  <span>Open Problems</span>
+                </div>
+                <p className="mt-2 text-2xl font-bold tracking-tight text-fg">
+                  {stats.data.summary.problems_open}
+                </p>
+                <p className="mt-0.5 text-xs text-fg-subtle">Action items pending</p>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-2/40 p-3.5">
+                <div className="flex items-center gap-2 text-xs font-medium text-fg-muted">
+                  <Calendar className="size-4 text-primary" aria-hidden />
+                  <span>Total Meetings</span>
+                </div>
+                <p className="mt-2 text-2xl font-bold tracking-tight text-fg">
+                  {stats.data.summary.total_meetings}
+                </p>
+                <p className="mt-0.5 text-xs text-fg-subtle">Across all users</p>
+              </div>
+            </div>
+
+            <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-border pt-4">
+              <h3 className="font-display text-base font-semibold">User Activity & Statistics</h3>
+              <div className="relative w-full max-w-xs">
+                <Search className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-fg-subtle" />
+                <Input
+                  placeholder="Filter users..."
+                  value={search}
+                  onChange={(e) => setSearch(e.target.value)}
+                  className="pl-8 text-xs"
+                />
+              </div>
+            </div>
+
+            <div className="mt-3 overflow-x-auto">
+              <table className="w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border text-xs font-medium text-fg-subtle">
+                    <th className="pb-2.5 pr-4">User</th>
+                    <th className="pb-2.5 px-4">Last Login</th>
+                    <th className="pb-2.5 px-4 text-right">Solved (7d)</th>
+                    <th className="pb-2.5 px-4 text-right">Solved (Total)</th>
+                    <th className="pb-2.5 px-4 text-right">Open</th>
+                    <th className="pb-2.5 px-4 text-right">Meetings</th>
+                    <th className="pb-2.5 pl-4 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {filteredUsers.length === 0 ? (
+                    <tr>
+                      <td colSpan={7} className="py-6 text-center text-xs text-fg-subtle">
+                        No users match your search.
+                      </td>
+                    </tr>
+                  ) : (
+                    filteredUsers.map((user) => (
+                      <tr key={user.id} className="hover:bg-surface-2/30">
+                        <td className="py-3 pr-4">
+                          <div className="font-medium text-fg">
+                            <span>{user.display_name || user.username}</span>
+                            {user.is_admin && (
+                              <Badge variant="primary" size="sm" className="ml-2">
+                                admin
+                              </Badge>
+                            )}
+                            {!user.is_active && (
+                              <Badge variant="neutral" size="sm" className="ml-2">
+                                inactive
+                              </Badge>
+                            )}
+                            {user.must_change_password && (
+                              <Badge variant="warning" size="sm" className="ml-2">
+                                must change password
+                              </Badge>
+                            )}
+                          </div>
+                          <div className="text-xs text-fg-subtle">{user.username}</div>
+                        </td>
+                        <td className="py-3 px-4 whitespace-nowrap text-xs text-fg-muted">
+                          {user.last_login_at ? (
+                            <span title={new Date(user.last_login_at).toLocaleString()}>
+                              {fmtRelative(user.last_login_at)}
+                            </span>
+                          ) : (
+                            <span className="text-fg-subtle">Never</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium text-fg">
+                          {user.problems_solved_7d > 0 ? (
+                            <span className="font-semibold text-success-ink">
+                              {user.problems_solved_7d}
+                            </span>
+                          ) : (
+                            <span className="text-fg-subtle">0</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium text-fg">
+                          {user.problems_solved_total}
+                        </td>
+                        <td className="py-3 px-4 text-right font-medium text-fg">
+                          {user.problems_open > 0 ? (
+                            <span className="text-warning-ink">{user.problems_open}</span>
+                          ) : (
+                            <span className="text-fg-subtle">0</span>
+                          )}
+                        </td>
+                        <td className="py-3 px-4 text-right text-fg-muted">
+                          {user.meeting_count}
+                        </td>
+                        <td className="py-3 pl-4 text-right whitespace-nowrap">
+                          <div className="flex items-center justify-end gap-1.5">
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              onClick={() => reset.mutate(user.id)}
+                              loading={reset.isPending}
+                            >
+                              Reset password
+                            </Button>
+                            {user.is_active && (
+                              <Button
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => {
+                                  if (window.confirm(`Deactivate ${user.username}?`)) {
+                                    deactivate.mutate(user.id);
+                                  }
+                                }}
+                              >
+                                Deactivate
+                              </Button>
+                            )}
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </>
         )}
 
         {tempPassword && (

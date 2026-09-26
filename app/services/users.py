@@ -349,3 +349,73 @@ def require_user(conn: sqlite3.Connection, user_id: int) -> sqlite3.Row:
     if row is None:
         raise NotFoundError("User not found")
     return row
+
+
+def get_user_statistics(conn: sqlite3.Connection) -> dict:
+    """Compute per-user and platform aggregate statistics.
+
+    Tracks last login times, action items / problems solved (in the last 7 days
+    and all time), open action items, meetings, and threads.
+    """
+    seven_days_ago = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
+    rows = conn.execute(
+        """
+        SELECT
+            u.id,
+            u.username,
+            u.display_name,
+            u.is_admin,
+            u.is_active,
+            u.must_change_password,
+            u.created_at,
+            u.last_login_at,
+            (SELECT COUNT(*) FROM threads t WHERE t.owner_id = u.id) AS thread_count,
+            (SELECT COUNT(*) FROM meetings m WHERE m.owner_id = u.id) AS meeting_count,
+            (SELECT COUNT(*) FROM action_items a
+               JOIN meetings m ON m.id = a.meeting_id
+              WHERE m.owner_id = u.id AND a.status = 'done'
+                AND COALESCE(a.done_at, a.created_at) >= ?) AS problems_solved_7d,
+            (SELECT COUNT(*) FROM action_items a
+               JOIN meetings m ON m.id = a.meeting_id
+              WHERE m.owner_id = u.id AND a.status = 'done') AS problems_solved_total,
+            (SELECT COUNT(*) FROM action_items a
+               JOIN meetings m ON m.id = a.meeting_id
+              WHERE m.owner_id = u.id AND a.status = 'open') AS problems_open
+        FROM users u
+        ORDER BY u.id
+        """,
+        (seven_days_ago,),
+    ).fetchall()
+
+    user_stats = [
+        {
+            "id": r["id"],
+            "username": r["username"],
+            "display_name": r["display_name"],
+            "is_admin": bool(r["is_admin"]),
+            "is_active": bool(r["is_active"]),
+            "must_change_password": bool(r["must_change_password"]),
+            "created_at": r["created_at"],
+            "last_login_at": r["last_login_at"],
+            "problems_solved_7d": r["problems_solved_7d"],
+            "problems_solved_total": r["problems_solved_total"],
+            "problems_open": r["problems_open"],
+            "meeting_count": r["meeting_count"],
+            "thread_count": r["thread_count"],
+        }
+        for r in rows
+    ]
+
+    summary = {
+        "total_users": len(user_stats),
+        "active_users": sum(1 for u in user_stats if u["is_active"]),
+        "problems_solved_7d": sum(u["problems_solved_7d"] for u in user_stats),
+        "problems_solved_total": sum(u["problems_solved_total"] for u in user_stats),
+        "problems_open": sum(u["problems_open"] for u in user_stats),
+        "total_meetings": sum(u["meeting_count"] for u in user_stats),
+    }
+
+    return {
+        "summary": summary,
+        "users": user_stats,
+    }

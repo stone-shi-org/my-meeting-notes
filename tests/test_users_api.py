@@ -1,14 +1,16 @@
 """Admin user management."""
 
-from __future__ import annotations
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi.testclient import TestClient
 
+from app.db import get_conn, utcnow
 from tests.conftest import USER_PASSWORD
 
 ADMIN_ROUTES = [
     ("get", "/api/users", None),
+    ("get", "/api/users/statistics", None),
     ("post", "/api/users", {"username": "x", "password": "long-enough-pw"}),
     ("patch", "/api/users/1", {"display_name": "hacked"}),
     ("post", "/api/users/1/reset-password", {}),
@@ -237,3 +239,97 @@ def test_reset_password_revokes_existing_sessions(admin_client, make_user):
     admin_client.post(f"/api/users/{user['id']}/reset-password", json={})
 
     assert client.get("/api/auth/me").status_code == 401
+
+
+def test_user_statistics_dashboard(admin_client, make_user, isolated_settings):
+    u1, _ = make_user("alice")
+    u2, _ = make_user("bob")
+
+    now = datetime.now(timezone.utc)
+    two_days_ago = (now - timedelta(days=2)).isoformat()
+    ten_days_ago = (now - timedelta(days=10)).isoformat()
+
+    with get_conn(isolated_settings.db_path) as conn:
+        conn.execute("UPDATE users SET last_login_at = ? WHERE id = ?", (two_days_ago, u1["id"]))
+
+        cur = conn.execute(
+            "INSERT INTO threads (owner_id, title, created_at, updated_at) VALUES (?, 'T1', ?, ?)",
+            (u1["id"], two_days_ago, two_days_ago),
+        )
+        tid = cur.lastrowid
+
+        cur = conn.execute(
+            "INSERT INTO meetings (thread_id, owner_id, title, created_at, updated_at) VALUES (?, ?, 'M1', ?, ?)",
+            (tid, u1["id"], two_days_ago, two_days_ago),
+        )
+        mid = cur.lastrowid
+
+        cur = conn.execute(
+            """
+            INSERT INTO summaries (meeting_id, version, is_current, status, model, prompt_name, prompt_sha256, prompt_text, created_at)
+            VALUES (?, 1, 1, 'ok', 'm', 'p', 'h', 'txt', ?)
+            """,
+            (mid, two_days_ago),
+        )
+        sid = cur.lastrowid
+
+        # 1. Done within 7 days
+        conn.execute(
+            """
+            INSERT INTO action_items (summary_id, meeting_id, idx, text, status, done_at, created_at)
+            VALUES (?, ?, 0, 'Solve bug', 'done', ?, ?)
+            """,
+            (sid, mid, two_days_ago, two_days_ago),
+        )
+        # 2. Done 10 days ago (older than 7 days)
+        conn.execute(
+            """
+            INSERT INTO action_items (summary_id, meeting_id, idx, text, status, done_at, created_at)
+            VALUES (?, ?, 1, 'Older bug', 'done', ?, ?)
+            """,
+            (sid, mid, ten_days_ago, ten_days_ago),
+        )
+        # 3. Open
+        conn.execute(
+            """
+            INSERT INTO action_items (summary_id, meeting_id, idx, text, status, done_at, created_at)
+            VALUES (?, ?, 2, 'Pending bug', 'open', NULL, ?)
+            """,
+            (sid, mid, two_days_ago),
+        )
+
+    resp = admin_client.get("/api/users/statistics")
+    assert resp.status_code == 200
+    data = resp.json()
+
+    assert "summary" in data
+    assert "users" in data
+    summary = data["summary"]
+    users = data["users"]
+
+    # admin + alice + bob = 3 users
+    assert summary["total_users"] == 3
+    assert summary["active_users"] == 3
+    assert summary["problems_solved_7d"] == 1
+    assert summary["problems_solved_total"] == 2
+    assert summary["problems_open"] == 1
+    assert summary["total_meetings"] == 1
+
+    # Check alice's stats
+    alice_stat = next(u for u in users if u["id"] == u1["id"])
+    assert alice_stat["username"] == "alice"
+    assert alice_stat["last_login_at"] == two_days_ago
+    assert alice_stat["problems_solved_7d"] == 1
+    assert alice_stat["problems_solved_total"] == 2
+    assert alice_stat["problems_open"] == 1
+    assert alice_stat["meeting_count"] == 1
+    assert alice_stat["thread_count"] == 1
+
+    # Check bob's stats
+    bob_stat = next(u for u in users if u["id"] == u2["id"])
+    assert bob_stat["username"] == "bob"
+    assert bob_stat["problems_solved_7d"] == 0
+    assert bob_stat["problems_solved_total"] == 0
+    assert bob_stat["problems_open"] == 0
+    assert bob_stat["meeting_count"] == 0
+

@@ -89,6 +89,36 @@ class ResetPasswordResponse(BaseModel):
     temporary_password: str | None = None
 
 
+class UserStatisticOut(BaseModel):
+    id: int
+    username: str
+    display_name: str | None = None
+    is_admin: bool
+    is_active: bool
+    must_change_password: bool = False
+    created_at: str
+    last_login_at: str | None = None
+    problems_solved_7d: int = 0
+    problems_solved_total: int = 0
+    problems_open: int = 0
+    meeting_count: int = 0
+    thread_count: int = 0
+
+
+class UserStatisticsSummaryOut(BaseModel):
+    total_users: int = 0
+    active_users: int = 0
+    problems_solved_7d: int = 0
+    problems_solved_total: int = 0
+    problems_open: int = 0
+    total_meetings: int = 0
+
+
+class UserStatisticsDashboardOut(BaseModel):
+    summary: UserStatisticsSummaryOut
+    users: list[UserStatisticOut]
+
+
 # --------------------------------------------------------------------------- #
 # Threads
 # --------------------------------------------------------------------------- #

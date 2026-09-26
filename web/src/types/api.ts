@@ -62,6 +62,36 @@ export interface User {
   last_login_at: string | null;
 }
 
+export interface UserStatistic {
+  id: number;
+  username: string;
+  display_name: string | null;
+  is_admin: boolean;
+  is_active: boolean;
+  must_change_password: boolean;
+  created_at: string;
+  last_login_at: string | null;
+  problems_solved_7d: number;
+  problems_solved_total: number;
+  problems_open: number;
+  meeting_count: number;
+  thread_count: number;
+}
+
+export interface UserStatisticsSummary {
+  total_users: number;
+  active_users: number;
+  problems_solved_7d: number;
+  problems_solved_total: number;
+  problems_open: number;
+  total_meetings: number;
+}
+
+export interface UserStatisticsDashboard {
+  summary: UserStatisticsSummary;
+  users: UserStatistic[];
+}
+
 export interface Thread {
   id: number;
   owner_id: number;

@@ -17,6 +17,7 @@ from app.schemas import (
     ResetPasswordResponse,
     UserCreateRequest,
     UserOut,
+    UserStatisticsDashboardOut,
     UserUpdateRequest,
 )
 from app.security import validate_password
@@ -25,6 +26,15 @@ from app.config import get_settings
 
 router = APIRouter(prefix="/api/users", tags=["users"])
 log = get_logger("users_api")
+
+
+@router.get("/statistics", response_model=UserStatisticsDashboardOut)
+def get_user_statistics(
+    _: CurrentUser = Depends(require_admin),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> UserStatisticsDashboardOut:
+    """Dashboard statistics covering users' last login time, solved problems (7d & total), and meetings."""
+    return UserStatisticsDashboardOut(**users_svc.get_user_statistics(conn))
 
 
 @router.get("", response_model=Page[UserOut])
