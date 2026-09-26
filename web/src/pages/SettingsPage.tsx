@@ -52,7 +52,7 @@ const TABS = [
   { to: '/settings/telegram', label: 'Telegram' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/insight-types', label: 'Meeting types', adminOnly: true },
-  { to: '/settings/users', label: 'Users', adminOnly: true },
+  { to: '/settings/users', label: 'Users & Statistics', adminOnly: true },
   // Only on a server with MMN_DEV_PROVIDER_ENABLED set. Detected by whether the
   // provider is offered at all rather than by a capability endpoint of its own:
   // the picker query is already running and already cached.

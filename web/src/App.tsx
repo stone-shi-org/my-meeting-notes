@@ -98,6 +98,14 @@ export function App() {
                       <Route element={<RequireAdmin />}>
                         <Route path="insight-types" element={<InsightTypesSettingsPage />} />
                         <Route path="users" element={<UsersSettingsPage />} />
+                        <Route
+                          path="user-statistics"
+                          element={<Navigate to="/settings/users" replace />}
+                        />
+                        <Route
+                          path="statistics"
+                          element={<Navigate to="/settings/users" replace />}
+                        />
                       </Route>
                     </Route>
 
