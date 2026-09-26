@@ -17,7 +17,7 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Keys that live in the app_settings table and may be overridden at runtime.
@@ -71,7 +71,9 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "llm_model": ("str", False),
     # Models selectable in the AI chat panels, in addition to llm_model (which
     # is always implicitly allowed -- see llm_svc.enabled_chat_models). Stored
-    # as a JSON array; empty means "chat offers no choice, just llm_model".
+    # as a JSON array of strings in 'name1=id1' format (supporting quotes and
+    # spaces, e.g. '"OpenAI GPT 5.5"=cx/gpt-5.5-low') or raw model IDs;
+    # empty means "chat offers no choice, just llm_model".
     "llm_chat_models": ("json", False),
     "llm_ssl_verify": ("bool", False),
     "llm_timeout_sec": ("int", False),
@@ -324,6 +326,27 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = "localai/qwen3.6-35b-a3b"
     llm_chat_models: list[str] = Field(default_factory=list)
+
+    @field_validator("llm_chat_models", mode="before")
+    @classmethod
+    def _parse_chat_models(cls, v: Any) -> list[str]:
+        if v is None:
+            return []
+        if isinstance(v, str):
+            v_str = v.strip()
+            if not v_str:
+                return []
+            try:
+                parsed_json = json.loads(v_str)
+                if isinstance(parsed_json, list):
+                    return [str(x) for x in parsed_json]
+            except Exception:
+                pass
+            from app.services.llm import split_model_specs
+            return split_model_specs(v_str)
+        if isinstance(v, list):
+            return [str(x) for x in v]
+        return v
     llm_ssl_verify: bool = True
     llm_timeout_sec: int = 600
     llm_temperature: float = 0.2

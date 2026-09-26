@@ -229,9 +229,9 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
               value={chatModel.selected ?? ''}
               onChange={(e) => chatModel.setModel(e.target.value)}
             >
-              {chatModel.options.map((id) => (
-                <option key={id} value={id}>
-                  {id}
+              {chatModel.options.map((opt) => (
+                <option key={opt.id} value={opt.id}>
+                  {opt.name}
                 </option>
               ))}
             </Select>

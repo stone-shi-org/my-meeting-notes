@@ -347,6 +347,33 @@ def test_chat_models_endpoint_includes_configured_extras(admin_client):
     assert "extra/model" in body["models"]
 
 
+def test_chat_models_endpoint_returns_options_with_display_names(admin_client):
+    admin_client.put(
+        "/api/settings",
+        json={
+            "values": {
+                "llm_chat_models": [
+                    '"OpenAI GPT 5.5"=cx/gpt-5.5-low',
+                    '"OpenAI GPT 6 Astra"=cx/gpt-6-astra',
+                ]
+            }
+        },
+    )
+    body = admin_client.get("/api/llm/chat-models").json()
+    assert "cx/gpt-5.5-low" in body["models"]
+    assert "cx/gpt-6-astra" in body["models"]
+
+    options = body["options"]
+    assert any(
+        opt["id"] == "cx/gpt-5.5-low" and opt["name"] == "OpenAI GPT 5.5"
+        for opt in options
+    )
+    assert any(
+        opt["id"] == "cx/gpt-6-astra" and opt["name"] == "OpenAI GPT 6 Astra"
+        for opt in options
+    )
+
+
 def test_chat_models_endpoint_requires_login(client):
     assert client.get("/api/llm/chat-models").status_code == 401
 

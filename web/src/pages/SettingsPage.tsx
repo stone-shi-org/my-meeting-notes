@@ -403,6 +403,99 @@ export function SettingsForm({
   );
 }
 
+interface ParsedModelSpec {
+  id: string;
+  name: string;
+  raw: string;
+}
+
+function parseModelSpec(spec: string): ParsedModelSpec | null {
+  const s = spec.trim();
+  if (!s) return null;
+
+  let eqIndex = -1;
+  let inQuotes = false;
+  let escape = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const char = s[i];
+    if (escape) {
+      escape = false;
+    } else if (char === '\\') {
+      escape = true;
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+    } else if (char === '=' && !inQuotes) {
+      eqIndex = i;
+      break;
+    }
+  }
+
+  function unquote(part: string): string {
+    const p = part.trim();
+    if (p.length >= 2 && p.startsWith('"') && p.endsWith('"')) {
+      return p.slice(1, -1).replace(/\\"/g, '"');
+    }
+    return p;
+  }
+
+  if (eqIndex !== -1) {
+    const rawName = s.slice(0, eqIndex);
+    const rawId = s.slice(eqIndex + 1);
+    const name = unquote(rawName);
+    const id = unquote(rawId);
+    if (!id) return null;
+    return { id, name: name || id, raw: spec };
+  } else {
+    const id = unquote(s);
+    if (!id) return null;
+    return { id, name: id, raw: spec };
+  }
+}
+
+function splitModelSpecs(text: string): string[] {
+  let s = text.trim();
+  if (s.startsWith('[') && s.endsWith(']')) {
+    s = s.slice(1, -1).trim();
+  }
+
+  const items: string[] = [];
+  let current: string[] = [];
+  let inQuotes = false;
+  let escape = false;
+
+  for (let i = 0; i < s.length; i++) {
+    const char = s[i];
+    if (escape) {
+      current.push(char);
+      escape = false;
+    } else if (char === '\\') {
+      escape = true;
+      current.push(char);
+    } else if (char === '"') {
+      inQuotes = !inQuotes;
+      current.push(char);
+    } else if (char === ',' && !inQuotes) {
+      const item = current.join('').trim();
+      if (item) items.push(item);
+      current = [];
+    } else {
+      current.push(char);
+    }
+  }
+
+  const last = current.join('').trim();
+  if (last) items.push(last);
+
+  return items;
+}
+
+function formatModelSpec(name: string, id: string): string {
+  if (!name || name === id) return id;
+  const escapedName = name.replace(/"/g, '\\"');
+  return `"${escapedName}"=${id}`;
+}
+
 /**
  * Which models the AI chat panels (thread and transcript) let people pick
  * from, in addition to `llm_model` above (always implicitly allowed -- see
@@ -415,6 +508,8 @@ function ChatModelsField() {
   const settings = useSettings();
   const [draft, setDraft] = useState<string[] | null>(null);
   const [customModel, setCustomModel] = useState('');
+  const [isEditingRaw, setIsEditingRaw] = useState(false);
+  const [rawText, setRawText] = useState('');
 
   const models = useQuery({
     queryKey: ['models', '/llm/models'],
@@ -425,6 +520,11 @@ function ChatModelsField() {
   const entry = settings.data?.settings.llm_chat_models;
   const saved = Array.isArray(entry?.value) ? entry.value : [];
   const enabled = draft ?? saved;
+
+  const parsedModels: ParsedModelSpec[] = enabled
+    .map((item) => parseModelSpec(item))
+    .filter((x): x is ParsedModelSpec => x !== null);
+  const enabledIds = new Set(parsedModels.map((m) => m.id));
 
   const save = useMutation({
     mutationFn: (values: string[]) =>
@@ -438,13 +538,24 @@ function ChatModelsField() {
   if (settings.isLoading) return <Skeleton className="h-32 w-full" />;
 
   function remove(id: string) {
-    setDraft(enabled.filter((m) => m !== id));
+    setDraft(enabled.filter((m) => parseModelSpec(m)?.id !== id));
   }
 
   function addCustom() {
-    const id = customModel.trim();
-    if (!id || enabled.includes(id)) return;
-    setDraft([...enabled, id]);
+    const text = customModel.trim();
+    if (!text) return;
+    const tokens = splitModelSpecs(text);
+    if (tokens.length === 0) return;
+
+    let next = [...enabled];
+    for (const token of tokens) {
+      const parsed = parseModelSpec(token);
+      if (!parsed) continue;
+      const formatted = formatModelSpec(parsed.name, parsed.id);
+      next = next.filter((item) => parseModelSpec(item)?.id !== parsed.id);
+      next.push(formatted);
+    }
+    setDraft(next);
     setCustomModel('');
   }
 
@@ -454,38 +565,89 @@ function ChatModelsField() {
   // silently vanish from the saved value.
   const available = (models.data?.models ?? [])
     .map((m) => m.id)
-    .filter((id) => !enabled.includes(id));
+    .filter((id) => !enabledIds.has(id));
 
   return (
     <Card className="p-5">
-      <h2 className="font-display text-lg font-semibold">Chat models</h2>
-      <p className="mt-1 text-sm text-fg-subtle">
-        Models people can choose between in the AI chat panels (thread and transcript chat).
-        The language model above is always available too.
-      </p>
-
-      <div className="mt-4 flex min-h-9 flex-wrap items-center gap-1.5 rounded border border-border bg-surface-2 p-2">
-        {enabled.length === 0 && (
-          <span className="px-1 text-sm text-fg-subtle">No models chosen yet.</span>
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h2 className="font-display text-lg font-semibold">Chat models</h2>
+          <p className="mt-1 text-sm text-fg-subtle">
+            Models people can choose between in the AI chat panels (thread and transcript chat).
+            The language model above is always available too.
+          </p>
+        </div>
+        {isAdmin && (
+          <Button
+            variant="ghost"
+            size="sm"
+            type="button"
+            onClick={() => {
+              if (!isEditingRaw) {
+                setRawText(enabled.join(', '));
+              }
+              setIsEditingRaw(!isEditingRaw);
+            }}
+            className="text-xs"
+          >
+            {isEditingRaw ? 'View badges' : 'Edit as text'}
+          </Button>
         )}
-        {enabled.map((id) => (
-          <Badge key={id} variant="outline" className="bg-surface py-1 pl-2 pr-1 text-sm">
-            {id}
-            {isAdmin && (
-              <button
-                type="button"
-                aria-label={`Remove ${id}`}
-                onClick={() => remove(id)}
-                className="rounded-sm p-0.5 text-fg-subtle hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:ring-2"
-              >
-                <X className="size-3.5" />
-              </button>
-            )}
-          </Badge>
-        ))}
       </div>
 
-      {isAdmin && (
+      {isEditingRaw ? (
+        <div className="mt-4">
+          <Textarea
+            value={rawText}
+            onChange={(e) => {
+              const val = e.target.value;
+              setRawText(val);
+              const tokens = splitModelSpecs(val);
+              const specs = tokens
+                .map((t) => parseModelSpec(t))
+                .filter((p): p is ParsedModelSpec => p !== null)
+                .map((p) => formatModelSpec(p.name, p.id));
+              setDraft(specs);
+            }}
+            rows={3}
+            placeholder='["OpenAI GPT 5.5"=cx/gpt-5.5-low, "OpenAI GPT 6 Astra"=cx/gpt-6-astra]'
+            className="font-mono text-xs"
+          />
+          <p className="mt-1.5 text-xs text-fg-subtle">
+            Comma-separated format: <code className="rounded bg-surface-2 px-1">"Display Name"=model_id, ...</code> (supports quotes and spaces).
+          </p>
+        </div>
+      ) : (
+        <div className="mt-4 flex min-h-9 flex-wrap items-center gap-1.5 rounded border border-border bg-surface-2 p-2">
+          {parsedModels.length === 0 && (
+            <span className="px-1 text-sm text-fg-subtle">No models chosen yet.</span>
+          )}
+          {parsedModels.map((item) => (
+            <Badge key={item.id} variant="outline" className="bg-surface py-1 pl-2 pr-1 text-sm gap-1.5">
+              {item.name !== item.id ? (
+                <span className="flex items-center gap-1">
+                  <span className="font-medium text-fg">{item.name}</span>
+                  <span className="text-xs text-fg-subtle font-mono">({item.id})</span>
+                </span>
+              ) : (
+                <span className="font-mono text-xs">{item.id}</span>
+              )}
+              {isAdmin && (
+                <button
+                  type="button"
+                  aria-label={`Remove ${item.name}`}
+                  onClick={() => remove(item.id)}
+                  className="rounded-sm p-0.5 text-fg-subtle hover:bg-surface-3 hover:text-fg focus-visible:outline-none focus-visible:ring-2"
+                >
+                  <X className="size-3.5" />
+                </button>
+              )}
+            </Badge>
+          ))}
+        </div>
+      )}
+
+      {isAdmin && !isEditingRaw && (
         <div className="mt-3">
           <Label htmlFor="chat-model-add">Add a model</Label>
           <div className="mt-1 flex gap-2">
@@ -493,7 +655,7 @@ function ChatModelsField() {
               id="chat-model-add"
               value={customModel}
               onChange={(e) => setCustomModel(e.target.value)}
-              placeholder="Type a model id, e.g. deepseek/deepseek-v4-flash"
+              placeholder='e.g. "OpenAI GPT 5.5"=cx/gpt-5.5-low or model ID'
               list={available.length ? 'chat-model-options' : undefined}
               autoComplete="off"
               onKeyDown={(e) => {
@@ -515,12 +677,10 @@ function ChatModelsField() {
               Add
             </Button>
           </div>
-          {available.length > 0 && (
-            <p className="mt-1 text-xs text-fg-subtle">
-              {available.length} models available — start typing to filter. An id the catalog
-              doesn't list works too.
-            </p>
-          )}
+          <p className="mt-1 text-xs text-fg-subtle">
+            Supports <code className="rounded bg-surface-2 px-1">"Display Name"=model_id</code> or model ID. Comma-separated pairs can also be added together.
+            {available.length > 0 && ` ${available.length} models available from catalog.`}
+          </p>
         </div>
       )}
 

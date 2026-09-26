@@ -142,7 +142,10 @@ def llm_chat_models(
     """
     from app.services import llm as llm_svc
 
-    return {"models": llm_svc.enabled_chat_models(conn)}
+    return {
+        "models": llm_svc.enabled_chat_models(conn),
+        "options": llm_svc.enabled_chat_model_options(conn),
+    }
 
 
 @router.get("/diarization/models")

@@ -316,3 +316,91 @@ def test_resolve_chat_model_allows_a_configured_extra(conn):
 def test_resolve_chat_model_rejects_anything_not_enabled(conn):
     with pytest.raises(ValidationError):
         llm_svc.resolve_chat_model(conn, "not/allowed")
+
+
+def test_parse_model_spec_and_split():
+    # Single unquoted
+    assert llm_svc.parse_model_spec("name1=id1") == ("name1", "id1")
+    # Single quoted with spaces
+    assert llm_svc.parse_model_spec('"OpenAI GPT 5.5"=cx/gpt-5.5-low') == (
+        "OpenAI GPT 5.5",
+        "cx/gpt-5.5-low",
+    )
+    # Both quoted
+    assert llm_svc.parse_model_spec('"OpenAI GPT 6 Astra"="cx/gpt-6-astra"') == (
+        "OpenAI GPT 6 Astra",
+        "cx/gpt-6-astra",
+    )
+    # Plain ID without equals
+    assert llm_svc.parse_model_spec("cx/gpt-5.5-low") == ("cx/gpt-5.5-low", "cx/gpt-5.5-low")
+    # Escaped quote inside name
+    assert llm_svc.parse_model_spec(r'"Model \"Special\""=cx/special') == (
+        'Model "Special"',
+        "cx/special",
+    )
+
+    # Splitting comma-separated and bracketed strings
+    raw = '["OpenAI GPT 5.5"=cx/gpt-5.5-low, "OpenAI GPT 6 Astra"=cx/gpt-6-astra]'
+    assert llm_svc.split_model_specs(raw) == [
+        '"OpenAI GPT 5.5"=cx/gpt-5.5-low',
+        '"OpenAI GPT 6 Astra"=cx/gpt-6-astra',
+    ]
+
+    raw_unquoted = "name1=id1, name2=id2"
+    assert llm_svc.split_model_specs(raw_unquoted) == ["name1=id1", "name2=id2"]
+
+
+def test_enabled_chat_models_with_formatted_specs(conn):
+    from app.config import get_settings
+
+    default = get_settings().llm_model
+    _set_chat_models(
+        conn,
+        [
+            '"OpenAI GPT 5.5"=cx/gpt-5.5-low',
+            '"OpenAI GPT 6 Astra"=cx/gpt-6-astra',
+        ],
+    )
+    assert llm_svc.enabled_chat_models(conn) == [
+        default,
+        "cx/gpt-5.5-low",
+        "cx/gpt-6-astra",
+    ]
+
+    options = llm_svc.enabled_chat_model_options(conn)
+    assert options == [
+        {"id": default, "name": default},
+        {"id": "cx/gpt-5.5-low", "name": "OpenAI GPT 5.5"},
+        {"id": "cx/gpt-6-astra", "name": "OpenAI GPT 6 Astra"},
+    ]
+
+
+def test_enabled_chat_models_custom_name_for_default(conn):
+    from app.config import get_settings
+
+    default = get_settings().llm_model
+    _set_chat_models(
+        conn,
+        [
+            f'"Default Friendly"={default}',
+            '"Custom Model"=custom/model-id',
+        ],
+    )
+    assert llm_svc.enabled_chat_models(conn) == [default, "custom/model-id"]
+
+    options = llm_svc.enabled_chat_model_options(conn)
+    assert options == [
+        {"id": default, "name": "Default Friendly"},
+        {"id": "custom/model-id", "name": "Custom Model"},
+    ]
+
+
+def test_resolve_chat_model_resolves_by_display_name_or_id(conn):
+    _set_chat_models(conn, ['"OpenAI GPT 5.5"=cx/gpt-5.5-low'])
+    # By ID
+    assert llm_svc.resolve_chat_model(conn, "cx/gpt-5.5-low") == "cx/gpt-5.5-low"
+    # By display name
+    assert llm_svc.resolve_chat_model(conn, "OpenAI GPT 5.5") == "cx/gpt-5.5-low"
+    # Invalid
+    with pytest.raises(ValidationError):
+        llm_svc.resolve_chat_model(conn, "Unknown Name")

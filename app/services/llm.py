@@ -126,27 +126,180 @@ class LLMConfig:
         return headers
 
 
+def split_model_specs(text: str) -> list[str]:
+    """Split a comma-separated string of model specifications into individual
+    spec strings, respecting double quotes and optional enclosing brackets.
+    """
+    s = text.strip()
+    if s.startswith("[") and s.endswith("]"):
+        s = s[1:-1].strip()
+
+    items: list[str] = []
+    current: list[str] = []
+    in_quotes = False
+    escape = False
+
+    for char in s:
+        if escape:
+            current.append(char)
+            escape = False
+        elif char == "\\":
+            escape = True
+            current.append(char)
+        elif char == '"':
+            in_quotes = not in_quotes
+            current.append(char)
+        elif char == "," and not in_quotes:
+            item = "".join(current).strip()
+            if item:
+                items.append(item)
+            current = []
+        else:
+            current.append(char)
+
+    last = "".join(current).strip()
+    if last:
+        items.append(last)
+
+    return items
+
+
+def parse_model_spec(spec: str) -> tuple[str, str] | None:
+    """Parse a single model spec into (display_name, model_id).
+
+    Formats supported:
+      - "Display Name"=model_id
+      - Display Name=model_id
+      - "Display Name"="model_id"
+      - model_id (returns (model_id, model_id))
+    """
+    s = spec.strip()
+    if not s:
+        return None
+
+    eq_index = -1
+    in_quotes = False
+    escape = False
+    for i, char in enumerate(s):
+        if escape:
+            escape = False
+        elif char == "\\":
+            escape = True
+        elif char == '"':
+            in_quotes = not in_quotes
+        elif char == "=" and not in_quotes:
+            eq_index = i
+            break
+
+    def unquote(part: str) -> str:
+        p = part.strip()
+        if len(p) >= 2 and p.startswith('"') and p.endswith('"'):
+            inner = p[1:-1]
+            return inner.replace('\\"', '"')
+        return p
+
+    if eq_index != -1:
+        raw_name = s[:eq_index].strip()
+        raw_id = s[eq_index + 1:].strip()
+        name = unquote(raw_name)
+        model_id = unquote(raw_id)
+        if not model_id:
+            return None
+        if not name:
+            name = model_id
+        return name, model_id
+    else:
+        model_id = unquote(s)
+        if not model_id:
+            return None
+        return model_id, model_id
+
+
+def format_model_spec(name: str, model_id: str) -> str:
+    """Format a name and model id into the string format: "name"=id."""
+    if not name or name == model_id:
+        return model_id
+    escaped_name = name.replace('"', '\\"')
+    return f'"{escaped_name}"={model_id}'
+
+
+def parse_chat_model_entries(entries: list[str] | str | None) -> list[dict[str, str]]:
+    """Parse chat model setting entries into a list of {"id": model_id, "name": display_name}."""
+    if not entries:
+        return []
+    if isinstance(entries, str):
+        specs = split_model_specs(entries)
+    else:
+        specs = []
+        for item in entries:
+            if isinstance(item, str):
+                specs.extend(split_model_specs(item))
+            elif isinstance(item, dict) and "id" in item:
+                name = item.get("name") or item["id"]
+                specs.append(format_model_spec(name, item["id"]))
+
+    result: list[dict[str, str]] = []
+    seen_ids: set[str] = set()
+    for spec in specs:
+        parsed = parse_model_spec(spec)
+        if parsed:
+            name, model_id = parsed
+            if model_id not in seen_ids:
+                seen_ids.add(model_id)
+                result.append({"id": model_id, "name": name})
+    return result
+
+
 def enabled_chat_models(conn) -> list[str]:
     """Models selectable in the AI chat panels: the admin-configured list,
     plus the default summarization model, which is always implicitly allowed
     even if nobody added it to llm_chat_models. De-duped, default first, so a
     fresh install with an empty list still offers exactly one choice.
+    Returns underlying model IDs.
     """
     default = effective(conn, "llm_model")
     configured = effective(conn, "llm_chat_models")
-    return list(dict.fromkeys([default, *configured]))
+    parsed_entries = parse_chat_model_entries(configured)
+    return list(dict.fromkeys([default, *(item["id"] for item in parsed_entries)]))
+
+
+def enabled_chat_model_options(conn) -> list[dict[str, str]]:
+    """Models selectable in the AI chat panels with display names:
+    returns [{"id": model_id, "name": display_name}, ...], default first.
+    """
+    default = effective(conn, "llm_model")
+    configured = effective(conn, "llm_chat_models")
+    parsed_entries = parse_chat_model_entries(configured)
+
+    default_name = default
+    for item in parsed_entries:
+        if item["id"] == default:
+            default_name = item["name"]
+            break
+
+    options: list[dict[str, str]] = [{"id": default, "name": default_name}]
+    seen = {default}
+    for item in parsed_entries:
+        if item["id"] not in seen:
+            seen.add(item["id"])
+            options.append(item)
+    return options
 
 
 def resolve_chat_model(conn, requested: str | None) -> str | None:
     """None means "use the configured default". A specific choice must be one
-    of the admin-approved chat models -- otherwise any signed-in user could
-    route a request to an arbitrary model on the same API key/base_url.
+    of the admin-approved chat models (matched by ID or display name) -- otherwise
+    any signed-in user could route a request to an arbitrary model on the same
+    API key/base_url. Returns the underlying model ID.
     """
     if requested is None:
         return None
-    if requested not in enabled_chat_models(conn):
-        raise ValidationError(f"{requested!r} is not an enabled chat model")
-    return requested
+    if requested in enabled_chat_models(conn):
+        return requested
+    for opt in enabled_chat_model_options(conn):
+        if requested == opt["name"]:
+            return opt["id"]
+    raise ValidationError(f"{requested!r} is not an enabled chat model")
 
 
 def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:
