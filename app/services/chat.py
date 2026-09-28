@@ -673,6 +673,12 @@ def _history_messages(conn: sqlite3.Connection, thread_id: int) -> list[dict]:
 
 
 def _row_to_message(row: sqlite3.Row) -> dict:
+    tool_calls = None
+    if "tool_calls" in row.keys() and row["tool_calls"]:
+        try:
+            tool_calls = json.loads(row["tool_calls"])
+        except Exception:
+            tool_calls = None
     return {
         "id": row["id"],
         "thread_id": row["thread_id"],
@@ -681,6 +687,7 @@ def _row_to_message(row: sqlite3.Row) -> dict:
         "model": row["model"],
         "prompt_tokens": row["prompt_tokens"],
         "completion_tokens": row["completion_tokens"],
+        "tool_calls": tool_calls,
         "created_at": row["created_at"],
     }
 
@@ -776,6 +783,7 @@ async def _produce(
 
         content = ""
         usage: dict = {}
+        executed_tool_calls: list[dict] = []
         for _ in range(MAX_TOOL_HOPS + 1):
             payload = {
                 "model": config.model,
@@ -797,6 +805,7 @@ async def _produce(
                 tool_result = await _run_tool(
                     conn, db_path, thread_id, user_id, verb, arg, found
                 )
+            executed_tool_calls.append({"tool": verb, "arg": arg, "result": tool_result})
             log.info(
                 "tool hop for thread %s: %s %s -> %d char(s)",
                 thread_id, verb, arg, len(tool_result),
@@ -823,11 +832,13 @@ async def _produce(
             )
             cur = conn.execute(
                 "INSERT INTO chat_messages (thread_id, owner_id, role, content, model, "
-                "prompt_tokens, completion_tokens, created_at) "
-                "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?)",
+                "prompt_tokens, completion_tokens, tool_calls, created_at) "
+                "VALUES (?, ?, 'assistant', ?, ?, ?, ?, ?, ?)",
                 (
                     thread_id, user_id, content, config.model,
-                    usage.get("prompt_tokens"), usage.get("completion_tokens"), utcnow(),
+                    usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    json.dumps(executed_tool_calls) if executed_tool_calls else None,
+                    utcnow(),
                 ),
             )
             assistant_row = conn.execute(
@@ -856,24 +867,30 @@ async def stream_chat_response(
 ):
     """SSE generator for StreamingResponse.
 
-    The actual work runs in a background task feeding `queue`, decoupled from
-    this generator's own lifecycle: if the client disconnects, Starlette just
-    stops iterating us, but the task keeps running and still persists the
-    answer -- unlike jobs.py's poll loop, there's no cost to keep going, and
-    stopping early would silently drop a reply that already cost LLM budget.
+    The actual work runs in a background task feeding `queue`. If the client
+    disconnects or cancels the stream, the generator terminates and cancels
+    the background task so incomplete replies are stopped and not persisted.
     """
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    asyncio.create_task(_produce(queue, db_path, thread_id, user_id, message, model))
+    task = asyncio.create_task(_produce(queue, db_path, thread_id, user_id, message, model))
 
-    while True:
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
-        except asyncio.TimeoutError:
-            # The reasoning phase alone can run 80s+ with nothing to send --
-            # long enough for an intermediate proxy to give up on a silent
-            # connection, same reasoning as jobs.py's idle keepalive.
-            yield ": keepalive\n\n"
-            continue
-        if item is None:
-            return
-        yield item
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
+            except asyncio.TimeoutError:
+                # The reasoning phase alone can run 80s+ with nothing to send --
+                # long enough for an intermediate proxy to give up on a silent
+                # connection, same reasoning as jobs.py's idle keepalive.
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass

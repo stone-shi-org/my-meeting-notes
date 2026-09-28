@@ -618,3 +618,31 @@ async def test_run_telegram_turn_on_failure_apologizes_and_persists_nothing(
             "SELECT COUNT(*) FROM telegram_chat_messages WHERE owner_id = ?", (user_id,)
         ).fetchone()[0]
     assert count == 0
+
+
+@respx.mock
+def test_home_chat_tool_calls_are_persisted_and_returned_in_history(user_client, isolated_settings):
+    thread_id, _other_id, _meeting_id = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response([f"TOOL: get_thread_detail {thread_id}"]),
+            stream_response(["Here's the detail."]),
+        ]
+    )
+
+    resp = user_client.post(
+        "/api/home/chat",
+        json={"message": "Tell me about Q3 planning"},
+    )
+    assert resp.status_code == 200
+
+    history = user_client.get("/api/home/chat").json()
+    assert len(history) == 2
+    assistant_msg = history[1]
+    assert assistant_msg["role"] == "assistant"
+    assert assistant_msg["tool_calls"] is not None
+    assert len(assistant_msg["tool_calls"]) == 1
+    assert assistant_msg["tool_calls"][0]["tool"] == "get_thread_detail"
+    assert assistant_msg["tool_calls"][0]["arg"] == str(thread_id)
+    assert "result" in assistant_msg["tool_calls"][0]
+

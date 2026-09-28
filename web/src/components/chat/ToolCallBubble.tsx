@@ -1,13 +1,9 @@
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useState } from 'react';
 import { Spinner } from '@/components/ui/primitives';
+import type { ToolCall } from '@/types/api';
 
-export interface ToolCall {
-  tool: string;
-  arg: string;
-  /** Undefined while the tool is still running. */
-  result?: string;
-}
+export type { ToolCall };
 
 /**
  * One tool hop inside a thread chat turn -- ThreadChatPanel's tool-hop loop

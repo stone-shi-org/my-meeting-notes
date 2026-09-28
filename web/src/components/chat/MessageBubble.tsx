@@ -6,6 +6,7 @@ import { useNotes, type NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { copyText } from '@/lib/clipboard';
 import { cn } from '@/lib/cn';
+import { enhanceCodeBlocks, handleCodeBlockClick } from '@/lib/codeBlocks';
 import { renderMarkdown } from '@/lib/markdown';
 import type { Paginated, Thread } from '@/types/api';
 
@@ -32,6 +33,7 @@ export function MessageBubble({
   model,
   promptTokens,
   completionTokens,
+  isStreaming = false,
 }: {
   role: 'user' | 'assistant';
   content: string;
@@ -46,7 +48,16 @@ export function MessageBubble({
   model?: string | null;
   promptTokens?: number | null;
   completionTokens?: number | null;
+  isStreaming?: boolean;
 }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (role === 'assistant') {
+      enhanceCodeBlocks(containerRef.current);
+    }
+  }, [role, content]);
+
   if (role === 'user') {
     return <UserMessageBubble content={content} />;
   }
@@ -54,7 +65,12 @@ export function MessageBubble({
   return (
     <div className="max-w-[85%] min-w-0">
       <div
-        className="prose prose-sm max-w-none rounded-lg bg-surface-2 px-3 py-2 dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-ol:my-1"
+        ref={containerRef}
+        onClick={handleCodeBlockClick}
+        className={cn(
+          'prose prose-sm max-w-none rounded-lg bg-surface-2 px-3 py-2 dark:prose-invert prose-p:my-1 prose-ul:my-1 prose-ol:my-1',
+          isStreaming && 'answer-streaming',
+        )}
         dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }}
       />
       {(scope || pickThread) && (

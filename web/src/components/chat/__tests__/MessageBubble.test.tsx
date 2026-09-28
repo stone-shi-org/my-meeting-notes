@@ -58,5 +58,26 @@ describe('MessageBubble', () => {
       render(<MessageBubble role="assistant" content="**Bold summary**" />);
       expect(screen.getByText('Bold summary')).toBeInTheDocument();
     });
+
+    it('renders streaming indicator when isStreaming is true', () => {
+      const { container } = render(
+        <MessageBubble role="assistant" content="Streaming text" isStreaming />
+      );
+      const prose = container.querySelector('.answer-streaming');
+      expect(prose).not.toBeNull();
+    });
+
+    it('enhances code blocks with language badge and copy button', () => {
+      const { container } = render(
+        <MessageBubble role="assistant" content={`\`\`\`python\nprint('hello')\n\`\`\``} />
+      );
+      const codeWrapper = container.querySelector('.code-block-container');
+      expect(codeWrapper).not.toBeNull();
+      const lang = container.querySelector('.code-block-lang');
+      expect(lang?.textContent).toBe('python');
+      const copyBtn = container.querySelector('.code-copy-btn');
+      expect(copyBtn).not.toBeNull();
+    });
   });
 });
+

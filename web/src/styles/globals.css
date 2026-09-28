@@ -265,3 +265,115 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ---- Code blocks in AI chat ---- */
+.code-block-container {
+  margin: 0.75rem 0;
+  border-radius: 0.5rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  overflow: hidden;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+
+.code-block-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.35rem 0.75rem;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.75rem;
+  color: var(--fg-muted);
+  user-select: none;
+}
+
+.code-block-lang {
+  font-weight: 600;
+  text-transform: lowercase;
+  letter-spacing: 0.02em;
+  color: var(--fg-subtle);
+}
+
+.code-copy-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  padding: 0.2rem 0.5rem;
+  font-size: 0.7rem;
+  font-family: inherit;
+  color: var(--fg-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.25rem;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.code-copy-btn:hover {
+  color: var(--fg);
+  background: var(--surface-3);
+  border-color: var(--border-strong);
+}
+
+.code-copy-btn.copied {
+  color: var(--success-ink);
+  background: var(--success-soft);
+  border-color: var(--success);
+}
+
+.code-copy-btn .copy-icon {
+  flex-shrink: 0;
+}
+
+.code-block-container pre {
+  margin: 0 !important;
+  padding: 0.75rem !important;
+  background: transparent !important;
+  border: none !important;
+  border-radius: 0 !important;
+  overflow-x: auto;
+}
+
+/* ---- Jump to latest button in chat ---- */
+.jump-latest {
+  position: sticky;
+  bottom: 0.5rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.75rem;
+  font-weight: 500;
+  padding: 0.35rem 0.85rem;
+  border-radius: 9999px;
+  background: var(--surface);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+  cursor: pointer;
+  z-index: 10;
+  transition: all 0.15s ease;
+}
+
+.jump-latest:hover {
+  background: var(--surface-2);
+  border-color: var(--border-strong);
+}
+
+/* ---- Streaming cursor ---- */
+.answer-streaming::after {
+  content: '▌';
+  color: var(--primary);
+  display: inline-block;
+  vertical-align: baseline;
+  margin-left: 2px;
+  animation: streaming-blink 1s steps(2) infinite;
+}
+
+@keyframes streaming-blink {
+  50% { opacity: 0; }
+}
+

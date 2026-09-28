@@ -388,6 +388,7 @@ SCHEMA: tuple[str, ...] = (
         model              TEXT,
         prompt_tokens      INTEGER,
         completion_tokens  INTEGER,
+        tool_calls         TEXT,
         created_at         TEXT NOT NULL
     )
     """,
@@ -403,6 +404,7 @@ SCHEMA: tuple[str, ...] = (
         model              TEXT,
         prompt_tokens      INTEGER,
         completion_tokens  INTEGER,
+        tool_calls         TEXT,
         created_at         TEXT NOT NULL
     )
     """,
@@ -417,6 +419,7 @@ SCHEMA: tuple[str, ...] = (
         model              TEXT,
         prompt_tokens      INTEGER,
         completion_tokens  INTEGER,
+        tool_calls         TEXT,
         created_at         TEXT NOT NULL
     )
     """,
@@ -431,6 +434,7 @@ SCHEMA: tuple[str, ...] = (
         model              TEXT,
         prompt_tokens      INTEGER,
         completion_tokens  INTEGER,
+        tool_calls         TEXT,
         created_at         TEXT NOT NULL
     )
     """,
@@ -834,6 +838,12 @@ LATE_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # When the user explicitly dismissed the "Needs your reply" badge on this email.
     # Stamped with utcnow() so it won't reappear as needing reply.
     ("thread_emails", "reply_dismissed_at", "TEXT"),
+    # Persisted tool call hops (JSON array of {tool, arg, result}) for assistant
+    # turns in AI chat, so tool bubbles survive page reloads.
+    ("chat_messages", "tool_calls", "TEXT"),
+    ("meeting_chat_messages", "tool_calls", "TEXT"),
+    ("home_chat_messages", "tool_calls", "TEXT"),
+    ("telegram_chat_messages", "tool_calls", "TEXT"),
 )
 
 # The two built-in insight_types rows, seeded once on a genuinely empty table

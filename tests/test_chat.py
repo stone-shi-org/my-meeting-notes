@@ -985,3 +985,62 @@ def test_search_results_mark_the_users_own_sent_mail(initialised_db):
     assert 'you sent' in text
     assert 'from p@acme.com' in text
     assert 'direction unknown' in text
+
+
+@respx.mock
+def test_tool_calls_are_persisted_and_returned_in_history(user_client, isolated_settings):
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+    respx.post(LLM_URL).mock(
+        side_effect=[
+            stream_response(["TOOL: search_context cutover"]),
+            stream_response(["Found cutover context."]),
+        ]
+    )
+
+    resp = user_client.post(
+        f"/api/threads/{thread_id}/chat",
+        json={"message": "Search context for cutover"},
+    )
+    assert resp.status_code == 200
+
+    history = user_client.get(f"/api/threads/{thread_id}/chat").json()
+    assert len(history) == 2
+    assistant_msg = history[1]
+    assert assistant_msg["role"] == "assistant"
+    assert assistant_msg["tool_calls"] is not None
+    assert len(assistant_msg["tool_calls"]) == 1
+    assert assistant_msg["tool_calls"][0]["tool"] == "search_context"
+    assert assistant_msg["tool_calls"][0]["arg"] == "cutover"
+    assert "result" in assistant_msg["tool_calls"][0]
+
+
+@respx.mock
+async def test_stream_cancellation_cancels_background_task_and_persists_nothing(user_client, isolated_settings):
+    import asyncio
+    thread_id, _ = _seed_via_api(user_client, isolated_settings)
+
+    slow_future = asyncio.Future()
+
+    async def slow_stream(request):
+        # Hangs until cancelled
+        await slow_future
+        return httpx.Response(200, content=stream_body(["Done"]))
+
+    respx.post(LLM_URL).mock(side_effect=slow_stream)
+
+    gen = chat_svc.stream_chat_response(isolated_settings.db_path, thread_id, 1, "test message")
+    # Read keepalive or start iteration
+    iter_task = asyncio.create_task(gen.__anext__())
+    await asyncio.sleep(0.05)
+    # Cancel iteration task, simulating client disconnect
+    iter_task.cancel()
+    try:
+        await iter_task
+    except (asyncio.CancelledError, StopAsyncIteration):
+        pass
+    await gen.aclose()
+
+    with get_conn(isolated_settings.db_path) as conn:
+        rows = conn.execute("SELECT * FROM chat_messages WHERE content = 'test message'").fetchall()
+    assert rows == []
+

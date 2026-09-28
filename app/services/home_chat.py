@@ -273,6 +273,12 @@ def _history_messages(conn: sqlite3.Connection, user_id: int) -> list[dict]:
 
 
 def _row_to_message(row: sqlite3.Row) -> dict:
+    tool_calls = None
+    if "tool_calls" in row.keys() and row["tool_calls"]:
+        try:
+            tool_calls = json.loads(row["tool_calls"])
+        except Exception:
+            tool_calls = None
     return {
         "id": row["id"],
         "role": row["role"],
@@ -280,6 +286,7 @@ def _row_to_message(row: sqlite3.Row) -> dict:
         "model": row["model"],
         "prompt_tokens": row["prompt_tokens"],
         "completion_tokens": row["completion_tokens"],
+        "tool_calls": tool_calls,
         "created_at": row["created_at"],
     }
 
@@ -378,6 +385,7 @@ async def _generate_reply(
 
     content = ""
     usage: dict = {}
+    executed_tool_calls: list[dict] = []
     for _ in range(MAX_TOOL_HOPS + 1):
         payload = {
             "model": config.model,
@@ -397,6 +405,7 @@ async def _generate_reply(
         messages.append({"role": "assistant", "content": content})
         with get_conn(db_path) as conn:
             tool_result = await _run_tool(conn, db_path, user_id, verb, arg)
+        executed_tool_calls.append({"tool": verb, "arg": arg, "result": tool_result})
         log.info(
             "tool hop for user %s: %s %s -> %d char(s)",
             user_id, verb, arg, len(tool_result),
@@ -413,7 +422,7 @@ async def _generate_reply(
             )
             await emit("token", {"text": content})
 
-    return content, usage, config.model
+    return content, usage, config.model, executed_tool_calls
 
 
 async def _produce(
@@ -423,15 +432,12 @@ async def _produce(
     message: str,
     model: str | None,
 ) -> None:
-    """Runs the digest + tool-hop loop + persistence, independent of whether
-    anyone is still listening on `queue` -- a disconnected client must not stop
-    the answer from being generated and saved.
-    """
+    """Runs the digest + tool-hop loop + persistence feeding `queue`."""
     try:
         async def emit(event: str, data: dict) -> None:
             await queue.put(_sse(event, data))
 
-        content, usage, resolved_model = await _generate_reply(
+        content, usage, resolved_model, executed_tool_calls = await _generate_reply(
             db_path, user_id, message, model, emit
         )
 
@@ -444,11 +450,13 @@ async def _produce(
             )
             cur = conn.execute(
                 "INSERT INTO home_chat_messages (owner_id, role, content, model, "
-                "prompt_tokens, completion_tokens, created_at) "
-                "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+                "prompt_tokens, completion_tokens, tool_calls, created_at) "
+                "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)",
                 (
                     user_id, content, resolved_model,
-                    usage.get("prompt_tokens"), usage.get("completion_tokens"), utcnow(),
+                    usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                    json.dumps(executed_tool_calls) if executed_tool_calls else None,
+                    utcnow(),
                 ),
             )
             assistant_row = conn.execute(
@@ -475,21 +483,30 @@ async def _produce(
 async def stream_chat_response(db_path, user_id: int, message: str, *, model: str | None = None):
     """SSE generator for StreamingResponse.
 
-    The actual work runs in a background task feeding `queue`, decoupled from
-    this generator's own lifecycle -- same reasoning as thread chat's version.
+    The actual work runs in a background task feeding `queue`. If the client
+    disconnects or cancels the stream, the generator terminates and cancels
+    the background task so incomplete replies are stopped and not persisted.
     """
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    asyncio.create_task(_produce(queue, db_path, user_id, message, model))
+    task = asyncio.create_task(_produce(queue, db_path, user_id, message, model))
 
-    while True:
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
-        except asyncio.TimeoutError:
-            yield ": keepalive\n\n"
-            continue
-        if item is None:
-            return
-        yield item
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass
 
 
 async def run_telegram_turn(db_path, user_id: int, message: str, model: str | None = None) -> str:
@@ -504,7 +521,7 @@ async def run_telegram_turn(db_path, user_id: int, message: str, model: str | No
         return None
 
     try:
-        content, usage, resolved_model = await _generate_reply(
+        content, usage, resolved_model, executed_tool_calls = await _generate_reply(
             db_path, user_id, message, model, _noop_emit
         )
     except AppError as exc:
@@ -522,11 +539,13 @@ async def run_telegram_turn(db_path, user_id: int, message: str, model: str | No
         )
         conn.execute(
             "INSERT INTO telegram_chat_messages (owner_id, role, content, model, "
-            "prompt_tokens, completion_tokens, created_at) "
-            "VALUES (?, 'assistant', ?, ?, ?, ?, ?)",
+            "prompt_tokens, completion_tokens, tool_calls, created_at) "
+            "VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?)",
             (
                 user_id, content, resolved_model,
-                usage.get("prompt_tokens"), usage.get("completion_tokens"), utcnow(),
+                usage.get("prompt_tokens"), usage.get("completion_tokens"),
+                json.dumps(executed_tool_calls) if executed_tool_calls else None,
+                utcnow(),
             ),
         )
 

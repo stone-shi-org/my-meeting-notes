@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
+import { Minimize2, Send, Sparkles, Square, Trash2 } from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ChatPanelResizeHandle } from '@/components/chat/ChatPanelResizeHandle';
@@ -9,6 +9,7 @@ import { ToolCallBubble, type ToolCall } from '@/components/chat/ToolCallBubble'
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
 import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
+import { useChatDraft } from '@/hooks/useChatDraft';
 import { useChatModel } from '@/hooks/useChatModel';
 import { useChatPanelWidth } from '@/hooks/useChatPanelWidth';
 import type { NoteScope } from '@/hooks/useNotes';
@@ -34,7 +35,7 @@ const THREAD_STARTER_PROMPTS = [
  */
 export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useChatDraft(`mmn:draft:thread:${threadId}`);
   const [expanded, setExpanded] = useState(false);
   // null = idle, '' = waiting on the model, non-empty = tokens arriving.
   const [streamingText, setStreamingText] = useState<string | null>(null);
@@ -53,12 +54,21 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const toolCallsRef = useRef<ToolCall[]>([]);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const [pinned, setPinned] = useState(true);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
   const chatWidth = useChatPanelWidth();
   const noteScope: NoteScope = { kind: 'thread', threadId };
   useAutoResizeTextarea(textareaRef, draft);
+
+  const handleScroll = () => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    setPinned(atBottom);
+  };
 
   const messagesQuery = useQuery({
     queryKey: ['thread-chat', threadId],
@@ -79,8 +89,10 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   });
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ block: 'end' });
-  }, [messages.length, streamingText, expanded, followUps, toolCalls]);
+    if (pinned) {
+      bottomRef.current?.scrollIntoView({ block: 'end' });
+    }
+  }, [messages.length, streamingText, expanded, followUps, toolCalls, pinned]);
 
   // Abandoning the read on unmount/collapse doesn't stop the answer being
   // generated and saved server-side -- it just stops watching it arrive.
@@ -282,7 +294,11 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
       )}
 
       {expanded && (
-        <div className="flex-1 space-y-3 overflow-y-auto p-4">
+        <div
+          ref={scrollContainerRef}
+          onScroll={handleScroll}
+          className="flex-1 space-y-3 overflow-y-auto p-4"
+        >
           {messagesQuery.isLoading && (
             <p className="text-sm text-fg-subtle">Loading conversation…</p>
           )}
@@ -312,7 +328,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
           {messages.map((message, i) => (
             <Fragment key={message.id}>
               {message.role === 'assistant' &&
-                toolCallsByMessageId[message.id]?.map((call, j) => (
+                (toolCallsByMessageId[message.id] ?? message.tool_calls)?.map((call, j) => (
                   <div key={j} className="flex justify-start">
                     <ToolCallBubble call={call} />
                   </div>
@@ -349,13 +365,25 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
                 {streamingText === '' ? (
                   <ThinkingBubble />
                 ) : (
-                  <MessageBubble role="assistant" content={streamingText} />
+                  <MessageBubble role="assistant" content={streamingText} isStreaming />
                 )}
               </div>
             </>
           )}
 
           <div ref={bottomRef} />
+          {!pinned && (
+            <button
+              type="button"
+              className="jump-latest"
+              onClick={() => {
+                setPinned(true);
+                bottomRef.current?.scrollIntoView({ behavior: 'smooth', block: 'end' });
+              }}
+            >
+              ↓ Latest
+            </button>
+          )}
         </div>
       )}
 
@@ -380,6 +408,15 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
             onChange={(e) => setDraft(e.target.value)}
             onFocus={() => setExpanded(true)}
             onKeyDown={(e) => {
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+              if (e.key === 'ArrowUp' && !draft) {
+                const lastUser = [...messages].reverse().find((m) => m.role === 'user');
+                if (lastUser) {
+                  e.preventDefault();
+                  setDraft(lastUser.content);
+                  return;
+                }
+              }
               if (e.key === 'Enter' && !e.shiftKey) {
                 e.preventDefault();
                 void submit();
@@ -394,19 +431,27 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
             )}
           />
           {expanded ? (
-            <Button
-              size="icon"
-              variant="primary"
-              aria-label="Send"
-              loading={streamingText !== null}
-              disabled={!draft.trim()}
-              onClick={() => void submit()}
-            >
-              {/* Button's loading state prepends a spinner to its children --
-                  for an icon-only button that means dropping the arrow
-                  entirely while it spins, not stacking the two. */}
-              {streamingText === null && <Send />}
-            </Button>
+            streamingText !== null ? (
+              <Button
+                size="icon"
+                variant="secondary"
+                aria-label="Stop generating"
+                title="Stop generating"
+                onClick={cancelStream}
+              >
+                <Square className="size-3.5 fill-current" />
+              </Button>
+            ) : (
+              <Button
+                size="icon"
+                variant="primary"
+                aria-label="Send"
+                disabled={!draft.trim()}
+                onClick={() => void submit()}
+              >
+                <Send />
+              </Button>
+            )
           ) : (
             <button
               type="button"

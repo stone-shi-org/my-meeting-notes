@@ -165,6 +165,12 @@ def _history_messages(conn: sqlite3.Connection, meeting_id: int) -> list[dict]:
 
 
 def _row_to_message(row: sqlite3.Row) -> dict:
+    tool_calls = None
+    if "tool_calls" in row.keys() and row["tool_calls"]:
+        try:
+            tool_calls = json.loads(row["tool_calls"])
+        except Exception:
+            tool_calls = None
     return {
         "id": row["id"],
         "meeting_id": row["meeting_id"],
@@ -173,6 +179,7 @@ def _row_to_message(row: sqlite3.Row) -> dict:
         "model": row["model"],
         "prompt_tokens": row["prompt_tokens"],
         "completion_tokens": row["completion_tokens"],
+        "tool_calls": tool_calls,
         "created_at": row["created_at"],
     }
 
@@ -276,18 +283,26 @@ async def _produce(
 async def stream_chat_response(
     db_path, meeting_id: int, user_id: int, message: str, *, model: str | None = None,
 ):
-    """SSE generator for StreamingResponse. See chat.py's twin for the
-    background-task/keepalive rationale, which applies identically here.
+    """SSE generator for StreamingResponse. If the client disconnects or
+    cancels the stream, the generator terminates and cancels the background task.
     """
     queue: asyncio.Queue[str | None] = asyncio.Queue()
-    asyncio.create_task(_produce(queue, db_path, meeting_id, user_id, message, model))
+    task = asyncio.create_task(_produce(queue, db_path, meeting_id, user_id, message, model))
 
-    while True:
-        try:
-            item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
-        except asyncio.TimeoutError:
-            yield ": keepalive\n\n"
-            continue
-        if item is None:
-            return
-        yield item
+    try:
+        while True:
+            try:
+                item = await asyncio.wait_for(queue.get(), timeout=KEEPALIVE_SEC)
+            except asyncio.TimeoutError:
+                yield ": keepalive\n\n"
+                continue
+            if item is None:
+                return
+            yield item
+    finally:
+        if not task.done():
+            task.cancel()
+            try:
+                await task
+            except (asyncio.CancelledError, Exception):
+                pass

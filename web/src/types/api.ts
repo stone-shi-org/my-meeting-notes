@@ -676,6 +676,13 @@ export interface TimelineItem {
   payload: Meeting | CalendarEvent | EmailChain | Note;
 }
 
+export interface ToolCall {
+  tool: string;
+  arg: string;
+  /** Undefined while the tool is still running. */
+  result?: string;
+}
+
 export interface ChatMessage {
   id: number;
   thread_id: number;
@@ -684,6 +691,7 @@ export interface ChatMessage {
   model: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  tool_calls?: ToolCall[] | null;
   created_at: string;
 }
 
@@ -695,6 +703,7 @@ export interface MeetingChatMessage {
   model: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  tool_calls?: ToolCall[] | null;
   created_at: string;
 }
 
@@ -705,6 +714,7 @@ export interface HomeChatMessage {
   model: string | null;
   prompt_tokens: number | null;
   completion_tokens: number | null;
+  tool_calls?: ToolCall[] | null;
   created_at: string;
 }
 
