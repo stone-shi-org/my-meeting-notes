@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ChatPanelResizeHandle } from '@/components/chat/ChatPanelResizeHandle';
 import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { ToolCallBubble, type ToolCall } from '@/components/chat/ToolCallBubble';
@@ -9,6 +10,7 @@ import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
 import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatModel } from '@/hooks/useChatModel';
+import { useChatPanelWidth } from '@/hooks/useChatPanelWidth';
 import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
@@ -54,6 +56,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
+  const chatWidth = useChatPanelWidth();
   const noteScope: NoteScope = { kind: 'thread', threadId };
   useAutoResizeTextarea(textareaRef, draft);
 
@@ -95,6 +98,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   useEffect(() => {
     if (!expanded) return;
     function handlePointerDown(e: MouseEvent) {
+      if (chatWidth.isDraggingRef.current) return;
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
         minimize();
       }
@@ -213,14 +217,21 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
     <div
       ref={panelRef}
       className={cn(
-        'fixed z-30 flex flex-col overflow-hidden border-border bg-surface transition-all duration-slow ease-out motion-reduce:transition-none',
+        'fixed z-30 flex flex-col overflow-hidden border-border bg-surface',
+        chatWidth.isDragging
+          ? 'transition-none select-none'
+          : 'transition-all duration-slow ease-out motion-reduce:transition-none',
         expanded
           ? // Docked below the app header (h-14), not over it, so the nav stays reachable.
-            'inset-x-0 top-14 bottom-0 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[28rem]'
+            'inset-x-0 top-14 bottom-0 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[var(--chat-panel-width,28rem)] sm:min-w-[28rem] sm:max-w-[calc(100vw-3rem)]'
           : 'bottom-4 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
       )}
-      style={!expanded ? { paddingBottom: 'env(safe-area-inset-bottom)' } : undefined}
+      style={{
+        ...(!expanded ? { paddingBottom: 'env(safe-area-inset-bottom)' } : {}),
+        ...(expanded ? ({ '--chat-panel-width': `${chatWidth.width}px` } as React.CSSProperties) : {}),
+      }}
     >
+      {expanded && <ChatPanelResizeHandle chatWidth={chatWidth} />}
       {expanded && (
         <div className="border-b border-border px-4 py-2.5">
           <div className="flex items-center gap-2">

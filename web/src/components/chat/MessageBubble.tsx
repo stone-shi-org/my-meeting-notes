@@ -48,11 +48,7 @@ export function MessageBubble({
   completionTokens?: number | null;
 }) {
   if (role === 'user') {
-    return (
-      <p className="max-w-[85%] whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-soft-fg">
-        {content}
-      </p>
-    );
+    return <UserMessageBubble content={content} />;
   }
 
   return (
@@ -183,23 +179,78 @@ function AssistantActions({
   );
 }
 
+function UserMessageBubble({ content }: { content: string }) {
+  const [copied, setCopied] = useState<'ok' | 'failed' | null>(null);
+
+  useEffect(() => {
+    if (!copied) return;
+    const timer = window.setTimeout(() => setCopied(null), FLASH_MS);
+    return () => window.clearTimeout(timer);
+  }, [copied]);
+
+  async function copy() {
+    setCopied((await copyText(content)) ? 'ok' : 'failed');
+  }
+
+  return (
+    <div className="group flex max-w-[85%] flex-col items-end">
+      <p className="whitespace-pre-wrap rounded-lg bg-primary-soft px-3 py-2 text-sm text-primary-soft-fg">
+        {content}
+      </p>
+      <div className="mt-1 flex items-center justify-end">
+        <ActionButton
+          onClick={() => void copy()}
+          icon={copied === 'ok' ? Check : Copy}
+          aria-label={copied === 'ok' ? 'Copied prompt' : 'Copy prompt'}
+          title={copied === 'ok' ? 'Copied' : 'Copy prompt'}
+          className={cn(
+            'transition-opacity motion-reduce:transition-none',
+            copied === 'ok'
+              ? 'text-success-ink opacity-100'
+              : 'opacity-70 group-hover:opacity-100 focus-visible:opacity-100',
+          )}
+        >
+          {copied === 'ok' ? 'Copied' : 'Copy'}
+        </ActionButton>
+
+        {copied === 'failed' && (
+          <span role="status" className="ml-1 text-2xs text-danger-ink">
+            Clipboard blocked — select the text and copy
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function ActionButton({
   onClick,
   icon: Icon,
   expanded,
   children,
+  'aria-label': ariaLabel,
+  title,
+  className,
 }: {
   onClick: () => void;
   icon: typeof Copy;
   expanded?: boolean;
   children: React.ReactNode;
+  'aria-label'?: string;
+  title?: string;
+  className?: string;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      aria-label={ariaLabel}
+      title={title}
       aria-expanded={expanded}
-      className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg"
+      className={cn(
+        'inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-2xs font-medium text-fg-subtle hover:bg-surface-2 hover:text-fg',
+        className,
+      )}
     >
       <Icon className="size-3" aria-hidden />
       {children}

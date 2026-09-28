@@ -2,12 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { ChatPanelResizeHandle } from '@/components/chat/ChatPanelResizeHandle';
 import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
 import { Select, Textarea } from '@/components/ui/primitives';
 import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatModel } from '@/hooks/useChatModel';
+import { useChatPanelWidth } from '@/hooks/useChatPanelWidth';
 import type { NoteScope } from '@/hooks/useNotes';
 import { api } from '@/lib/api';
 import { streamChat } from '@/lib/chatStream';
@@ -42,6 +44,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
+  const chatWidth = useChatPanelWidth();
   // Saved answers are filed on the meeting, which puts them on its thread's
   // timeline with the meeting recorded alongside.
   const noteScope: NoteScope = { kind: 'meeting', meetingId };
@@ -84,6 +87,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   useEffect(() => {
     if (!expanded) return;
     function handlePointerDown(e: MouseEvent) {
+      if (chatWidth.isDraggingRef.current) return;
       if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
         minimize();
       }
@@ -179,17 +183,22 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     <div
       ref={panelRef}
       className={cn(
-        'fixed z-30 flex flex-col overflow-hidden border-border bg-surface transition-all duration-slow ease-out motion-reduce:transition-none',
+        'fixed z-30 flex flex-col overflow-hidden border-border bg-surface',
+        chatWidth.isDragging
+          ? 'transition-none select-none'
+          : 'transition-all duration-slow ease-out motion-reduce:transition-none',
         expanded
           ? // Docked below the app header (h-14) and above the PlayerBar (its
             // content box is ~3.5rem tall), so neither the nav nor transport
             // controls end up underneath this panel.
-            'inset-x-0 top-14 bottom-14 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[28rem]'
+            'inset-x-0 top-14 bottom-14 border-l shadow-xl sm:inset-x-auto sm:right-0 sm:w-[var(--chat-panel-width,28rem)] sm:min-w-[28rem] sm:max-w-[calc(100vw-3rem)]'
           : // bottom-18 clears the PlayerBar (~3.5rem) plus a small gap --
             // bottom-4 would sit the pill right on top of its right-hand controls.
             'bottom-18 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
       )}
+      style={expanded ? ({ '--chat-panel-width': `${chatWidth.width}px` } as React.CSSProperties) : undefined}
     >
+      {expanded && <ChatPanelResizeHandle chatWidth={chatWidth} />}
       {expanded && (
         <div className="border-b border-border px-4 py-2.5">
           <div className="flex items-center gap-2">
