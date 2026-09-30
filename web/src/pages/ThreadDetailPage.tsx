@@ -34,6 +34,7 @@ import {
   useMoveItem,
 } from '@/components/thread/threadItemActions';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
 import { EmptyState, ErrorState } from '@/components/ui/states';
 import { useEmailHydration } from '@/hooks/useEmailHydration';
@@ -388,6 +389,7 @@ export function ThreadDetailPage() {
   const queryClient = useQueryClient();
   const [filters, setFilters] = useState<Set<Filter>>(readFilters);
   const [composing, setComposing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const noteScope: NoteScope = { kind: 'thread', threadId: threadId! };
   const thread = useQuery({
     queryKey: ['thread', threadId],
@@ -613,15 +615,7 @@ export function ThreadDetailPage() {
                 variant="ghost"
                 size="icon"
                 aria-label="Delete thread"
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      `Delete "${thread.data!.title}" and all ${thread.data!.meeting_count} of its meetings? This also removes the audio from disk.`,
-                    )
-                  ) {
-                    remove.mutate();
-                  }
-                }}
+                onClick={() => setConfirmDelete(true)}
               >
                 <Trash2 />
               </Button>
@@ -935,6 +929,25 @@ export function ThreadDetailPage() {
       )}
 
       {threadId && <ThreadChatPanel threadId={threadId} />}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={thread.data ? `Delete “${thread.data.title}”?` : 'Delete thread?'}
+        description={
+          thread.data
+            ? `Delete "${thread.data.title}" and all ${thread.data.meeting_count} of its meetings? This also removes the audio from disk.`
+            : ''
+        }
+        confirmLabel="Delete"
+        variant="danger"
+        loading={remove.isPending}
+        onConfirm={() => {
+          remove.mutate(undefined, {
+            onSettled: () => setConfirmDelete(false),
+          });
+        }}
+      />
     </div>
   );
 }

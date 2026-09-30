@@ -2,6 +2,7 @@ import { Check, Copy, Pencil, Sparkles, Trash2, X } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { MoveToThread } from '@/components/thread/MoveToThread';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Badge, Input, Textarea } from '@/components/ui/primitives';
 import { useNotes, type NoteScope } from '@/hooks/useNotes';
 import { copyText } from '@/lib/clipboard';
@@ -31,6 +32,7 @@ export function NoteCard({
 }) {
   const { update, remove, move } = useNotes(scope, { enabled: false });
   const [editing, setEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [title, setTitle] = useState(note.title);
   const [body, setBody] = useState(note.body);
   const [expanded, setExpanded] = useState(false);
@@ -148,13 +150,7 @@ export function NoteCard({
             icon={Trash2}
             danger
             pending={remove.isPending}
-            onClick={() => {
-              // Unlike detaching an email, this is not recoverable by running
-              // the match again -- the text only exists here.
-              if (window.confirm(`Delete the note “${note.title}”? This cannot be undone.`)) {
-                remove.mutate(note);
-              }
-            }}
+            onClick={() => setConfirmDelete(true)}
           />
         </div>
       </div>
@@ -187,6 +183,21 @@ export function NoteCard({
           <span className="text-danger-ink">{(move.error as Error).message}</span>
         )}
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete note “${note.title}”?`}
+        description="Delete this note? This cannot be undone."
+        confirmLabel="Delete note"
+        variant="danger"
+        loading={remove.isPending}
+        onConfirm={() => {
+          remove.mutate(note, {
+            onSettled: () => setConfirmDelete(false),
+          });
+        }}
+      />
     </div>
   );
 }

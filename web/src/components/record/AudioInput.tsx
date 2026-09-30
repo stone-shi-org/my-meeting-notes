@@ -2,6 +2,7 @@ import { FileAudio, Mic, Upload, X } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { RecorderPanel } from '@/components/record/RecorderPanel';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Card } from '@/components/ui/primitives';
 import { cn } from '@/lib/cn';
 
@@ -73,6 +74,7 @@ export function AudioInput({
   // rather than cleaned up after: unmounting RecorderPanel mid-recording
   // just loses the audio, there is nothing to undo once that happens.
   const [recordingLive, setRecordingLive] = useState(false);
+  const [pendingMode, setPendingMode] = useState<'upload' | 'record' | null>(null);
 
   useEffect(() => {
     onModeChange?.(mode);
@@ -108,11 +110,8 @@ export function AudioInput({
               // which releases the mic without ever finalizing a file --
               // silent data loss, not just "stopped". Ask first.
               if (mode === 'record' && id !== 'record' && recordingLive) {
-                const ok = window.confirm(
-                  'A recording is in progress. Switching to Upload will stop it and discard ' +
-                    'everything captured so far. Continue?',
-                );
-                if (!ok) return;
+                setPendingMode(id);
+                return;
               }
               setMode(id);
               // Switching away drops whatever was staged: each mode owns its own
@@ -223,6 +222,24 @@ export function AudioInput({
       ) : null}
 
       {mode === 'upload' && rightExtra}
+
+      <ConfirmDialog
+        open={pendingMode !== null}
+        onOpenChange={(open) => {
+          if (!open) setPendingMode(null);
+        }}
+        title="Discard in-progress recording?"
+        description="A recording is in progress. Switching to Upload will stop it and discard everything captured so far. Continue?"
+        confirmLabel="Discard and switch"
+        variant="danger"
+        onConfirm={() => {
+          if (pendingMode) {
+            setMode(pendingMode);
+            onFile(null, EMPTY_META);
+            setPendingMode(null);
+          }
+        }}
+      />
     </div>
   );
 }

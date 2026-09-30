@@ -218,25 +218,30 @@ describe('GroupedThreadList', () => {
   it('deletes a thread from the card menu after confirming', async () => {
     const user = userEvent.setup();
     vi.mocked(api.del).mockResolvedValue(undefined as never);
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
     renderList();
     await screen.findByText('Atlas Migration');
 
     await user.click(screen.getByRole('button', { name: 'Actions for Atlas Migration' }));
     await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
 
-    expect(window.confirm).toHaveBeenCalled();
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
     await waitFor(() => expect(api.del).toHaveBeenCalledWith('/threads/10'));
   });
 
   it('does not delete a thread when the confirmation is declined', async () => {
     const user = userEvent.setup();
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
     renderList();
     await screen.findByText('Atlas Migration');
 
     await user.click(screen.getByRole('button', { name: 'Actions for Atlas Migration' }));
     await user.click(screen.getByRole('menuitem', { name: 'Delete' }));
+
+    const dialog = await screen.findByRole('dialog');
+    expect(dialog).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
 
     expect(api.del).not.toHaveBeenCalled();
   });

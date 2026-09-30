@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Label, Select } from '@/components/ui/primitives';
 import { InsightsPanel } from '@/components/record/InsightsPanel';
 import { LiveCaptionStrip } from '@/components/record/LiveCaptionStrip';
@@ -205,6 +206,7 @@ export function RecorderPanel({
   // useInsights' sessionKey param). Stopping on its own must not clear
   // anything, which is why this doesn't live on recorder.phase directly.
   const [recordingSession, setRecordingSession] = useState(0);
+  const [confirmRestart, setConfirmRestart] = useState(false);
 
   // Settings -> Live captions' value is only the *default* -- see
   // live_caption_language's doc comment in config.py. `null` here means
@@ -545,12 +547,8 @@ export function RecorderPanel({
               // Starting over replaces recorder.clip in place -- there is no
               // separate "keep the old one" step, so this is the only chance
               // to back out before it's gone.
-              if (
-                recorder.clip &&
-                !window.confirm(
-                  'Recording again discards the current recording, unless you have already submitted it. Continue?',
-                )
-              ) {
+              if (recorder.clip) {
+                setConfirmRestart(true);
                 return;
               }
               setRecordingSession((n) => n + 1);
@@ -655,6 +653,20 @@ export function RecorderPanel({
           <audio controls src={recorder.clip.url} className="w-full" />
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmRestart}
+        onOpenChange={setConfirmRestart}
+        title="Record again?"
+        description="Recording again discards the current recording, unless you have already submitted it. Continue?"
+        confirmLabel="Discard and record"
+        variant="danger"
+        onConfirm={() => {
+          setConfirmRestart(false);
+          setRecordingSession((n) => n + 1);
+          void recorder.start({ source, deviceId: deviceId || undefined, withMic });
+        }}
+      />
     </div>
   );
 

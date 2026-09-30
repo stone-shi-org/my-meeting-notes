@@ -13,6 +13,7 @@ import {
 import { useEffect, useState } from 'react';
 import { NavLink, Outlet } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import {
   Badge,
   Card,
@@ -2225,6 +2226,7 @@ function insightTypesQueryKey() {
 function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
   const queryClient = useQueryClient();
   const [editing, setEditing] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [name, setName] = useState(type.name);
   const [prompt, setPrompt] = useState(type.prompt);
 
@@ -2317,11 +2319,7 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
               variant="ghost"
               className="ml-auto text-danger-ink"
               loading={remove.isPending}
-              onClick={() => {
-                if (window.confirm(`Delete "${type.name}"? Recordings already using it keep it.`)) {
-                  remove.mutate();
-                }
-              }}
+              onClick={() => setConfirmDelete(true)}
             >
               <Trash2 />
               Delete
@@ -2329,6 +2327,21 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete “${type.name}”?`}
+        description={`Delete "${type.name}"? Recordings already using it keep it.`}
+        confirmLabel="Delete"
+        variant="danger"
+        loading={remove.isPending}
+        onConfirm={() => {
+          remove.mutate(undefined, {
+            onSettled: () => setConfirmDelete(false),
+          });
+        }}
+      />
     </Card>
   );
 }
@@ -2492,6 +2505,7 @@ export function UsersSettingsPage() {
   const [isAdminNew, setIsAdminNew] = useState(false);
   const [tempPassword, setTempPassword] = useState<string | null>(null);
   const [search, setSearch] = useState('');
+  const [deactivatingUser, setDeactivatingUser] = useState<UserStatisticsDashboard['users'][number] | null>(null);
 
   const stats = useQuery({
     queryKey: ['users-statistics'],
@@ -2705,11 +2719,7 @@ export function UsersSettingsPage() {
                               <Button
                                 size="sm"
                                 variant="ghost"
-                                onClick={() => {
-                                  if (window.confirm(`Deactivate ${user.username}?`)) {
-                                    deactivate.mutate(user.id);
-                                  }
-                                }}
+                                onClick={() => setDeactivatingUser(user)}
                               >
                                 Deactivate
                               </Button>
@@ -2794,6 +2804,29 @@ export function UsersSettingsPage() {
           </p>
         </form>
       </Card>
+
+      <ConfirmDialog
+        open={deactivatingUser !== null}
+        onOpenChange={(open) => {
+          if (!open) setDeactivatingUser(null);
+        }}
+        title={deactivatingUser ? `Deactivate ${deactivatingUser.username}?` : 'Deactivate user?'}
+        description={
+          deactivatingUser
+            ? `Are you sure you want to deactivate ${deactivatingUser.username}? They will no longer be able to log in.`
+            : ''
+        }
+        confirmLabel="Deactivate"
+        variant="danger"
+        loading={deactivate.isPending}
+        onConfirm={() => {
+          if (deactivatingUser) {
+            deactivate.mutate(deactivatingUser.id, {
+              onSettled: () => setDeactivatingUser(null),
+            });
+          }
+        }}
+      />
     </div>
   );
 }

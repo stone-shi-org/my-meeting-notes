@@ -30,6 +30,7 @@ import {
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Badge, Card, Input, Skeleton } from '@/components/ui/primitives';
 import { ErrorState, Pagination } from '@/components/ui/states';
 import { api } from '@/lib/api';
@@ -192,6 +193,7 @@ function ThreadCardMenu({
   onDelete: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [view, setView] = useState<'main' | 'move'>('main');
   const rootRef = useRef<HTMLDivElement>(null);
 
@@ -268,13 +270,7 @@ function ThreadCardMenu({
                 role="menuitem"
                 className={cn(menuItemClass, 'text-danger-ink')}
                 onClick={() => {
-                  if (
-                    window.confirm(
-                      `Delete "${thread.title}" and all ${thread.meeting_count} of its meetings? This also removes the audio from disk.`,
-                    )
-                  ) {
-                    onDelete();
-                  }
+                  setConfirmDelete(true);
                   close();
                 }}
               >
@@ -324,6 +320,19 @@ function ThreadCardMenu({
           )}
         </div>
       )}
+
+      <ConfirmDialog
+        open={confirmDelete}
+        onOpenChange={setConfirmDelete}
+        title={`Delete “${thread.title}”?`}
+        description={`Delete "${thread.title}" and all ${thread.meeting_count} of its meetings? This also removes the audio from disk.`}
+        confirmLabel="Delete"
+        variant="danger"
+        onConfirm={() => {
+          onDelete();
+          setConfirmDelete(false);
+        }}
+      />
     </div>
   );
 }
@@ -460,6 +469,7 @@ function GroupHeading({
 }) {
   const queryClient = useQueryClient();
   const [renaming, setRenaming] = useState(false);
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const [draft, setDraft] = useState(group?.name ?? '');
 
   const rename = useMutation({
@@ -560,16 +570,25 @@ function GroupHeading({
             variant="ghost"
             aria-label={`Delete ${group.name}`}
             loading={remove.isPending}
-            onClick={() => {
-              // Names what actually goes: the folder, not the work in it.
-              const detail = group.thread_count
-                ? ` Its ${group.thread_count} thread${group.thread_count === 1 ? '' : 's'} will move to Ungrouped.`
-                : '';
-              if (window.confirm(`Delete the group “${group.name}”?${detail}`)) remove.mutate();
-            }}
+            onClick={() => setConfirmDelete(true)}
           >
             <Trash2 className="size-3.5" />
           </Button>
+
+          <ConfirmDialog
+            open={confirmDelete}
+            onOpenChange={setConfirmDelete}
+            title={`Delete group “${group.name}”?`}
+            description={`Delete the group “${group.name}”?${group.thread_count ? ` Its ${group.thread_count} thread${group.thread_count === 1 ? '' : 's'} will move to Ungrouped.` : ''}`}
+            confirmLabel="Delete"
+            variant="danger"
+            loading={remove.isPending}
+            onConfirm={() => {
+              remove.mutate(undefined, {
+                onSettled: () => setConfirmDelete(false),
+              });
+            }}
+          />
         </>
       )}
     </>

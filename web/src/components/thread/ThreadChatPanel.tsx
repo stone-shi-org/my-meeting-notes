@@ -7,6 +7,7 @@ import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { ToolCallBubble, type ToolCall } from '@/components/chat/ToolCallBubble';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Select, Textarea } from '@/components/ui/primitives';
 import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatDraft } from '@/hooks/useChatDraft';
@@ -37,6 +38,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
   const queryClient = useQueryClient();
   const [draft, setDraft] = useChatDraft(`mmn:draft:thread:${threadId}`);
   const [expanded, setExpanded] = useState(false);
+  const [confirmClearOpen, setConfirmClearOpen] = useState(false);
   // null = idle, '' = waiting on the model, non-empty = tokens arriving.
   const [streamingText, setStreamingText] = useState<string | null>(null);
   const [streamError, setStreamError] = useState<{ code: string; message: string } | null>(null);
@@ -252,11 +254,7 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
             {messages.length > 0 && (
               <button
                 type="button"
-                onClick={() => {
-                  if (window.confirm('Clear this conversation? This cannot be undone.')) {
-                    clear.mutate();
-                  }
-                }}
+                onClick={() => setConfirmClearOpen(true)}
                 disabled={streamingText !== null || clear.isPending}
                 aria-label="Clear conversation"
                 title="Clear conversation"
@@ -465,6 +463,21 @@ export function ThreadChatPanel({ threadId }: { threadId: string }) {
           )}
         </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmClearOpen}
+        onOpenChange={setConfirmClearOpen}
+        title="Clear conversation?"
+        description="Clear this conversation? This cannot be undone."
+        confirmLabel="Clear"
+        variant="danger"
+        loading={clear.isPending}
+        onConfirm={() => {
+          clear.mutate(undefined, {
+            onSettled: () => setConfirmClearOpen(false),
+          });
+        }}
+      />
     </div>
   );
 }

@@ -14,6 +14,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { Button } from '@/components/ui/Button';
+import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
 import { Badge, Card, Input, Select, Skeleton } from '@/components/ui/primitives';
 import { ErrorState } from '@/components/ui/states';
 import { JobErrorPanel } from '@/components/jobs/JobProgress';
@@ -618,25 +619,35 @@ function DeepLinkSeek() {
  * sibling of the whole header, in a row that *is* flex-wrap.
  */
 function RedoTranscriptButton({ rediarize }: { rediarize: ReturnType<typeof useRediarize> }) {
+  const [confirmOpen, setConfirmOpen] = useState(false);
+
   return (
-    <Button
-      variant="ghost"
-      onClick={() => {
-        const ok = window.confirm(
-          'Redo this transcript? The recording will be sent through diarization ' +
-            'again from scratch. This can take several minutes, and speaker names ' +
-            'may need re-checking afterward -- a new run can split or merge speakers ' +
-            'differently than before. The current transcript stays visible until the ' +
-            'new one is ready.',
-        );
-        if (ok) rediarize.mutate();
-      }}
-      loading={rediarize.isPending || rediarize.running}
-      disabled={rediarize.running}
-    >
-      <RotateCcw />
-      Redo transcript
-    </Button>
+    <>
+      <Button
+        variant="ghost"
+        onClick={() => setConfirmOpen(true)}
+        loading={rediarize.isPending || rediarize.running}
+        disabled={rediarize.running}
+      >
+        <RotateCcw />
+        Redo transcript
+      </Button>
+
+      <ConfirmDialog
+        open={confirmOpen}
+        onOpenChange={setConfirmOpen}
+        title="Redo transcript?"
+        description="Redo this transcript? The recording will be sent through diarization again from scratch. This can take several minutes, and speaker names may need re-checking afterward — a new run can split or merge speakers differently than before. The current transcript stays visible until the new one is ready."
+        confirmLabel="Redo transcript"
+        variant="primary"
+        loading={rediarize.isPending}
+        onConfirm={() => {
+          rediarize.mutate(undefined, {
+            onSettled: () => setConfirmOpen(false),
+          });
+        }}
+      />
+    </>
   );
 }
 
