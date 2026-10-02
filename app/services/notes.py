@@ -34,7 +34,23 @@ from app.services import search_index
 log = get_logger("notes")
 
 TITLE_MAX = 120
-SOURCES = ("ai_chat", "manual")
+# "mcp" is a note an agent wrote through the MCP server (MMN-14) -- AI prose,
+# like "ai_chat", and labelled as such everywhere a model reads notes.
+SOURCES = ("ai_chat", "manual", "mcp")
+
+
+def source_origin(source: str | None) -> str:
+    """How a note's provenance is worded wherever a model reads it.
+
+    Matters because a saved AI answer fed back as evidence is circular -- the
+    chat prompts tell the model to treat the first two labels differently from
+    "written by the user".
+    """
+    if source == "ai_chat":
+        return "saved from an AI answer"
+    if source == "mcp":
+        return "added by an AI assistant via MCP"
+    return "written by the user"
 
 # How a saved chat reply is joined onto a note that already has content. A rule
 # rather than a blank line: the appended block is a separate answer to a

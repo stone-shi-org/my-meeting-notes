@@ -8,18 +8,21 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.routing import Route
 
 from app import __version__
 from app.config import get_settings
 from app.db import get_conn, init_db
 from app.errors import register_exception_handlers
 from app.logging_config import configure_logging, get_logger
+from app.mcp_server.server import MCPEndpoint
 from app.jobs.email_backfill_scheduler import AutoBackfillScheduler, set_backfill_scheduler
 from app.jobs.queue import JobQueue, set_queue
 from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
 from app.jobs.search_indexer import SearchIndexer, set_indexer
 from app.jobs.telegram_poller import TelegramPoller, set_poller
 from app.routers import (
+    api_tokens,
     auth,
     calendar,
     chat,
@@ -113,7 +116,10 @@ async def lifespan(app: FastAPI):
         set_indexer(indexer)
         indexer.start()
 
-    yield
+    # The MCP endpoint's session manager needs a running task group for the
+    # life of the app (MMN-14). Entered last so it is torn down first.
+    async with app.state.mcp_endpoint.run():
+        yield
 
     if indexer is not None:
         await indexer.stop()
@@ -208,6 +214,15 @@ def create_app() -> FastAPI:
     app.include_router(live_caption.router)
     app.include_router(insights.router)
     app.include_router(insight_types.router)
+    app.include_router(api_tokens.router)
+
+    # MCP server (MMN-14). Raw ASGI routes rather than a mount -- see
+    # app/mcp_server/server.py -- and registered before the SPA catch-all,
+    # which would otherwise answer /mcp with index.html.
+    mcp_endpoint = MCPEndpoint()
+    app.state.mcp_endpoint = mcp_endpoint
+    app.router.routes.append(Route("/mcp", endpoint=mcp_endpoint))
+    app.router.routes.append(Route("/mcp/", endpoint=mcp_endpoint))
 
     _mount_spa(app, settings.web_dist)
 

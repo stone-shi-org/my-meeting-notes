@@ -1,6 +1,6 @@
 ---
 name: next_step_prompt
-version: 3
+version: 4
 description: Suggest the single most useful next step for a thread.
 temperature: 0.2
 required_placeholders: [payload]
@@ -38,7 +38,9 @@ about, never quote it as somebody's words.
 A note with `source: "manual"` was written by the user; treat it as the
 strongest signal of what they actually intend to do next. One with
 `source: "ai_chat"` is an answer they saved -- evidence of what they were
-looking into, not a fact about the thread.
+looking into, not a fact about the thread. `source: "mcp"` was written by an AI
+assistant working for them through another tool; treat it exactly like
+`ai_chat`.
 
 You MUST return a single valid JSON object and nothing else:
 

@@ -181,6 +181,29 @@ MCP server** (or Email). Each user supplies the server URL, their own profile na
 token. Upgrading from a version before per-user integrations migrates existing shared config onto
 every existing account automatically, so nothing stops working.
 
+### Connecting an AI assistant (MCP server)
+
+The app serves an MCP server at `/mcp` (streamable HTTP), so Claude Code, Claude Desktop, Pocket
+Agent or any other MCP client can search your meetings and read transcripts, summaries, notes,
+emails and calendar events — "get last week's Atlas standup transcript". Each person connects with
+their own token and only ever sees their own data.
+
+1. **Settings → MCP server → Your API tokens**: name a token and pick **Read only** or **Read &
+   write** (write can also add notes and tick off action items). Copy it — it is shown once.
+2. Point the client at `http(s)://<host>:4020/mcp` with the header `Authorization: Bearer mmn_…`.
+   The page prints ready-to-paste config; for Claude Code:
+
+   ```bash
+   claude mcp add --transport http my-meeting-notes https://notes.example/mcp \
+     --header "Authorization: Bearer mmn_…"
+   ```
+
+   Claude Desktop goes through `mcp-remote` (the JSON is on the same page).
+
+Tokens work with `/mcp` only, never the rest of the API. Revoke one from the same page. An admin can
+switch the whole server off (it then answers 404) without revoking anyone's tokens. In development,
+Vite does not proxy `/mcp` — connect clients to the backend on `:4020` directly.
+
 ## Development
 
 The app is built and run in Docker, but the fast loop runs the frontend on the host:

@@ -43,7 +43,8 @@ export function NoteCard({
   const bodyRef = useRef<HTMLDivElement>(null);
 
   const html = useMemo(() => renderMarkdown(note.body), [note.body]);
-  const ai = note.source === 'ai_chat';
+  // Both are AI prose: a saved chat answer, or a note an agent wrote via MCP.
+  const ai = note.source === 'ai_chat' || note.source === 'mcp';
   const edited = note.updated_at !== note.created_at;
 
   // Another tab (or the append button in a chat panel) can move the note under
@@ -127,7 +128,14 @@ export function NoteCard({
       <div className="flex items-start gap-2">
         <p className="min-w-0 flex-1 text-sm font-medium">{note.title}</p>
         {ai && (
-          <Badge variant="primary" size="sm" className="shrink-0">
+          <Badge
+            variant="primary"
+            size="sm"
+            className="shrink-0"
+            title={
+              note.source === 'mcp' ? 'Added by an AI assistant via MCP' : 'Saved from an AI answer'
+            }
+          >
             <Sparkles className="size-3" aria-hidden />
             AI
           </Badge>

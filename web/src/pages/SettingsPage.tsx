@@ -51,6 +51,9 @@ const TABS = [
   { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/email-backfill', label: 'Email backfill' },
   { to: '/settings/search', label: 'Search' },
+  // Not /settings/mcp: that path is an old redirect to Integrations, where the
+  // MCP *client* settings (calendar/email servers this app talks to) live.
+  { to: '/settings/mcp-server', label: 'MCP server' },
   { to: '/settings/telegram', label: 'Telegram' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/insight-types', label: 'Meeting types', adminOnly: true },

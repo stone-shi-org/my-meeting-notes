@@ -85,6 +85,31 @@ SCHEMA: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)",
     "CREATE INDEX IF NOT EXISTS idx_sessions_exp ON sessions(expires_at)",
+    # ----------------------------------------------------------- api_tokens
+    # Personal access tokens for the MCP server at /mcp (MMN-14). A session is
+    # the wrong credential for an agent configured once: it expires after
+    # session_ttl_hours and needs a password login to mint. Stored the same way
+    # sessions are -- sha256 of the raw token, so a dump yields nothing
+    # replayable -- with `prefix` (the first few characters) kept only so the
+    # Settings list can tell two tokens apart. `scope` is 'read' or
+    # 'read_write'; the latter is the only one that sees the write tools.
+    # Accepted by /mcp only, never by the REST API: the REST routes know
+    # nothing about scope, so a read token there would be a write token.
+    """
+    CREATE TABLE IF NOT EXISTS api_tokens (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id       INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        name          TEXT NOT NULL,
+        token_hash    TEXT NOT NULL UNIQUE,
+        prefix        TEXT NOT NULL,
+        scope         TEXT NOT NULL DEFAULT 'read',
+        created_at    TEXT NOT NULL,
+        last_used_at  TEXT,
+        expires_at    TEXT,
+        revoked_at    TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_api_tokens_user ON api_tokens(user_id, created_at DESC)",
     # -------------------------------------------------------- thread_groups
     # A folder over threads, owned by one user and named by them. Membership is
     # a nullable `threads.group_id`, so "Ungrouped" is not a row here -- it is

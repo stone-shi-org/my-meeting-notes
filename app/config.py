@@ -137,6 +137,11 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     # runs per cycle, so one huge backlog cannot monopolize a tick.
     "auto_backfill_max_rounds_per_user": ("int", False),
     "page_size_default": ("int", False),
+    # The MCP server at /mcp (MMN-14). On by default -- the reviewer's call: the
+    # endpoint is useless without a personal API token, which nobody has until
+    # they create one in Settings -> MCP server, so "on" exposes nothing by
+    # itself. Off makes /mcp a 404, re-read on every request (no restart).
+    "mcp_enabled": ("bool", False),
     # Where this app is reachable, used to build OAuth redirect URIs. Google
     # only accepts https:// or http://localhost, so a LAN address here will be
     # rejected by the provider, not by us.
@@ -511,6 +516,10 @@ class Settings(BaseSettings):
     # before the model is asked to judge it.
     insights_model: str = ""
     insights_interval_sec: int = 30
+
+    # --- MCP server (MMN-14) ------------------------------------------------
+    # See RUNTIME_KEYS above.
+    mcp_enabled: bool = True
 
     # --- misc ---------------------------------------------------------------
     page_size_default: int = 20

@@ -22,6 +22,7 @@ from app.errors import AppError
 from app.logging_config import get_logger
 from app.services import chat_followups as chat_followups_svc
 from app.services import llm as llm_svc
+from app.services import notes as notes_svc
 from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import threads as threads_svc
@@ -100,7 +101,7 @@ def _format_meeting_attachments(conn: sqlite3.Connection, meeting_id: int) -> st
             when = (n["created_at"] or "")[:10]
             # Same rule as chat.py's twin: an AI-authored note is this
             # assistant's own earlier output, not evidence.
-            origin = "saved from an AI answer" if n["source"] == "ai_chat" else "written by the user"
+            origin = notes_svc.source_origin(n["source"])
             bits = ", ".join(b for b in (when, origin) if b)
             lines.append(f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else ""))
             body = (n["body"] or "").strip()

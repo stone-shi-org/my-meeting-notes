@@ -133,7 +133,7 @@ def parse_kinds(raw: str | list[str] | None) -> list[str] | None:
     return list(dict.fromkeys(kinds))
 
 
-def _parse_bound(value: str | None, *, name: str, upper: bool) -> str | None:
+def parse_bound(value: str | None, *, name: str, upper: bool) -> str | None:
     """ISO date or datetime -> a string comparable with stored ISO dates.
 
     A bare ``until`` date is inclusive (the whole day), so it becomes "before
@@ -289,8 +289,8 @@ def search(
     kind_list = parse_kinds(kinds)
     filter_sql, filter_params = _filters(
         kinds=kind_list,
-        since=_parse_bound(since, name="since", upper=False),
-        until=_parse_bound(until, name="until", upper=True),
+        since=parse_bound(since, name="since", upper=False),
+        until=parse_bound(until, name="until", upper=True),
         thread_id=thread_id,
     )
     want = offset + limit + CANDIDATE_SLACK

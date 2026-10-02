@@ -6,6 +6,7 @@ import {
   Routes,
 } from 'react-router-dom';
 import { EmailBackfillPanel } from '@/components/settings/EmailBackfillPanel';
+import { McpServerPanel } from '@/components/settings/McpServerPanel';
 import { SearchIndexPanel } from '@/components/settings/SearchIndexPanel';
 import { DevDataPanel } from '@/components/dev/DevDataPanel';
 import { AppShell } from '@/components/layout/AppShell';
@@ -86,6 +87,7 @@ export function App() {
                       <Route path="matching" element={<MatchingSettingsPage />} />
                       <Route path="email-backfill" element={<EmailBackfillPanel />} />
                       <Route path="search" element={<SearchIndexPanel />} />
+                      <Route path="mcp-server" element={<McpServerPanel />} />
                       <Route path="telegram" element={<TelegramSettingsPage />} />
                       {/* Old path kept as a redirect: bookmarks, and error
                           deep-links from a cached bundle, both still land. */}

@@ -286,7 +286,7 @@ class NoteOut(BaseModel):
     meeting_id: int | None = None
     title: str
     body: str
-    source: str  # ai_chat | manual
+    source: str  # ai_chat | manual | mcp (written through the MCP server)
     #: The chat model whose reply this was, when it came from one.
     model: str | None = None
     #: What generated the title. None means it was typed, or that generation

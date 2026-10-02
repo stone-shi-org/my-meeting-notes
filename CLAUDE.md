@@ -27,10 +27,11 @@ app/
   deps.py        current_user / active_user / require_admin / owner_scope
   security.py    stdlib scrypt + opaque session tokens
   routers/       auth users integrations threads meetings transcripts summaries matching jobs
-                 calendar settings_api system notes search
+                 calendar settings_api system notes search api_tokens
   services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
                  threads users integrations secretstore mcpclient followups notes
-                 search search_index search_embed
+                 search search_index search_embed api_tokens
+  mcp_server/    tools.py (one plain function per tool) · auth.py · server.py (/mcp wiring)
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
                  scheduler.py (the auto-match timer) · search_indexer.py (MMN-15)
@@ -396,7 +397,7 @@ meeting titles, transcript segments, the current summary, its action items, note
 calendar events. Keyword search uses FTS5 (`search_fts`, `unicode61 remove_diacritics 2`, `bm25()`
 with the title weighted 4×). Semantic search uses stored embeddings (`search_embeddings`). The two
 are merged with Reciprocal Rank Fusion (k=60). `GET /api/search` serves the home page's "Search
-everything" view, and MMN-14's MCP `search` tool is meant to call `search()` directly. Settings →
+everything" view, and the MCP `search` tool (MMN-14) calls `search()` directly. Settings →
 Search shows coverage and has the admin "Rebuild index" button.
 
 **`search_docs` is the plain-table twin of `search_fts`** (same id = rowid). FTS5 cannot index an
@@ -465,6 +466,80 @@ the nudge can arrive before the writer commits. It is off in the test suite
 (`MMN_SEARCH_INDEXER_ENABLED=0` in `conftest.py`), and tests drive `search_index.index_all_now`
 instead, so nothing races an assertion. The reasons for not using the job queue are the same as for
 email hydration.
+
+## MCP server (what this app serves)
+
+Not to be confused with the MCP *client* under Integrations below (this app calling calendar/email
+servers). `/mcp` is the other direction: a streamable-HTTP MCP server so Claude Code, Claude
+Desktop or Pocket Agent can read the repository — "get last week's Atlas standup transcript".
+`app/mcp_server/tools.py` holds every tool as a plain function (`(conn, principal, **args) -> dict`)
+plus the `TOOL_SPECS` registry; `server.py` turns them into MCP tools; `auth.py` decides who is
+calling. Settings → MCP server (`/settings/mcp-server` — `/settings/mcp` is an old redirect to
+Integrations) shows the endpoint, the tools, the on/off switch and the caller's own tokens.
+
+**Stateless, JSON responses.** `stateless=True, json_response=True`: every request carries its own
+bearer and gets plain JSON, so there is no `Mcp-Session-Id` to keep sticky behind a proxy and no
+SSE stream for one to buffer. Every tool is request/response, so nothing is lost.
+
+**Two raw `Route`s, not `app.mount`, and before the SPA catch-all.** Mounting the SDK's Starlette
+app at `/mcp` gives `/mcp/mcp`, and a mount 307-redirects bare `/mcp` to `/mcp/` — a redirect
+several clients do not follow on POST. Registered after `_mount_spa` it would be answered with
+`index.html`. A test asserts `/mcp` comes back 401, not the SPA.
+
+**FastMCP turns DNS-rebinding protection on by itself** when constructed with its default
+`host="127.0.0.1"`, allowing only localhost `Host` headers — which 421s every request arriving via
+the LAN address or the reverse proxy. `server.py` passes `TransportSecuritySettings` explicitly with
+it off; the bearer token is the gate, and a rebinding page in someone's browser cannot attach it.
+A test sends `Host: 192.168.1.20:4020`.
+
+**The session manager's `run()` may be entered once per instance**, so `create_app()` builds a fresh
+`MCPEndpoint` every time (the suite builds an app per test) and `lifespan` enters it around `yield`.
+
+**The principal rides on the ASGI scope, not a contextvar.** `MCPEndpoint` authenticates before the
+SDK sees the request and stores the principal in `scope["state"]`; the SDK passes each tool call the
+originating Starlette request, which is how `current_principal()` finds it. A contextvar would have
+to survive the session manager's task-group hop.
+
+**Personal API tokens, not sessions** (`api_tokens` table, `services/api_tokens.py`). A session
+expires after `session_ttl_hours` and needs a password login — wrong for an agent configured once.
+`mmn_` + 32 random bytes, stored as sha256 like `sessions.id`, shown once, `prefix` kept for the
+list. `scope` is `read` or `read_write`. **Accepted by `/mcp` only**: the REST routes know nothing
+about scope, so a read token there would be a write token — and `/api/tokens` itself is
+session-only, so a token can never mint a token. A session *bearer* is also accepted on `/mcp`
+(as `read_write`, since it can already do everything via REST); a session *cookie* is not, so a
+logged-in browser tab cannot be driven cross-origin. Every rejection is the same opaque 401.
+`last_used_at` is written at most once a minute.
+
+**Write tools are hidden, not just refused**, from read tokens: `list_tools` filters on scope and
+`call_tool` answers "Unknown tool" — what it is to that caller. Three exist (`create_note`,
+`append_to_note`, `set_action_item_status`); nothing deletes, uploads, regenerates (LLM spend) or
+touches settings.
+
+**Read tools never write.** No `touch_thread`, no `seen_at`, no email hydration, no LLM call — the
+same "reading is not activity" rule hydration follows. A test snapshots `updated_at`/`seen_at`/
+`body_fetched_at`/bodies around a call to every read tool and asserts zero LLM requests. The only
+network a read tool makes is `get_upcoming_events` (a live calendar read, run on the main loop
+because `providers/tokens.py`'s refresh locks are per-event-loop) and `search`'s query embedding.
+
+**Owner-only, admins included.** No `all` flag: an agent should never browse other users'
+meetings. Someone else's id is `not_found`, exactly like a missing one; a parametrised test points
+another user's token at every id-taking tool.
+
+**Bounded output.** Lists page (`limit` ≤ 100); transcripts page with `next_offset`
+(`max_chars` ≤ 200k); note/email bodies in lists are previews. `list_meetings`'s `query` matches the
+meeting title *or its thread's title*, because "the Atlas meeting" usually means a meeting filed
+under an Atlas thread. Responses carry `server_time` so a client can turn "last week" into
+`since`/`until`. Email `direction` NULL is `"unknown"`; a per-meeting email slice is returned flat,
+not grouped, for the reason `attached_context` never groups (a fragment presented as a whole).
+
+**`source='mcp'` notes are AI prose.** `notes.source_origin` words them "added by an AI assistant
+via MCP" in both chat digests, and `next_step_prompt` (v4), `chat_prompt` (v3) and
+`meeting_chat_prompt` (v2) say to treat them like `ai_chat` — never evidence. The SPA shows the
+same AI badge.
+
+**`mcp_enabled` defaults on** (reviewer's call): with no tokens nobody can use it anyway. Off makes
+`/mcp` a 404, re-read on every request. OAuth for claude.ai *remote* connectors is out of scope —
+every target client accepts a static header.
 
 ## Integrations (calendar + email)
 

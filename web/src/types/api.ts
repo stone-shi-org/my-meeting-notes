@@ -656,7 +656,9 @@ export interface Note {
   title: string;
   /** Markdown. Rendered as such everywhere it is displayed. */
   body: string;
-  source: 'ai_chat' | 'manual';
+  /** 'mcp' is a note an agent wrote through the MCP server -- AI prose, like
+   * 'ai_chat'. */
+  source: 'ai_chat' | 'manual' | 'mcp';
   /** The chat model whose reply this was, when it came from one. */
   model: string | null;
   /** What named it. Null means typed by hand, or the title call failed and the
@@ -908,4 +910,43 @@ export interface SearchStatus {
 export interface SearchRebuildResult {
   ok: boolean;
   queued_scopes: number;
+}
+
+/* -------------------------------------------------------------------------- */
+/* MCP server + personal API tokens (MMN-14)                                   */
+/* -------------------------------------------------------------------------- */
+
+export type ApiTokenScope = 'read' | 'read_write';
+
+export interface ApiToken {
+  id: number;
+  name: string;
+  /** The first few characters, for telling tokens apart. Never the secret. */
+  prefix: string;
+  scope: ApiTokenScope;
+  created_at: string;
+  last_used_at: string | null;
+  /** Null means it never expires. */
+  expires_at: string | null;
+  revoked_at: string | null;
+  state: 'active' | 'expired' | 'revoked';
+}
+
+/** `POST /api/tokens` -- the only response that ever carries the raw token. */
+export interface CreatedApiToken extends ApiToken {
+  token: string;
+}
+
+export interface McpToolInfo {
+  name: string;
+  title: string;
+  /** Only offered to read_write tokens. */
+  write: boolean;
+}
+
+export interface ApiTokenList {
+  mcp_enabled: boolean;
+  endpoint_path: string;
+  tools: McpToolInfo[];
+  tokens: ApiToken[];
 }

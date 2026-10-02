@@ -211,24 +211,9 @@ def update_action_item(
         raise NotFoundError("Action item not found")
     _authorised_meeting(conn, row["meeting_id"], user)
 
-    updates: dict = {}
-    for field in ("text", "owner_label", "due_date", "priority", "status"):
-        value = getattr(payload, field)
-        if value is not None:
-            updates[field] = value
-
-    if "status" in updates:
-        updates["done_at"] = utcnow() if updates["status"] == "done" else None
-
-    if updates:
-        assignments = ", ".join(f"{k} = ?" for k in updates)
-        conn.execute(
-            f"UPDATE action_items SET {assignments} WHERE id = ?",
-            [*updates.values(), item_id],
-        )
-        search_index.mark_meeting(conn, row["meeting_id"])
-
-    updated = conn.execute(
-        "SELECT * FROM action_items WHERE id = ?", (item_id,)
-    ).fetchone()
-    return summarize_svc.row_to_action_item(updated)
+    updates = {
+        field: getattr(payload, field)
+        for field in ("text", "owner_label", "due_date", "priority", "status")
+        if getattr(payload, field) is not None
+    }
+    return summarize_svc.update_action_item(conn, item_id, updates)

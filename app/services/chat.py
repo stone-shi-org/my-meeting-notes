@@ -24,6 +24,7 @@ from app.logging_config import get_logger
 from app.services import chat_followups as chat_followups_svc
 from app.services import email_chains as email_chains_svc
 from app.services import llm as llm_svc
+from app.services import notes as notes_svc
 from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
 from app.services import summarize as summarize_svc
@@ -313,7 +314,7 @@ def _format_attachments(
             # Whose words these are matters more here than for the other two:
             # a note saved out of a chat reply is this assistant's own earlier
             # output, and treating it as evidence would be circular.
-            origin = "saved from an AI answer" if n["source"] == "ai_chat" else "written by the user"
+            origin = notes_svc.source_origin(n["source"])
             bits = ", ".join(b for b in (when, origin) if b)
             block = f"- {n['title'] or 'Untitled note'}" + (f" ({bits})" if bits else "")
             body = (n["body"] or "").strip()

@@ -430,6 +430,32 @@ def row_to_action_item(row: sqlite3.Row) -> dict:
     }
 
 
+ACTION_ITEM_FIELDS = ("text", "owner_label", "due_date", "priority", "status")
+
+
+def update_action_item(conn: sqlite3.Connection, item_id: int, updates: dict) -> dict:
+    """Apply a partial update to one action item; the caller has authorised it.
+
+    Shared by ``PATCH /action-items/{id}`` and the MCP ``set_action_item_status``
+    tool, so the ``done_at`` rule and the search re-index cannot drift between
+    the two. ``updates`` holds only the fields being changed.
+    """
+    row = conn.execute("SELECT * FROM action_items WHERE id = ?", (item_id,)).fetchone()
+    if row is None:
+        raise NotFoundError("Action item not found")
+    changes = {k: v for k, v in updates.items() if k in ACTION_ITEM_FIELDS}
+    if "status" in changes:
+        changes["done_at"] = utcnow() if changes["status"] == "done" else None
+    if changes:
+        assignments = ", ".join(f"{k} = ?" for k in changes)
+        conn.execute(
+            f"UPDATE action_items SET {assignments} WHERE id = ?", [*changes.values(), item_id]
+        )
+        search_index.mark_meeting(conn, row["meeting_id"])
+    updated = conn.execute("SELECT * FROM action_items WHERE id = ?", (item_id,)).fetchone()
+    return row_to_action_item(updated)
+
+
 def get_current_summary(conn: sqlite3.Connection, meeting_id: int) -> dict:
     row = conn.execute(
         "SELECT * FROM summaries WHERE meeting_id = ? AND is_current = 1",
