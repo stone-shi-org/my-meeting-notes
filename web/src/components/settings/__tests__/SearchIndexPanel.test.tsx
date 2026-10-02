@@ -3,7 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { SearchIndexPanel } from '../SearchIndexPanel';
+import { SearchIndexPanel, fmtBytes } from '../SearchIndexPanel';
 import type { SearchStatus } from '@/types/api';
 
 vi.mock('@/lib/api', () => ({
@@ -141,5 +141,43 @@ describe('SearchIndexPanel', () => {
     expect(await screen.findByText(/42 threads and meetings queued/)).toBeInTheDocument();
     // The status is re-read after the rebuild is accepted.
     await waitFor(() => expect(vi.mocked(api.get).mock.calls.length).toBeGreaterThan(1));
+  });
+
+  it('shows both keyword index sizes to an admin', async () => {
+    renderPanel(
+      status({
+        global: {
+          docs: 10,
+          scopes: 2,
+          pending_scopes: 0,
+          chunks: 0,
+          index_bytes: { keyword: 2 * 1024 * 1024, trigram: 6.5 * 1024 * 1024 },
+        },
+      }),
+    );
+    expect(await screen.findByText(/Index size on disk: 2\.0 MB for words, 6\.5 MB for substring/)).toBeInTheDocument();
+  });
+
+  it('hides index sizes when the server cannot measure them', async () => {
+    renderPanel(
+      status({
+        global: {
+          docs: 1,
+          scopes: 1,
+          pending_scopes: 0,
+          chunks: 0,
+          index_bytes: { keyword: null, trigram: null },
+        },
+      }),
+    );
+    await screen.findByText(/Across all users/);
+    expect(screen.queryByText(/Index size on disk/)).not.toBeInTheDocument();
+  });
+
+  it('formats byte counts', () => {
+    expect(fmtBytes(512)).toBe('512 B');
+    expect(fmtBytes(1536)).toBe('1.5 KB');
+    expect(fmtBytes(42 * 1024 * 1024)).toBe('42 MB');
+    expect(fmtBytes(3 * 1024 ** 3)).toBe('3.0 GB');
   });
 });

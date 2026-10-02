@@ -904,7 +904,18 @@ export interface SearchStatus {
   };
   is_admin: boolean;
   /** Admins only. */
-  global?: { docs: number; scopes: number; pending_scopes: number; chunks: number };
+  global?: {
+    docs: number;
+    scopes: number;
+    pending_scopes: number;
+    chunks: number;
+    /**
+     * Bytes on disk of each keyword index (MMN-16). `trigram` is the CJK
+     * substring side index, roughly 3x `keyword`. Null when the server's
+     * SQLite has no `dbstat`. Optional so an older server still renders.
+     */
+    index_bytes?: { keyword: number | null; trigram: number | null };
+  };
 }
 
 export interface SearchRebuildResult {

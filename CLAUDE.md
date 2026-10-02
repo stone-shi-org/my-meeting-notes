@@ -424,8 +424,9 @@ already.
 
 **The home "Search threads…" filter is FTS now** (`threads._apply_text_filter`). Its scope (title and
 description), sort and per-group paging are unchanged, but it matches whole words: `meet` no longer
-finds "meeting", while `meet*` does. It falls back to the old `LIKE` when the query has no words at
-all (`%`, emoji), and per row for any thread with no index doc yet (the first boot after deploy).
+finds "meeting", while `meet*` does. CJK words are the exception: they match as substrings (see "CJK
+goes to a second index" below). It falls back to the old `LIKE` when the query has no words at all
+(`%`, emoji), and per row for any thread with no index doc yet (the first boot after deploy).
 
 **`reconcile()` is the safety net, and it is cheap.** One SQL fingerprint per scope (every column a
 renderer reads, plus `updated_at`, plus a `RENDER_VERSION` constant) is compared against
@@ -440,11 +441,35 @@ read from the source rows on every render. It also repairs a docs/FTS mismatch i
 `seen_at`. It indexes only email bodies that are already stored and never hydrates. Search tables
 are not summarizer input: `attached_context` does not read them, and a test asserts it.
 
-**User input never reaches MATCH raw.** `to_match_expr` rebuilds the query from alphanumeric runs
+**User input never reaches MATCH raw.** `parse_query` rebuilds the query from alphanumeric runs
 only, each one double-quoted, so `"`, `-`, `*`, `:`, `(` and `NEAR`/`OR`/`AND` are literal, and emoji
-are dropped. Bare words are ANDed. `"phrases"` and `prefix*` (≥2 chars) survive. **CJK is a known
-gap:** unicode61 does not segment Han text, so a substring inside a CJK run does not match. A trigram
-side index is a reviewer-approved follow-up.
+are dropped. Bare words are ANDed. `"phrases"` and `prefix*` (≥2 chars) survive.
+
+**CJK goes to a second index, `search_fts_tri` (trigram), MMN-16.** unicode61 does not segment
+Han/Kana/Hangul, so a run is one token and a part of it never matched. `parse_query` now sends every
+word containing a CJK character (`has_cjk`) to the trigram table as a *substring* term, and
+everything else to `search_fts` as before. Each arm is a condition on the same `search_docs` row, so
+`Q3 会议` is an AND across both, and the result is still one keyword list: RRF and `matched_by` see
+no difference. Latin words stay whole-word, so `meet` still does not find "meeting".
+- **≥3 characters → trigram `MATCH`** (indexed, bm25-ranked, `snippet()`).
+- **1–2 characters → `LIKE '%term%'` on the trigram table's own stored text.** This was chosen over
+  "require ≥3" because two-character words are the *common* case in Chinese (会议). The trigram
+  index cannot serve a pattern under three characters (a `MATCH` that short silently matches
+  nothing), so it is a rowid lookup per candidate row after the owner filter. When a query has only
+  short terms there is no bm25: title hits come first, then newest, with a snippet cut in Python
+  (`like_snippet`). CJK terms come out of the same `_words` splitter, so `%` and `_` can never reach
+  the `LIKE`: they are separators.
+- A token or phrase that mixes CJK and other words degrades to an AND of its words, because
+  adjacency across two indexes cannot be expressed. `*` on a CJK word is dropped, because a
+  substring match already covers a prefix.
+- The table is **not contentless**, because the `LIKE` path needs the text. Its size is about 2–3× the
+  unicode61 index (production at deploy: 376 KB keyword, 736 KB trigram, 1,287 docs). Settings → Search shows both sizes to admins (`dbstat`, cached 5 minutes,
+  `null` on a SQLite build without it).
+- Everything that writes, deletes, reconciles or rebuilds walks `search_index.FTS_TABLES`.
+  Reconcile checks each table independently, so an install from before MMN-16 is backfilled as a
+  "doc missing its text" repair. `RENDER_VERSION` 2 also re-renders everything once.
+- The home thread filter uses the same routing through `search.doc_select`, so `会议` finds a
+  thread titled `会议记录…`.
 
 **Semantic search fails open, and its brute force is deliberate.** The query is embedded once and
 dot-producted in pure Python against the owner's L2-normalised float32 vectors. That is fine up to

@@ -117,6 +117,30 @@ function EmbeddingSection({ embedding }: { embedding: SearchStatus['embedding'] 
   );
 }
 
+/** 1536 -> "1.5 KB"; binary units, because that is what the disk reports. */
+export function fmtBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  let v = n / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i += 1;
+  }
+  return `${v >= 10 ? Math.round(v) : v.toFixed(1)} ${units[i]}`;
+}
+
+function IndexSizes({ sizes }: { sizes: { keyword: number | null; trigram: number | null } }) {
+  if (sizes.keyword == null && sizes.trigram == null) return null;
+  const show = (n: number | null) => (n == null ? 'unknown' : fmtBytes(n));
+  return (
+    <p className="mt-1 text-xs text-fg-muted">
+      Index size on disk: {show(sizes.keyword)} for words,{' '}
+      {show(sizes.trigram)} for substring matching in Chinese, Japanese and Korean text.
+    </p>
+  );
+}
+
 function RebuildSection({
   status,
   onStarted,
@@ -149,6 +173,7 @@ function RebuildSection({
               {status.global.pending_scopes.toLocaleString()} waiting.
             </p>
           ) : null}
+          {status.global?.index_bytes ? <IndexSizes sizes={status.global.index_bytes} /> : null}
         </div>
         <Button
           variant="secondary"

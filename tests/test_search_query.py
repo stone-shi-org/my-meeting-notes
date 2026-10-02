@@ -110,11 +110,12 @@ def test_diacritics_fold_both_ways(conn, owner):
 
 
 def test_cjk_whole_run_matches(conn, owner):
-    # Documented limitation: unicode61 does not segment CJK, so the whole run
-    # matches but a substring of it does not (trigram index is a follow-up).
+    # unicode61 does not segment CJK, so a run is one token -- but CJK words
+    # are routed to the trigram side index (MMN-16), so a substring matches
+    # too. tests/test_search_cjk.py covers the rest.
     threads_svc.create_thread(conn, owner_id=owner, title="会议记录 weekly")
     assert titles(keyword(conn, owner, "会议记录")) == ["会议记录 weekly"]
-    assert keyword(conn, owner, "会议")["hits"] == []
+    assert titles(keyword(conn, owner, "会议")) == ["会议记录 weekly"]
 
 
 def test_snippet_marks_match(conn, owner):

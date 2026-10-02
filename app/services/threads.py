@@ -157,7 +157,8 @@ def _apply_text_filter(q: str, where: list[str], params: list) -> None:
     matched by the FTS index, so it splits words, ANDs them, folds diacritics
     and supports ``"phrases"`` and ``prefix*``. The behaviour change that
     comes with that: whole words only, so ``meet`` no longer finds
-    "meeting" (``meet*`` does).
+    "meeting" (``meet*`` does). CJK is the exception (MMN-16): unicode61
+    cannot split it, so a CJK word is a substring match via the trigram index.
 
     Two fallbacks to the old substring match, so the filter never goes blank:
     a query with no searchable words at all (``%``, ``!!!``, an emoji), and,
@@ -166,23 +167,26 @@ def _apply_text_filter(q: str, where: list[str], params: list) -> None:
     """
     from app.services import search as search_svc
 
-    expr = search_svc.to_match_expr(q)
+    parsed = search_svc.parse_query(q)
     like = f"%{q}%"
-    if expr is None:
+    if parsed.empty:
         where.append("(t.title LIKE ? OR t.description LIKE ?)")
         params.extend([like, like])
         return
+    # CJK words are matched as substrings through the trigram index (MMN-16),
+    # the same routing as "Search everything", so 会议 finds 会议记录.
+    sub_sql, sub_params = search_svc.doc_select(
+        parsed, columns="d.thread_id", where="d.kind = 'thread'"
+    )
     where.append(
-        """(
-            t.id IN (SELECT d.thread_id FROM search_fts
-                       JOIN search_docs d ON d.id = search_fts.rowid
-                      WHERE search_fts MATCH ? AND d.kind = 'thread')
+        f"""(
+            t.id IN ({sub_sql})
             OR (NOT EXISTS (SELECT 1 FROM search_docs d2
                              WHERE d2.kind = 'thread' AND d2.ref_id = CAST(t.id AS TEXT))
                 AND (t.title LIKE ? OR t.description LIKE ?))
         )"""
     )
-    params.extend([expr, like, like])
+    params.extend([*sub_params, like, like])
 
 
 def _effective_bool(row: sqlite3.Row, column: str, *, default: bool = True) -> bool:

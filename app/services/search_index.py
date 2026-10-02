@@ -1,8 +1,10 @@
 """The search index: what is searchable, and keeping it in step with the source.
 
-MMN-15. Two tables hold the keyword index -- ``search_fts`` (FTS5, the text)
-and its plain twin ``search_docs`` (same id, the B-tree-indexable placement
-and a per-row fingerprint). Everything here only ever *reads* the source
+MMN-15. Three tables hold the keyword index -- ``search_fts`` (FTS5,
+unicode61, the text), ``search_fts_tri`` (FTS5, trigram, the same text again
+for CJK substring matching -- MMN-16) and their plain twin ``search_docs``
+(same id, the B-tree-indexable placement and a per-row fingerprint). The
+three are only ever written together, here. Everything here only ever *reads* the source
 tables; nothing writes ``raw_json``, ``updated_at`` or ``seen_at``, and no
 email body is fetched -- an index of what is already stored, nothing more.
 
@@ -55,7 +57,11 @@ log = get_logger("search_index")
 # Bump to re-render every document on the next reconcile -- the renderer's
 # output is part of every fingerprint, so changing what gets indexed without
 # bumping this would leave old rows looking current.
-RENDER_VERSION = "1"
+RENDER_VERSION = "2"  # 2: MMN-16 backfills search_fts_tri
+
+# Every FTS table keyed on search_docs.id. Writes, deletes, reconcile and
+# rebuild walk this list, so a new side index cannot be forgotten by one of them.
+FTS_TABLES: tuple[str, ...] = ("search_fts", "search_fts_tri")
 
 KINDS: tuple[str, ...] = (
     "thread", "meeting", "segment", "summary", "action_item", "note", "email", "event",
@@ -481,6 +487,7 @@ def _delete_fts_where(conn: sqlite3.Connection, where: str, params: tuple) -> in
     if not ids:
         return 0
     conn.executemany("DELETE FROM search_fts WHERE rowid = ?", [(i,) for i in ids])
+    conn.executemany("DELETE FROM search_fts_tri WHERE rowid = ?", [(i,) for i in ids])
     conn.executemany("DELETE FROM search_docs WHERE id = ?", [(i,) for i in ids])
     return len(ids)
 
@@ -512,6 +519,7 @@ def upsert_doc(conn: sqlite3.Connection, doc: Doc, scope_key: str) -> None:
             (*values, doc_id),
         )
         conn.execute("DELETE FROM search_fts WHERE rowid = ?", (doc_id,))
+        conn.execute("DELETE FROM search_fts_tri WHERE rowid = ?", (doc_id,))
     conn.execute(
         "INSERT INTO search_fts (rowid, kind, ref_id, owner_id, thread_id, meeting_id, "
         "start_sec, title, body) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -519,6 +527,10 @@ def upsert_doc(conn: sqlite3.Connection, doc: Doc, scope_key: str) -> None:
             doc_id, doc.kind, doc.ref_id, doc.owner_id, doc.thread_id, doc.meeting_id,
             doc.start_sec, doc.title, doc.body,
         ),
+    )
+    conn.execute(
+        "INSERT INTO search_fts_tri (rowid, title, body) VALUES (?, ?, ?)",
+        (doc_id, doc.title, doc.body),
     )
 
 
@@ -698,22 +710,29 @@ def reconcile(conn: sqlite3.Connection) -> dict:
 
     stale = [k for k, (_, fp) in current.items() if stored.get(k) != fp and k not in dirty]
 
-    # Docs present without their FTS text (or vice versa): re-render the scope.
-    broken = [
-        r[0]
-        for r in conn.execute(
-            "SELECT DISTINCT d.scope_key FROM search_docs d "
-            "WHERE NOT EXISTS (SELECT 1 FROM search_fts f WHERE f.rowid = d.id)"
+    # Docs present without their text in either FTS table (or text with no
+    # doc): re-render the scope. Both tables are checked independently, so a
+    # pre-MMN-16 index with no trigram rows is repaired like any other hole.
+    broken: list[str] = []
+    orphan_text = 0
+    for table in FTS_TABLES:
+        missing = (
+            f"NOT EXISTS (SELECT 1 FROM {table} f WHERE f.rowid = search_docs.id)"
         )
-    ]
-    if broken:
-        conn.execute(
-            "DELETE FROM search_docs WHERE NOT EXISTS "
-            "(SELECT 1 FROM search_fts f WHERE f.rowid = search_docs.id)"
+        broken.extend(
+            r[0]
+            for r in conn.execute(
+                f"SELECT DISTINCT scope_key FROM search_docs WHERE {missing}"
+            )
         )
-    orphan_text = conn.execute(
-        "DELETE FROM search_fts WHERE rowid NOT IN (SELECT id FROM search_docs)"
-    ).rowcount
+        conn.execute(f"DELETE FROM search_docs WHERE {missing}")
+    for table in FTS_TABLES:
+        # The docs deleted above leave their row in the *other* table behind;
+        # this sweep collects those too.
+        orphan_text += conn.execute(
+            f"DELETE FROM {table} WHERE rowid NOT IN (SELECT id FROM search_docs)"
+        ).rowcount
+    broken = list(dict.fromkeys(broken))
 
     to_mark = list(dict.fromkeys([*stale, *(k for k in broken if k in current)]))
     if to_mark:
@@ -753,7 +772,8 @@ def rebuild(conn: sqlite3.Connection) -> int:
     than paying to embed everything again. A vector whose document no longer
     exists is invisible anyway -- semantic queries join through search_docs.
     """
-    conn.execute("DELETE FROM search_fts")
+    for table in FTS_TABLES:
+        conn.execute(f"DELETE FROM {table}")
     conn.execute("DELETE FROM search_docs")
     conn.execute("DELETE FROM search_scopes")
     conn.execute("DELETE FROM search_dirty")

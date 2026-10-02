@@ -712,6 +712,19 @@ SCHEMA: tuple[str, ...] = (
         tokenize = 'unicode61 remove_diacritics 2'
     )
     """,
+    # MMN-16: the CJK substring side index. unicode61 indexes a run of
+    # Han/Kana/Hangul as ONE token, so a part of it never matches; trigram
+    # indexes every 3-character window instead. Same rowid as search_docs,
+    # written and deleted alongside search_fts by search_index. It keeps its
+    # own content (not contentless) because 1-2 character terms are matched
+    # with LIKE against it, and LIKE needs the text.
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_fts_tri USING fts5(
+        title,
+        body,
+        tokenize = 'trigram'
+    )
+    """,
     # One row per indexing unit: 't:<thread_id>' (the thread, its notes,
     # emails and events) or 'm:<meeting_id>' (the meeting, its transcript
     # segments, current summary and action items). source_fp is a cheap hash
