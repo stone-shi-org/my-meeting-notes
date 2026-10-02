@@ -517,6 +517,11 @@ the LAN address or the reverse proxy. `server.py` passes `TransportSecuritySetti
 it off; the bearer token is the gate, and a rebinding page in someone's browser cannot attach it.
 A test sends `Host: 192.168.1.20:4020`.
 
+**Modern protocol negotiation (`2026-07-28`).** MCP SDK 1.x only listed protocol versions up to
+`2025-11-25` in `SUPPORTED_PROTOCOL_VERSIONS`, causing it to reject modern clients sending
+`mcp-protocol-version: 2026-07-28` with a 400 Bad Request. `server.py` appends `2026-07-28` so
+modern clients connect and negotiate cleanly.
+
 **The session manager's `run()` may be entered once per instance**, so `create_app()` builds a fresh
 `MCPEndpoint` every time (the suite builds an app per test) and `lifespan` enters it around `yield`.
 

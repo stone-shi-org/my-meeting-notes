@@ -38,8 +38,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.fastmcp.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
+from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
 from mcp.types import Tool as MCPTool
 from mcp.types import ToolAnnotations
+
+# Accept modern MCP clients advertising the 2026-07-28 protocol version
+if "2026-07-28" not in SUPPORTED_PROTOCOL_VERSIONS:
+    SUPPORTED_PROTOCOL_VERSIONS.append("2026-07-28")
 
 from app import __version__
 from app.config import effective, get_settings

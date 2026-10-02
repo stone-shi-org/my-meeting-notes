@@ -175,6 +175,37 @@ def test_initialize_and_list(client, alice_token):
     assert "get_meeting_transcript" in tool_names(client, alice_token)
 
 
+def test_initialize_and_call_with_modern_protocol_version_2026_07_28(client, alice_token):
+    resp = rpc(
+        client,
+        alice_token,
+        "initialize",
+        {"protocolVersion": "2026-07-28", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+        headers={"mcp-protocol-version": "2026-07-28"},
+    )
+    assert resp.status_code == 200, resp.text
+    info = resp.json()["result"]
+    assert info["protocolVersion"] == "2026-07-28"
+    assert info["serverInfo"]["name"] == "my-meeting-notes"
+
+    # Direct tool listing with modern protocol version header
+    list_resp = rpc(client, alice_token, "tools/list", headers={"mcp-protocol-version": "2026-07-28"})
+    assert list_resp.status_code == 200, list_resp.text
+    names = {t["name"] for t in list_resp.json()["result"]["tools"]}
+    assert "search" in names
+
+    # Direct tool call with modern protocol version header
+    call_resp = rpc(
+        client,
+        alice_token,
+        "tools/call",
+        {"name": "list_meetings", "arguments": {}},
+        headers={"mcp-protocol-version": "2026-07-28"},
+    )
+    assert call_resp.status_code == 200, call_resp.text
+    assert call_resp.json()["result"]["structuredContent"]["total"] == 0
+
+
 def test_trailing_slash_and_a_lan_host_header_both_work(client, alice_token):
     assert rpc(client, alice_token, "tools/list", path="/mcp/").status_code == 200
     # FastMCP's default DNS-rebinding guard would 421 this.
