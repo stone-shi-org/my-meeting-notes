@@ -183,6 +183,29 @@ def _run_sync(spec: ToolSpec, principal: Principal, kwargs: dict) -> dict:
         return spec.fn(conn, principal, **kwargs)
 
 
+#: Handlers MCPServer registers by default that this server has no use for.
+#: Capabilities are *derived from registered handlers*: while
+#: `subscriptions/listen` is served, the 2026-07-28 `server/discover` result
+#: advertises `listChanged` on tools/prompts/resources and `resources.subscribe`
+#: -- promises this server never keeps (its tool list is fixed; it has no
+#: prompts or resources). A client that believes them opens a
+#: `subscriptions/listen` stream that by design never completes, plus three list
+#: calls for nothing. From a browser that stream pins one of the six HTTP/1.1
+#: connections per origin for good; with the rest busy, every later request
+#: queues until it times out -- the MCP Inspector's "5 requests are
+#: unanswered" (MMN-14). Unregistering them makes the advertisement honest:
+#: tools only, no change notifications, and an explicit METHOD_NOT_FOUND for
+#: anything else.
+UNUSED_METHODS: tuple[str, ...] = (
+    "subscriptions/listen",
+    "prompts/list",
+    "prompts/get",
+    "resources/list",
+    "resources/read",
+    "resources/templates/list",
+)
+
+
 def build_server() -> MCPServer:
     server = MCPServer(
         name="my-meeting-notes",
@@ -205,6 +228,9 @@ def build_server() -> MCPServer:
             ),
             structured_output=True,
         )
+    handlers = server._lowlevel_server._request_handlers
+    for method in UNUSED_METHODS:
+        handlers.pop(method, None)
     return server
 
 

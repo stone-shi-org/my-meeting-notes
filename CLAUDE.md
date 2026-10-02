@@ -532,6 +532,20 @@ Python — **`CallToolResult.is_error`, not `isError`** — and `mcpclient.call_
 rather than the fake. The SDK brings its own HTTP stack (`httpx2`/`httpcore2`) alongside, not
 instead of, the `httpx` the app and respx use.
 
+**Advertise only tools — the SDK's default capabilities are promises this server never keeps.**
+Capabilities are derived from *registered handlers*, and `MCPServer` registers `subscriptions/listen`,
+prompts and resources by default, so `server/discover` claimed `listChanged` on tools/prompts/
+resources plus `resources.subscribe`. A client that believes it opens a `subscriptions/listen`
+stream — which by design never completes — and lists prompts and resources for nothing. From a
+browser that stream holds one of the six HTTP/1.1 connections per origin forever; with the rest
+busy (an open app tab polling is enough), every later request queues until it times out. That is
+exactly the MCP Inspector's "Request timed out … 5 requests are unanswered: subscriptions/listen,
+resources/list, tools/list, prompts/list, resources/templates/list … Last response received
+(server/discover)". `server.UNUSED_METHODS` unregisters those handlers, so both eras advertise
+`{"tools": {"listChanged": false}}` and a stray listen gets an immediate `-32601`. If a tool list
+ever becomes dynamic, re-register listen *and* actually publish change events — never advertise one
+without the other.
+
 **Two raw `Route`s, not `app.mount`, and before the SPA catch-all.** Mounting the SDK's Starlette
 app at `/mcp` gives `/mcp/mcp`, and a mount 307-redirects bare `/mcp` to `/mcp/` — a redirect
 several clients do not follow on POST. Registered after `_mount_spa` it would be answered with

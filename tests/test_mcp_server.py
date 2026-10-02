@@ -340,9 +340,47 @@ def test_modern_discover_advertises_the_per_request_revision(client, alice_token
     assert resp.status_code == 200, resp.text
     result = resp.json()["result"]
     assert result["supportedVersions"] == [MODERN]
-    assert "tools" in result["capabilities"]
+    # Exactly what this server does: tools, and no change notifications.
+    assert result["capabilities"] == {"tools": {"listChanged": False}}
     assert result["instructions"].startswith("My Meeting Notes")
     assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "my-meeting-notes"
+
+
+def test_initialize_advertises_tools_only(client, alice_token):
+    resp = rpc(
+        client,
+        alice_token,
+        "initialize",
+        {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+    )
+    caps = resp.json()["result"]["capabilities"]
+    assert caps["tools"] == {"listChanged": False}
+    assert "prompts" not in caps and "resources" not in caps
+
+
+def test_no_listen_stream_is_offered_or_held_open(client, alice_token):
+    """The MCP Inspector failure (MMN-14): the SDK's default handlers made
+    discover promise change notifications, so a client opened a
+    `subscriptions/listen` stream that never completes. From a browser that
+    pins one of its six per-origin connections for good and starves every
+    later request. Now listen is not served: an immediate METHOD_NOT_FOUND
+    instead of a held-open stream, and nothing advertises it."""
+    resp = modern(
+        client, alice_token, "subscriptions/listen", {"notifications": {"toolsListChanged": True}}
+    )
+    assert resp.headers["content-type"].startswith("application/json")
+    assert resp.json()["error"]["code"] == -32601
+
+
+@pytest.mark.parametrize(
+    "method", ["prompts/list", "resources/list", "resources/templates/list", "prompts/get", "resources/read"]
+)
+def test_prompts_and_resources_are_not_served_on_either_path(client, alice_token, method):
+    params = {"name": "x"} if method == "prompts/get" else {"uri": "mmn://x"} if method == "resources/read" else {}
+    modern_resp = modern(client, alice_token, method, params, name=params.get("name") or params.get("uri"))
+    assert modern_resp.json()["error"]["code"] == -32601
+    legacy_resp = rpc(client, alice_token, method, params)
+    assert legacy_resp.json()["error"]["code"] == -32601
 
 
 def test_modern_tools_list_and_call_without_a_handshake(client, alice_token, world):
