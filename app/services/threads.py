@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.db import utcnow
 from app.errors import ConflictError, NotFoundError, ValidationError
+from app.services import search_index
 
 # Thread list cards show these counts, so they're computed in the list query
 # rather than N+1 round trips from the SPA.
@@ -57,6 +58,9 @@ def touch_thread(conn: sqlite3.Connection, thread_id: int) -> None:
     conn.execute(
         "UPDATE threads SET updated_at = ? WHERE id = ?", (utcnow(), thread_id)
     )
+    # Every child write already funnels through here, which makes it the one
+    # place a missed search-index call site is least likely (MMN-15).
+    search_index.mark_thread(conn, thread_id)
 
 
 def get_thread(conn: sqlite3.Connection, thread_id: int) -> sqlite3.Row | None:
@@ -85,6 +89,9 @@ def create_thread(
         "VALUES (?, ?, ?, ?, ?)",
         (owner_id, title, description, now, now),
     )
+    # Synchronous, not queued: the home list's filter runs on this document,
+    # and a thread you just named must be findable by that name at once.
+    search_index.index_thread_doc(conn, cur.lastrowid)  # type: ignore[arg-type]
     return require_thread(conn, cur.lastrowid)  # type: ignore[arg-type]
 
 
@@ -114,9 +121,7 @@ def list_threads(
             params.append(_group_id(group))
 
     if q:
-        where.append("(t.title LIKE ? OR t.description LIKE ?)")
-        like = f"%{q}%"
-        params.extend([like, like])
+        _apply_text_filter(q, where, params)
 
     if archived is not None:
         where.append("t.archived = ?")
@@ -142,6 +147,42 @@ def list_threads(
     ).fetchall()
 
     return rows, total
+
+
+def _apply_text_filter(q: str, where: list[str], params: list) -> None:
+    """The home list's "Search threads..." filter (MMN-15, plan section 10a).
+
+    Same scope as it always had -- a thread's own title and description, no
+    re-ranking, the list keeps its activity sort and per-group paging -- but
+    matched by the FTS index, so it splits words, ANDs them, folds diacritics
+    and supports ``"phrases"`` and ``prefix*``. The behaviour change that
+    comes with that: whole words only, so ``meet`` no longer finds
+    "meeting" (``meet*`` does).
+
+    Two fallbacks to the old substring match, so the filter never goes blank:
+    a query with no searchable words at all (``%``, ``!!!``, an emoji), and,
+    per row, any thread that has no index document yet -- which is every
+    thread on the first boot after deploy, until the startup reconcile runs.
+    """
+    from app.services import search as search_svc
+
+    expr = search_svc.to_match_expr(q)
+    like = f"%{q}%"
+    if expr is None:
+        where.append("(t.title LIKE ? OR t.description LIKE ?)")
+        params.extend([like, like])
+        return
+    where.append(
+        """(
+            t.id IN (SELECT d.thread_id FROM search_fts
+                       JOIN search_docs d ON d.id = search_fts.rowid
+                      WHERE search_fts MATCH ? AND d.kind = 'thread')
+            OR (NOT EXISTS (SELECT 1 FROM search_docs d2
+                             WHERE d2.kind = 'thread' AND d2.ref_id = CAST(t.id AS TEXT))
+                AND (t.title LIKE ? OR t.description LIKE ?))
+        )"""
+    )
+    params.extend([expr, like, like])
 
 
 def _effective_bool(row: sqlite3.Row, column: str, *, default: bool = True) -> bool:
@@ -357,6 +398,7 @@ def move_item(
         raise ConflictError("Already attached to the destination thread") from None
     if cur.rowcount == 0:
         raise NotFoundError("Not attached to this thread")
+    search_index.mark_thread(conn, thread_id, target_thread_id)
 
 
 # --------------------------------------------------------------------------- #
@@ -404,6 +446,7 @@ def create_meeting(
         """,
         (thread_id, owner_id, title, meeting_at or now, notes, now, now),
     )
+    search_index.mark_meeting(conn, cur.lastrowid)
     touch_thread(conn, thread_id)
     return require_meeting(conn, cur.lastrowid)  # type: ignore[arg-type]
 
@@ -545,4 +588,8 @@ def move_meeting(
             (target_thread_id, meeting_id),
         )
 
+    # The meeting's own docs carry thread_id; the notes/emails/events that
+    # followed it belong to the destination thread's scope now.
+    search_index.mark_meeting(conn, meeting_id)
+    search_index.mark_thread(conn, thread_id, target_thread_id)
     return require_meeting(conn, meeting_id)

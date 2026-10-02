@@ -836,3 +836,76 @@ export interface Health {
   workers: number;
   version: VersionInfo;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Search (MMN-15)                                                             */
+/* -------------------------------------------------------------------------- */
+
+export type SearchKind =
+  | 'thread'
+  | 'meeting'
+  | 'segment'
+  | 'summary'
+  | 'action_item'
+  | 'note'
+  | 'email'
+  | 'event';
+
+export type SearchMode = 'hybrid' | 'keyword' | 'semantic';
+
+export interface SearchHit {
+  kind: SearchKind;
+  /** Source row id; for a segment, its index within the transcript. */
+  id: number;
+  ref_id: string;
+  thread_id: number | null;
+  thread_title: string | null;
+  meeting_id: number | null;
+  meeting_title: string | null;
+  /** Segment hits only. */
+  start_sec: number | null;
+  title: string | null;
+  /** `\u0002…\u0003` wrap highlighted terms. Plain text otherwise -- never HTML. */
+  snippet: string | null;
+  date: string | null;
+  score: number;
+  matched_by: ('keyword' | 'semantic')[];
+  /** SPA deep link, used as-is. */
+  url: string;
+}
+
+export interface SearchResponse {
+  query: string;
+  mode: SearchMode;
+  mode_used: SearchMode;
+  semantic: { available: boolean; reason: string | null };
+  limit: number;
+  offset: number;
+  has_more: boolean;
+  hits: SearchHit[];
+}
+
+export interface SearchStatus {
+  kinds: { kind: SearchKind; indexed: number }[];
+  /** Threads/meetings waiting to be (re)indexed for this user. */
+  pending_scopes: number;
+  last_indexed_at: string | null;
+  embedding: {
+    enabled: boolean;
+    model: string | null;
+    chunks: number;
+    embedded: number;
+    pending_scopes: number;
+    scale_warning: boolean;
+    scale_limit: number;
+    last_error: string | null;
+  };
+  is_admin: boolean;
+  /** Admins only. */
+  global?: { docs: number; scopes: number; pending_scopes: number; chunks: number };
+}
+
+export interface SearchRebuildResult {
+  ok: boolean;
+  queued_scopes: number;
+}

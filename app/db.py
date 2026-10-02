@@ -644,6 +644,104 @@ SCHEMA: tuple[str, ...] = (
         updated_at TEXT NOT NULL
     )
     """,
+    # ---------------------------------------------------------------- search
+    #
+    # MMN-15. Everything below is *derived*: it can be dropped and rebuilt
+    # from the source tables at any time (Settings -> Search -> Rebuild), so
+    # none of it carries a foreign key -- a cascade cannot reach a virtual
+    # table anyway, which is why services/search_index.py deletes explicitly.
+    #
+    # search_docs is the plain-table twin of search_fts (same id = rowid).
+    # FTS5 cannot index an UNINDEXED column, so owner/thread/scope lookups and
+    # the per-row fingerprint live here, where a B-tree can serve them.
+    """
+    CREATE TABLE IF NOT EXISTS search_docs (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT NOT NULL,
+        ref_id      TEXT NOT NULL,
+        scope_key   TEXT NOT NULL,
+        owner_id    INTEGER NOT NULL,
+        thread_id   INTEGER,
+        meeting_id  INTEGER,
+        start_sec   REAL,
+        label       TEXT,
+        date        TEXT,
+        fingerprint TEXT NOT NULL,
+        indexed_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_search_docs ON search_docs(kind, ref_id)",
+    "CREATE INDEX IF NOT EXISTS idx_search_docs_owner ON search_docs(owner_id, kind)",
+    "CREATE INDEX IF NOT EXISTS idx_search_docs_scope ON search_docs(scope_key)",
+    "CREATE INDEX IF NOT EXISTS idx_search_docs_thread ON search_docs(thread_id)",
+    """
+    CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+        kind UNINDEXED,
+        ref_id UNINDEXED,
+        owner_id UNINDEXED,
+        thread_id UNINDEXED,
+        meeting_id UNINDEXED,
+        start_sec UNINDEXED,
+        title,
+        body,
+        tokenize = 'unicode61 remove_diacritics 2'
+    )
+    """,
+    # One row per indexing unit: 't:<thread_id>' (the thread, its notes,
+    # emails and events) or 'm:<meeting_id>' (the meeting, its transcript
+    # segments, current summary and action items). source_fp is a cheap hash
+    # of the source rows as of the last index; the periodic reconcile compares
+    # it against a fresh one to catch any write path that forgot to say so.
+    """
+    CREATE TABLE IF NOT EXISTS search_scopes (
+        scope_key    TEXT PRIMARY KEY,
+        owner_id     INTEGER NOT NULL,
+        source_fp    TEXT NOT NULL,
+        chunk_count  INTEGER NOT NULL DEFAULT 0,
+        indexed_at   TEXT NOT NULL,
+        embed_fp     TEXT,
+        embed_model  TEXT,
+        embedded_at  TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_search_scopes_owner ON search_scopes(owner_id)",
+    # The indexer's work queue. Written inside the caller's own transaction,
+    # so it commits or rolls back with the change that caused it.
+    """
+    CREATE TABLE IF NOT EXISTS search_dirty (
+        scope_key TEXT PRIMARY KEY,
+        queued_at TEXT NOT NULL
+    )
+    """,
+    # One row per embedded chunk. `model` is part of the key so that changing
+    # embedding_model never mixes two vector spaces: old rows are simply not
+    # read, and are dropped once the new model has covered everything.
+    # `doc_ref` names the search_docs row a hit resolves to (for a transcript
+    # window, its first segment), which is also how a deleted document's
+    # vectors stop matching at once -- the query joins through search_docs.
+    """
+    CREATE TABLE IF NOT EXISTS search_embeddings (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind        TEXT NOT NULL,
+        ref_id      TEXT NOT NULL,
+        doc_ref     TEXT NOT NULL,
+        scope_key   TEXT NOT NULL,
+        owner_id    INTEGER NOT NULL,
+        thread_id   INTEGER,
+        meeting_id  INTEGER,
+        start_sec   REAL,
+        model       TEXT NOT NULL,
+        dim         INTEGER NOT NULL,
+        vector      BLOB NOT NULL,
+        text_sha256 TEXT NOT NULL,
+        chunk_text  TEXT NOT NULL,
+        created_at  TEXT NOT NULL
+    )
+    """,
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_search_embeddings "
+    "ON search_embeddings(kind, ref_id, model)",
+    "CREATE INDEX IF NOT EXISTS idx_search_emb_owner ON search_embeddings(owner_id, model)",
+    "CREATE INDEX IF NOT EXISTS idx_search_emb_scope ON search_embeddings(scope_key, model)",
 )
 
 # Columns added after the initial release go here as (table, column, ddl_fragment).

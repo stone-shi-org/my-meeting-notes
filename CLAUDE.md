@@ -8,7 +8,7 @@ This file (and README.md) is also mirrored, expanded, and organized by topic on 
 space key **MMN** (`https://confluence.local.shifamily.com/spaces/MMN/`). Page tree: My Meeting
 Notes → Getting Started, Architecture Overview, Meetings & Transcription Pipeline, Summaries & AI
 Chat, Threads/Groups & Notes, Integrations Overview & Matching → Provider Details, Email
-Conversations & Hydration, Testing, CI/CD & Release (Bamboo), Gotchas Reference.
+Conversations & Hydration, Search & Indexing, Testing, CI/CD & Release (Bamboo), Gotchas Reference.
 
 **Whenever something in this file changes, update the matching Confluence page(s) too.** This file
 is the source of truth for day-to-day agent work; Confluence is the durable, browsable copy for
@@ -27,12 +27,13 @@ app/
   deps.py        current_user / active_user / require_admin / owner_scope
   security.py    stdlib scrypt + opaque session tokens
   routers/       auth users integrations threads meetings transcripts summaries matching jobs
-                 calendar settings_api system notes
+                 calendar settings_api system notes search
   services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
                  threads users integrations secretstore mcpclient followups notes
+                 search search_index search_embed
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
-                 scheduler.py (the auto-match timer)
+                 scheduler.py (the auto-match timer) · search_indexer.py (MMN-15)
   prompts/       summary_prompt.md · match_rank_prompt.md · note_title_prompt.md
                  <- EDITABLE, no deploy needed
 web/src/         types api lib hooks player components pages routes
@@ -387,6 +388,83 @@ mode this whole feature exists to remove.
 **`--fg-faint` is not for email text.** The snippet and the timeline `<time>` used to use it; both are
 content, and that token is annotated `DECORATIVE ONLY` and fails AA by design. Body → `--fg`,
 preview/summary → `--fg-muted`, meta → `--fg-subtle`.
+
+## Search & indexing
+
+`services/search.py` is the one search over everything a user owns: thread title and description,
+meeting titles, transcript segments, the current summary, its action items, notes, emails, and
+calendar events. Keyword search uses FTS5 (`search_fts`, `unicode61 remove_diacritics 2`, `bm25()`
+with the title weighted 4×). Semantic search uses stored embeddings (`search_embeddings`). The two
+are merged with Reciprocal Rank Fusion (k=60). `GET /api/search` serves the home page's "Search
+everything" view, and MMN-14's MCP `search` tool is meant to call `search()` directly. Settings →
+Search shows coverage and has the admin "Rebuild index" button.
+
+**`search_docs` is the plain-table twin of `search_fts`** (same id = rowid). FTS5 cannot index an
+UNINDEXED column, so `owner_id = ?`, thread cascades and the per-row fingerprint would each be a full
+scan of the virtual table. Every write goes through `search_index.upsert_doc` / `_delete_fts_where`,
+which keep the two in step. Nothing in this group of tables has a foreign key, because all of it is
+derived and can be rebuilt from scratch.
+
+**Work is tracked per scope, not per row.** `t:<thread_id>` covers the thread doc, notes, emails and
+events. `m:<meeting_id>` covers the meeting, the *active* transcript's segments, the *current*
+summary and its action items. A write path calls `search_index.mark_thread` / `mark_meeting`, which
+is one INSERT into `search_dirty` inside the caller's own transaction. The background indexer then
+re-renders the scope and writes only the docs whose fingerprint changed. Rows aren't tracked
+individually because `attach_email`'s ON CONFLICT upsert never says which row id it touched, and
+there are about 30 write sites. `touch_thread` marks its thread, so most child writes are covered
+already.
+
+**Two things are synchronous, on purpose.**
+- **Deletes:** `delete_thread_scope` / `delete_meeting_scope` before the DELETE, `delete_doc` on a
+  detach or note delete. A cascade never reaches a virtual table, and a deleted note must stop
+  matching now.
+- **The thread doc itself** (`index_thread_doc` on create and PATCH), because the home list's filter
+  runs on it.
+
+**The home "Search threads…" filter is FTS now** (`threads._apply_text_filter`). Its scope (title and
+description), sort and per-group paging are unchanged, but it matches whole words: `meet` no longer
+finds "meeting", while `meet*` does. It falls back to the old `LIKE` when the query has no words at
+all (`%`, emoji), and per row for any thread with no index doc yet (the first boot after deploy).
+
+**`reconcile()` is the safety net, and it is cheap.** One SQL fingerprint per scope (every column a
+renderer reads, plus `updated_at`, plus a `RENDER_VERSION` constant) is compared against
+`search_scopes.source_fp`. It runs at startup, on Rebuild, and every
+`search_reconcile_interval_minutes` (60, env-only). A write path that forgets to mark therefore
+leaves the index stale for at most an hour. It is never wrong about ownership, because ownership is
+read from the source rows on every render. It also repairs a docs/FTS mismatch in either direction.
+**Bump `RENDER_VERSION` whenever a renderer's output changes**, or old rows keep looking current.
+
+**Indexing only reads.** It never writes `raw_json` (speaker renames re-render segments from
+`speaker_map` through the same `transcript.build_transcript` the page uses), `updated_at` or
+`seen_at`. It indexes only email bodies that are already stored and never hydrates. Search tables
+are not summarizer input: `attached_context` does not read them, and a test asserts it.
+
+**User input never reaches MATCH raw.** `to_match_expr` rebuilds the query from alphanumeric runs
+only, each one double-quoted, so `"`, `-`, `*`, `:`, `(` and `NEAR`/`OR`/`AND` are literal, and emoji
+are dropped. Bare words are ANDed. `"phrases"` and `prefix*` (≥2 chars) survive. **CJK is a known
+gap:** unicode61 does not segment Han text, so a substring inside a CJK run does not match. A trigram
+side index is a reviewer-approved follow-up.
+
+**Semantic search fails open, and its brute force is deliberate.** The query is embedded once and
+dot-producted in pure Python against the owner's L2-normalised float32 vectors. That is fine up to
+about `SCALE_LIMIT` (25k chunks per owner, ~250 ms); past that the status page warns, and the next
+step is sqlite-vec or numpy. Disabled, unreachable, or nothing embedded yet all return keyword
+results with `semantic: {available: false, reason}`, never a 5xx.
+
+**Embeddings are keyed on `(kind, chunk ref, model)` with a `text_sha256`.** Changing
+`embedding_model` hides the old vectors at once. They are pruned only after the new model covers
+every scope, so semantic search is never empty mid-migration. Unchanged text is never re-sent, which
+is also why Rebuild keeps vectors and only re-checks them. Transcripts are embedded in windows of 8
+segments / ~800 chars overlapping by 2, carrying the first segment's `start_sec`. Notes, summaries
+and email bodies are packed by paragraph up to 1,200 chars. A semantic hit resolves to its document
+through a join on `search_docs`, which is also what hides a deleted document's vectors.
+
+**The indexer is not a job.** It is one always-started task (`jobs/search_indexer.py`) that is
+nudged by write paths through `search_index.set_waker`. It waits `SETTLE_SEC` after a nudge, because
+the nudge can arrive before the writer commits. It is off in the test suite
+(`MMN_SEARCH_INDEXER_ENABLED=0` in `conftest.py`), and tests drive `search_index.index_all_now`
+instead, so nothing races an assertion. The reasons for not using the job queue are the same as for
+email hydration.
 
 ## Integrations (calendar + email)
 

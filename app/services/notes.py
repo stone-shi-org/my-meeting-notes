@@ -29,6 +29,7 @@ from app.errors import NotFoundError
 from app.logging_config import get_logger
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import search_index
 
 log = get_logger("notes")
 
@@ -145,6 +146,7 @@ def create_note(
         """,
         (thread_id, meeting_id, title, body, source, model, title_model, user_id, now, now),
     )
+    search_index.mark_thread(conn, thread_id)
     return require_note(conn, thread_id, cur.lastrowid)  # type: ignore[arg-type]
 
 
@@ -199,6 +201,7 @@ def update_note(
             f"UPDATE thread_notes SET {assignments} WHERE id = ? AND thread_id = ?",
             [*updates.values(), note_id, thread_id],
         )
+        search_index.mark_thread(conn, thread_id)
 
     return require_note(conn, thread_id, note_id)
 
@@ -216,6 +219,7 @@ def append_to_note(conn: sqlite3.Connection, *, thread_id: int, note_id: int, bo
         "UPDATE thread_notes SET body = ?, updated_at = ? WHERE id = ? AND thread_id = ?",
         (combined, utcnow(), note_id, thread_id),
     )
+    search_index.mark_thread(conn, thread_id)
     return require_note(conn, thread_id, note_id)
 
 
@@ -235,6 +239,7 @@ def move_note(
         "UPDATE thread_notes SET thread_id = ?, meeting_id = NULL WHERE id = ? AND thread_id = ?",
         (target_thread_id, note_id, thread_id),
     )
+    search_index.mark_thread(conn, thread_id, target_thread_id)
     return require_note(conn, target_thread_id, note_id)
 
 
@@ -244,3 +249,5 @@ def delete_note(conn: sqlite3.Connection, *, thread_id: int, note_id: int) -> No
     )
     if cur.rowcount == 0:
         raise NotFoundError("Note not found on this thread")
+    search_index.delete_doc(conn, "note", note_id)
+    search_index.mark_thread(conn, thread_id)

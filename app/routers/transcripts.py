@@ -14,6 +14,7 @@ from app.deps import CurrentUser, active_user, assert_can_access, get_db
 from app.errors import NotFoundError, ValidationError
 from app.jobs import queue as queue_mod
 from app.logging_config import get_logger
+from app.services import search_index
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
 from pydantic import BaseModel, Field
@@ -294,6 +295,9 @@ def update_speakers(
     conn.execute(
         "UPDATE meetings SET updated_at = ? WHERE id = ?", (utcnow(), meeting_id)
     )
+    # Segments are re-rendered from speaker_map by the indexer; raw_json is
+    # never touched (MMN-15).
+    search_index.mark_meeting(conn, meeting_id)
 
     transcript = transcript_svc.get_transcript(conn, meeting_id)
     return {"ok": True, "speakers": transcript_svc.speaker_stats(transcript)}

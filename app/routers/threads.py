@@ -37,6 +37,7 @@ from app.services import followups as followups_svc
 from app.services import matching as matching_svc
 from app.services import next_step as next_step_svc
 from app.services import notes as notes_svc
+from app.services import search_index
 from app.services import threads as threads_svc
 
 router = APIRouter(prefix="/api/threads", tags=["threads"])
@@ -171,6 +172,9 @@ def update_thread(
             f"UPDATE threads SET {assignments} WHERE id = ?",
             [*updates.values(), thread_id],
         )
+        # Synchronous: a renamed thread must be findable by its new name in
+        # the home filter on the very next request (MMN-15).
+        search_index.index_thread_doc(conn, thread_id)
 
     return _thread_out(conn, threads_svc.require_thread(conn, thread_id))
 
@@ -202,6 +206,8 @@ def delete_thread(
                 shutil.rmtree(target, ignore_errors=True)
                 removed += 1
 
+    # Cascades never reach a virtual table, so the index goes explicitly.
+    search_index.delete_thread_scope(conn, thread_id)
     conn.execute("DELETE FROM threads WHERE id = ?", (thread_id,))
     log.info(
         "user %s deleted thread %s (%d meetings, %d audio dirs)",
@@ -518,6 +524,8 @@ def detach_email(
     )
     if cur.rowcount == 0:
         raise NotFoundError("Email not attached to this thread")
+    search_index.delete_doc(conn, "email", email_id)
+    search_index.mark_thread(conn, thread_id)
     return {"ok": True}
 
 
@@ -570,6 +578,8 @@ def detach_event(
     )
     if cur.rowcount == 0:
         raise NotFoundError("Event not attached to this thread")
+    search_index.delete_doc(conn, "event", event_id)
+    search_index.mark_thread(conn, thread_id)
     return {"ok": True}
 
 

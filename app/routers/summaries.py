@@ -12,6 +12,7 @@ from app.deps import CurrentUser, active_user, assert_can_access, get_db
 from app.errors import NotFoundError, ValidationError
 from app.jobs import queue as queue_mod
 from app.logging_config import get_logger
+from app.services import search_index
 from app.services import summarize as summarize_svc
 from app.services import threads as threads_svc
 
@@ -125,6 +126,7 @@ def activate_version(
         "UPDATE meetings SET active_summary_id = ?, updated_at = ? WHERE id = ?",
         (row["id"], utcnow(), meeting_id),
     )
+    search_index.mark_meeting(conn, meeting_id)
     return {"ok": True, "version": version}
 
 
@@ -224,6 +226,7 @@ def update_action_item(
             f"UPDATE action_items SET {assignments} WHERE id = ?",
             [*updates.values(), item_id],
         )
+        search_index.mark_meeting(conn, row["meeting_id"])
 
     updated = conn.execute(
         "SELECT * FROM action_items WHERE id = ?", (item_id,)

@@ -24,6 +24,7 @@ from app.logging_config import get_logger
 from app.services import embeddings as embeddings_svc
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import search_index
 from app.services import threads as threads_svc
 from app.services.providers import loader as providers_svc
 
@@ -853,6 +854,9 @@ def attach_event(
             user_id, utcnow(),
         ),
     )
+    # Thread-scoped, not row-scoped: an ON CONFLICT upsert never says which
+    # row id it touched, and the scope re-render diffs by fingerprint anyway.
+    search_index.mark_thread(conn, thread_id)
 
 
 def attach_email(
@@ -927,6 +931,7 @@ def attach_email(
             email.get("direction"), email.get("integration_id"),
         ),
     )
+    search_index.mark_thread(conn, thread_id)
 
 
 def attach_selected(
@@ -989,6 +994,7 @@ def attach_selected(
                 "UPDATE meetings SET title = ?, updated_at = ? WHERE id = ?",
                 (current + suffix, utcnow(), meeting_id),
             )
+            search_index.mark_meeting(conn, meeting_id)
             title_changed = True
 
     threads_svc.touch_thread(conn, thread_id)

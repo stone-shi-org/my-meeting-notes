@@ -381,6 +381,14 @@ class Settings(BaseSettings):
     embedding_timeout_sec: int = 20
     embedding_min_score: float = 0.3
 
+    # --- search (MMN-15) -----------------------------------------------------
+    # Env-only, deliberately not RUNTIME_KEYS: these are operator knobs, not
+    # something to flip from the UI. The indexer task is on in production; the
+    # test suite switches it off so a background thread never races a test
+    # that drives services/search_index.py directly.
+    search_indexer_enabled: bool = True
+    search_reconcile_interval_minutes: int = 60
+
     # --- matching -----------------------------------------------------------
     # See RUNTIME_KEYS above -- blank means "use llm_model", resolved in
     # matching.rank_sync, not here.

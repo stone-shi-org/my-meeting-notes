@@ -1,9 +1,10 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query';
-import { Layers, Plus, Search, X } from 'lucide-react';
+import { ArrowLeft, Layers, Plus, Search, X } from 'lucide-react';
 import { useState } from 'react';
 import { Link, useSearchParams } from 'react-router-dom';
 import { UpcomingPanel } from '@/components/calendar/UpcomingPanel';
 import { HomeChatPanel } from '@/components/home/HomeChatPanel';
+import { SearchResults } from '@/components/search/SearchResults';
 import { GroupedThreadList, NewGroupButton } from '@/components/thread/ThreadGroups';
 import { Button } from '@/components/ui/Button';
 import { Card, Input, Label, Select, Textarea } from '@/components/ui/primitives';
@@ -101,19 +102,30 @@ export function ThreadsPage() {
   const q = params.get('q') || '';
   const sort = params.get('sort') || 'updated_at';
   const archived = params.get('archived') === '1';
+  // "Search everything" is a URL param too, so a results page can be shared.
+  const search = (params.get('search') || '').trim();
 
-  const [searchDraft, setSearchDraft] = useState(q);
+  const [searchDraft, setSearchDraft] = useState(q || search);
+  const draft = searchDraft.trim();
 
   // The filters stay in the URL because they are what a shared link means.
   // Paging does not: each group pages on its own now, and one `?page=` cannot
   // say which of five sections it belongs to.
-  function update(next: Record<string, string | null>) {
+  function update(next: Record<string, string | null>, opts: { push?: boolean } = {}) {
     const merged = new URLSearchParams(params);
     for (const [key, value] of Object.entries(next)) {
       if (value === null || value === '') merged.delete(key);
       else merged.set(key, value);
     }
-    setParams(merged, { replace: true });
+    setParams(merged, { replace: !opts.push });
+  }
+
+  // Opening results is a navigation (Back returns to the list); refining or
+  // filtering is not. Enter still applies the thread filter exactly as it
+  // always did, so "Back to threads" lands on the list that query narrows.
+  function searchEverything() {
+    if (!draft) return;
+    update({ q: draft, search: draft }, { push: !search });
   }
 
   return (
@@ -144,7 +156,8 @@ export function ThreadsPage() {
             className="relative min-w-[220px] flex-1"
             onSubmit={(e) => {
               e.preventDefault();
-              update({ q: searchDraft });
+              if (draft) searchEverything();
+              else update({ q: null, search: null });
             }}
           >
             <Search
@@ -164,7 +177,7 @@ export function ThreadsPage() {
                 aria-label="Clear search"
                 onClick={() => {
                   setSearchDraft('');
-                  update({ q: null });
+                  update({ q: null, search: null });
                 }}
                 className="absolute right-2 top-1/2 -translate-y-1/2 rounded p-1 text-fg-faint hover:text-fg"
               >
@@ -196,54 +209,82 @@ export function ThreadsPage() {
             Archived only
           </label>
         </div>
+
+        {draft && draft !== search ? (
+          <button
+            type="button"
+            onClick={searchEverything}
+            className="mt-2 flex w-full items-center gap-2 rounded px-3 py-2 text-left text-sm text-fg-muted transition-colors duration-fast hover:bg-surface-2 hover:text-fg"
+          >
+            <Search className="size-4 shrink-0 text-fg-faint" aria-hidden />
+            <span className="min-w-0 truncate">
+              Search everything for <span className="font-medium text-fg">“{draft}”</span>
+            </span>
+          </button>
+        ) : null}
       </Card>
 
-      <GroupedThreadList
-        filters={{ q, sort, archived }}
-        emptyState={
-          <EmptyState
-            icon={Layers}
-            title={
-              q
-                ? 'No threads match that search'
-                : archived
-                  ? 'Nothing is archived'
-                  : 'No threads yet'
-            }
-            description={
-              q
-                ? 'Try a different word, or clear the search.'
-                : archived
-                  ? 'Archiving a thread from its own page keeps everything and stops it being checked for follow-ups.'
-                  : 'Upload a recording and we will create the first thread for you.'
-            }
-            action={
-              q ? (
-                <Button
-                  variant="secondary"
-                  onClick={() => {
-                    setSearchDraft('');
-                    update({ q: null });
-                  }}
-                >
-                  Clear search
-                </Button>
-              ) : archived ? (
-                <Button variant="secondary" onClick={() => update({ archived: null })}>
-                  Show active threads
-                </Button>
-              ) : (
-                <Button variant="primary" asChild>
-                  <Link to="/meetings/new">
-                    <Plus />
-                    Upload a recording
-                  </Link>
-                </Button>
-              )
-            }
-          />
-        }
-      />
+      {search ? (
+        <section aria-label="Search results" className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <h2 className="font-display text-lg font-semibold">
+              Everything matching “{search}”
+            </h2>
+            <Button variant="ghost" size="sm" onClick={() => update({ search: null })}>
+              <ArrowLeft />
+              Back to threads
+            </Button>
+          </div>
+          <SearchResults q={search} />
+        </section>
+      ) : (
+        <GroupedThreadList
+          filters={{ q, sort, archived }}
+          emptyState={
+            <EmptyState
+              icon={Layers}
+              title={
+                q
+                  ? 'No threads match that search'
+                  : archived
+                    ? 'Nothing is archived'
+                    : 'No threads yet'
+              }
+              description={
+                q
+                  ? 'Try a different word, or clear the search.'
+                  : archived
+                    ? 'Archiving a thread from its own page keeps everything and stops it being checked for follow-ups.'
+                    : 'Upload a recording and we will create the first thread for you.'
+              }
+              action={
+                q ? (
+                  <Button
+                    variant="secondary"
+                    onClick={() => {
+                      setSearchDraft('');
+                      update({ q: null });
+                    }}
+                  >
+                    Clear search
+                  </Button>
+                ) : archived ? (
+                  <Button variant="secondary" onClick={() => update({ archived: null })}>
+                    Show active threads
+                  </Button>
+                ) : (
+                  <Button variant="primary" asChild>
+                    <Link to="/meetings/new">
+                      <Plus />
+                      Upload a recording
+                    </Link>
+                  </Button>
+                )
+              }
+            />
+          }
+        />
+      )}
 
       {/* Below the threads: this page is titled "Threads" and its search and
           paging belong to that list, so the calendar sits after it rather than

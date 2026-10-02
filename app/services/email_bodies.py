@@ -34,6 +34,7 @@ from app.logging_config import get_logger
 from app.services import html_text
 from app.services import llm as llm_svc
 from app.services import prompts as prompts_svc
+from app.services import search_index
 from app.services.providers import loader as providers_svc
 
 log = get_logger("email_bodies")
@@ -286,6 +287,9 @@ def _store(
         conn.execute(
             f"UPDATE thread_emails SET {', '.join(sets)} WHERE id = ?", params
         )
+        # Indexing what hydration just stored -- the index itself never
+        # fetches a body (MMN-15). Not activity either: no touch_thread.
+        search_index.mark_email_thread(conn, row_id)
     # Deliberately no touch_thread() and no seen_at write. Hydrating is the app
     # fetching, not a person reading: bumping updated_at would send a thread to
     # the top of the home list just for being opened, and writing seen_at would
@@ -300,6 +304,7 @@ def _store_summary(
             "UPDATE thread_emails SET ai_summary = ?, ai_summary_model = ? WHERE id = ?",
             (summary[:1000], model, row_id),
         )
+        search_index.mark_email_thread(conn, row_id)
 
 
 # --------------------------------------------------------------------------- #

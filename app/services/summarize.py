@@ -21,6 +21,7 @@ from app.logging_config import get_logger
 from app.services import llm as llm_svc
 from app.services import matching as matching_svc
 from app.services import prompts as prompts_svc
+from app.services import search_index
 from app.services import threads as threads_svc
 from app.services import transcript as transcript_svc
 
@@ -318,6 +319,9 @@ def generate_summary_sync(
             "UPDATE meetings SET active_summary_id = ?, updated_at = ? WHERE id = ?",
             (summary_id, utcnow(), meeting_id),
         )
+        # The old summary and its action items drop out of the index and the
+        # new ones come in -- plus any speaker names suggested just below.
+        search_index.mark_meeting(conn, meeting_id)
 
         # Names the model heard in the transcript become greyed suggestions.
         suggested_any = False

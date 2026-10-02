@@ -17,6 +17,7 @@ from app.logging_config import configure_logging, get_logger
 from app.jobs.email_backfill_scheduler import AutoBackfillScheduler, set_backfill_scheduler
 from app.jobs.queue import JobQueue, set_queue
 from app.jobs.scheduler import AutoMatchScheduler, set_scheduler
+from app.jobs.search_indexer import SearchIndexer, set_indexer
 from app.jobs.telegram_poller import TelegramPoller, set_poller
 from app.routers import (
     auth,
@@ -35,6 +36,7 @@ from app.routers import (
     meeting_chat,
     meetings,
     notes,
+    search,
     settings_api,
     summaries,
     system,
@@ -101,8 +103,21 @@ async def lifespan(app: FastAPI):
     set_backfill_scheduler(backfill_scheduler)
     backfill_scheduler.start()
 
+    # Search indexing (MMN-15): reconcile at startup, then drain the dirty
+    # queue as write paths fill it. Env-gated (MMN_SEARCH_INDEXER_ENABLED)
+    # rather than a runtime setting, because there is no reason to switch it
+    # off in production -- only the test suite does, to drive it by hand.
+    indexer = None
+    if settings.search_indexer_enabled:
+        indexer = SearchIndexer()
+        set_indexer(indexer)
+        indexer.start()
+
     yield
 
+    if indexer is not None:
+        await indexer.stop()
+        set_indexer(None)
     await backfill_scheduler.stop()
     set_backfill_scheduler(None)
     await poller.stop()
@@ -184,6 +199,7 @@ def create_app() -> FastAPI:
     app.include_router(jobs.router)
     app.include_router(settings_api.router)
     app.include_router(email_backfill.router)
+    app.include_router(search.router)
     app.include_router(chat.router)
     app.include_router(home_chat.router)
     app.include_router(notes.router)

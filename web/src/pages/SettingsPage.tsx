@@ -50,6 +50,7 @@ const TABS = [
   { to: '/settings/integrations', label: 'Integrations' },
   { to: '/settings/matching', label: 'Matching' },
   { to: '/settings/email-backfill', label: 'Email backfill' },
+  { to: '/settings/search', label: 'Search' },
   { to: '/settings/telegram', label: 'Telegram' },
   { to: '/settings/prompt', label: 'Prompts' },
   { to: '/settings/insight-types', label: 'Meeting types', adminOnly: true },

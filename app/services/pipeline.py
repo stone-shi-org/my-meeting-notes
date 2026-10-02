@@ -20,6 +20,7 @@ from app.jobs.queue import JobContext, register_job
 from app.logging_config import get_logger
 from app.services import audio as audio_svc
 from app.services import telegram as telegram_svc
+from app.services import search_index
 from app.services import threads as threads_svc
 
 log = get_logger("pipeline")
@@ -569,6 +570,7 @@ def _persist_diarization(
             "UPDATE meetings SET active_diarization_id = ?, updated_at = ? WHERE id = ?",
             (diar_id, utcnow(), meeting_id),
         )
+        search_index.mark_meeting(conn, meeting_id)
 
     ctx.event(
         f"{len(segments)} segments, {payload.get('num_speakers', '?')} speakers",

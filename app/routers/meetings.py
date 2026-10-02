@@ -30,6 +30,7 @@ from app.schemas import (
     Page,
 )
 from app.services import audio as audio_svc
+from app.services import search_index
 from app.services import threads as threads_svc
 
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
@@ -461,6 +462,7 @@ def update_meeting(
             f"UPDATE meetings SET {assignments} WHERE id = ?",
             [*updates.values(), meeting_id],
         )
+        search_index.mark_meeting(conn, meeting_id)
         threads_svc.touch_thread(conn, row["thread_id"])
 
     return MeetingOut(**threads_svc.row_to_meeting(threads_svc.require_meeting(conn, meeting_id)))
@@ -505,6 +507,7 @@ def delete_meeting(
     if purged:
         shutil.rmtree(target, ignore_errors=True)
 
+    search_index.delete_meeting_scope(conn, meeting_id)
     conn.execute("DELETE FROM meetings WHERE id = ?", (meeting_id,))
     threads_svc.touch_thread(conn, thread_id)
 

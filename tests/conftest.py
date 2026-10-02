@@ -49,6 +49,9 @@ def isolated_settings(tmp_path, monkeypatch):
     """Point the app at a throwaway data dir and reset the Settings cache."""
     monkeypatch.setenv("MMN_DATA_DIR", str(tmp_path / "data"))
     monkeypatch.setenv("MMN_JOB_CONCURRENCY", "0")
+    # The background search indexer (MMN-15) would otherwise race tests that
+    # drive services/search_index.py directly. Indexing is exercised explicitly.
+    monkeypatch.setenv("MMN_SEARCH_INDEXER_ENABLED", "0")
     monkeypatch.setenv("MMN_LLM_API_KEY", "test-llm-key")
     # Pinned so no test generates (and leaves behind) a data/secret.key, and so
     # the key does not change between tests that share encrypted fixtures.
