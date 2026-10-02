@@ -958,6 +958,8 @@ export interface McpToolInfo {
 export interface ApiTokenList {
   mcp_enabled: boolean;
   endpoint_path: string;
+  /** Every MCP protocol revision /mcp negotiates, newest first. */
+  protocol_versions: string[];
   tools: McpToolInfo[];
   tokens: ApiToken[];
 }

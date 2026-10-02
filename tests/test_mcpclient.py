@@ -254,6 +254,17 @@ class TestCalls:
         with pytest.raises(MCPError, match="Unknown tool"):
             await c.call_tool("nope", {})
 
+    async def test_a_real_sdk_tool_error_is_raised_not_returned(self):
+        """The SDK's own result type, not the fake: mcp 2.x spells the flag
+        `is_error`, and reading only `isError` would turn every tool failure
+        into an empty, successful-looking result."""
+        from mcp_types import CallToolResult, TextContent
+
+        result = CallToolResult(content=[TextContent(type="text", text="boom")], is_error=True)
+        c = client_with(FakeSession(result=result))
+        with pytest.raises(MCPError, match="boom"):
+            await c.call_tool("search_events", {})
+
 
 # --------------------------------------------------------------------------- #
 # Failure classification

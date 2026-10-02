@@ -35,6 +35,7 @@ function listing(over: Partial<ApiTokenList> = {}): ApiTokenList {
   return {
     mcp_enabled: true,
     endpoint_path: '/mcp',
+    protocol_versions: ['2026-07-28', '2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'],
     tools: [
       { name: 'search', title: 'Search everything', write: false },
       { name: 'get_meeting_transcript', title: 'Get a meeting transcript', write: false },
@@ -92,6 +93,19 @@ describe('McpServerPanel', () => {
     expect(screen.getByText('create_note')).toBeInTheDocument();
     expect(screen.getByText('No tokens yet.')).toBeInTheDocument();
     expect(screen.getByLabelText('MCP server is on')).toBeInTheDocument();
+  });
+
+  it('lists the negotiated protocol versions, newest marked as latest', async () => {
+    renderPanel();
+    const list = await screen.findByRole('list', { name: 'Supported MCP protocol versions' });
+    const items = within(list).getAllByRole('listitem').map((li) => li.textContent);
+    expect(items).toEqual([
+      '2026-07-28 (latest)',
+      '2025-11-25',
+      '2025-06-18',
+      '2025-03-26',
+      '2024-11-05',
+    ]);
   });
 
   it('reflects the switch from app settings, falling back to the listing', async () => {

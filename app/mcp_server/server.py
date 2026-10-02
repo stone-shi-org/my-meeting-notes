@@ -11,20 +11,30 @@ Wiring, and the reasons for each choice:
   ``/mcp`` to ``/mcp/`` -- a redirect several clients do not follow on POST.
   ``/mcp`` and ``/mcp/`` are both registered explicitly instead, ahead of the
   SPA catch-all that would otherwise swallow them.
-* **DNS-rebinding protection is off, explicitly.** FastMCP switches it on when
-  constructed with the default ``host="127.0.0.1"``, allowing only localhost
-  ``Host`` headers -- which would 421 every request that arrives through the
+* **DNS-rebinding protection is off, explicitly.** The SDK's own app factory
+  switches it on for a localhost bind, allowing only localhost ``Host`` headers -- which would 421 every request that arrives through the
   LAN address or the reverse proxy. The bearer token is the gate here; a
   rebinding attacker in a victim's browser cannot attach it.
-* **A fresh FastMCP + session manager per ``create_app()``.** The session
+* **A fresh MCPServer + session manager per ``create_app()``.** The session
   manager's ``run()`` may be entered exactly once per instance, and the test
   suite builds (and starts) a new app per test.
+* **Every protocol revision, negotiated by the SDK (mcp 2.x).** The session
+  manager routes on the ``MCP-Protocol-Version`` header: absent, or one of the
+  ``initialize``-handshake revisions (2024-11-05 .. 2025-11-25), goes to the
+  legacy stateless path, where ``initialize`` negotiates the version (an
+  unknown offer is answered with the newest handshake revision, per spec).
+  Anything else goes to the 2026-07-28 per-request path -- no handshake,
+  ``server/discover`` advertises what is supported, and an unsupported
+  version is refused with ``-32022`` listing the supported ones. Nothing here
+  re-implements either era; :data:`SUPPORTED_PROTOCOL_VERSIONS` only reports
+  what the SDK speaks, for the Settings page and the tests.
 
 Authentication happens here, before the SDK sees the request. The principal
 travels on the ASGI scope (``scope["state"]["mcp_principal"]``); the SDK hands
-each tool call the originating Starlette request, which is how the tools find
-it again. A contextvar would have to survive the session manager's task-group
-hop; the request object is passed explicitly.
+every handler the originating Starlette request (``ctx.request``) on both
+paths, which is how the scope middleware and the tools find it again. A
+contextvar would have to survive the session manager's task-group hop; the
+request object is passed explicitly.
 """
 
 from __future__ import annotations
@@ -34,17 +44,15 @@ import inspect
 import json
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import Context, MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.shared.version import SUPPORTED_PROTOCOL_VERSIONS
-from mcp.types import Tool as MCPTool
-from mcp.types import ToolAnnotations
-
-# Accept modern MCP clients advertising the 2026-07-28 protocol version
-if "2026-07-28" not in SUPPORTED_PROTOCOL_VERSIONS:
-    SUPPORTED_PROTOCOL_VERSIONS.append("2026-07-28")
+from mcp_types import CallToolResult, ListToolsResult, TextContent, ToolAnnotations
+from mcp_types.version import (
+    HANDSHAKE_PROTOCOL_VERSIONS,
+    MODERN_PROTOCOL_VERSIONS,
+)
 
 from app import __version__
 from app.config import effective, get_settings
@@ -72,52 +80,75 @@ are AI-written -- do not cite those back as evidence.
 """
 
 
-class MeetingNotesMCP(FastMCP):
-    """FastMCP with two per-request behaviours the stock server lacks: the
-    tool list depends on the caller's token scope, and so does permission to
-    call a write tool."""
+#: Every revision /mcp negotiates, oldest first. Read from the SDK so it can
+#: never claim a version the installed transport does not actually speak.
+SUPPORTED_PROTOCOL_VERSIONS: tuple[str, ...] = (*HANDSHAKE_PROTOCOL_VERSIONS, *MODERN_PROTOCOL_VERSIONS)
 
-    def current_principal(self) -> Principal:
-        ctx = self.get_context()
-        request = ctx.request_context.request if ctx.request_context else None
-        principal = request.scope.get("state", {}).get(PRINCIPAL_KEY) if request else None
-        if principal is None:  # pragma: no cover - the endpoint always sets it
-            raise ToolError("unauthenticated: no principal on this request")
-        return principal
 
-    async def list_tools(self) -> list[MCPTool]:
-        tools = await super().list_tools()
-        if self.current_principal().can_write:
-            return tools
-        # Hidden, not merely refused: a read-only agent should not be offered
-        # tools it can never use.
-        return [t for t in tools if t.name not in WRITE_TOOL_NAMES]
+def principal_of(request) -> Principal | None:
+    """The principal ``MCPEndpoint`` stored on this request's ASGI scope."""
+    if request is None:
+        return None
+    return request.scope.get("state", {}).get(PRINCIPAL_KEY)
 
-    async def call_tool(self, name: str, arguments: dict[str, Any]):
-        if name in WRITE_TOOL_NAMES and not self.current_principal().can_write:
-            # Same message as an unknown tool, since that is what it is to
-            # this caller -- list_tools never offered it.
-            raise ToolError(f"Unknown tool: {name}")
-        return await super().call_tool(name, arguments)
+
+class ScopeMiddleware:
+    """Token scope, enforced once for both protocol eras.
+
+    A read-only token never sees the write tools in ``tools/list`` -- hidden,
+    not merely refused -- and a ``tools/call`` naming one is answered exactly
+    like an unknown tool, because that is what it is to this caller. Runs as
+    SDK middleware (before params validation, on the legacy and 2026-07-28
+    paths alike) rather than inside each tool, so the rule lives in one place.
+    """
+
+    async def __call__(self, ctx, call_next):
+        principal = principal_of(ctx.request)
+        read_only = principal is not None and not principal.can_write
+        if read_only and ctx.method == "tools/call":
+            name = (ctx.params or {}).get("name")
+            if name in WRITE_TOOL_NAMES:
+                return CallToolResult(
+                    content=[TextContent(type="text", text=f"Unknown tool: {name}")], is_error=True
+                )
+        result = await call_next(ctx)
+        if read_only and ctx.method == "tools/list":
+            result = _without_write_tools(result)
+        return result
+
+
+def _without_write_tools(result):
+    if isinstance(result, ListToolsResult):
+        return result.model_copy(
+            update={"tools": [t for t in result.tools if t.name not in WRITE_TOOL_NAMES]}
+        )
+    if isinstance(result, dict) and isinstance(result.get("tools"), list):  # pragma: no cover
+        return {**result, "tools": [t for t in result["tools"] if t.get("name") not in WRITE_TOOL_NAMES]}
+    return result  # pragma: no cover
 
 
 def _error_text(exc: AppError) -> str:
     return f"[{exc.code}] {exc.message}"
 
 
-def _make_tool(server: MeetingNotesMCP, spec: ToolSpec):
+def _make_tool(spec: ToolSpec):
     """Wrap a plain ``tools.py`` function as an MCP tool.
 
     The schema comes from the function's own signature minus the leading
     ``conn``/``principal`` parameters, so the docstring and type hints in
-    tools.py are the single source of what a client sees.
+    tools.py are the single source of what a client sees. A keyword-only
+    ``mcp_context`` parameter typed :class:`Context` is appended: the SDK
+    injects the request context there and leaves it out of the schema.
     """
     sig = inspect.signature(spec.fn, eval_str=True)
     skip = 1 if spec.is_async else 2
     params = list(sig.parameters.values())[skip:]
+    ctx_param = inspect.Parameter("mcp_context", inspect.Parameter.KEYWORD_ONLY, annotation=Context)
 
-    async def runner(**kwargs: Any) -> dict:
-        principal = server.current_principal()
+    async def runner(mcp_context: Context, **kwargs: Any) -> dict:
+        principal = principal_of(mcp_context.request_context.request)
+        if principal is None:  # pragma: no cover - the endpoint always sets it
+            raise ToolError("[auth_required] no principal on this request")
         try:
             if spec.is_async:
                 return await spec.fn(principal, **kwargs)
@@ -132,13 +163,14 @@ def _make_tool(server: MeetingNotesMCP, spec: ToolSpec):
 
     runner.__name__ = spec.name
     runner.__doc__ = inspect.getdoc(spec.fn)
-    # Every tool returns a JSON object; FastMCP needs the parametrised form to
+    # Every tool returns a JSON object; the SDK needs the parametrised form to
     # emit it as structuredContent (a bare `dict` is rejected).
     runner.__signature__ = sig.replace(  # type: ignore[attr-defined]
-        parameters=params, return_annotation=dict[str, Any]
+        parameters=[*params, ctx_param], return_annotation=dict[str, Any]
     )
     runner.__annotations__ = {
         **{p.name: p.annotation for p in params},
+        "mcp_context": Context,
         "return": dict[str, Any],
     }
     return runner
@@ -151,28 +183,25 @@ def _run_sync(spec: ToolSpec, principal: Principal, kwargs: dict) -> dict:
         return spec.fn(conn, principal, **kwargs)
 
 
-def build_server() -> MeetingNotesMCP:
-    server = MeetingNotesMCP(
+def build_server() -> MCPServer:
+    server = MCPServer(
         name="my-meeting-notes",
         instructions=INSTRUCTIONS,
-        stateless_http=True,
-        json_response=True,
-        transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False),
+        version=__version__,
+        middleware=[ScopeMiddleware()],
     )
-    # FastMCP stamps its own SDK version into serverInfo otherwise.
-    server._mcp_server.version = __version__
     for spec in TOOL_SPECS:
         server.add_tool(
-            _make_tool(server, spec),
+            _make_tool(spec),
             name=spec.name,
             title=spec.title,
             annotations=ToolAnnotations(
                 title=spec.title,
-                readOnlyHint=not spec.write,
-                destructiveHint=False,
-                idempotentHint=not spec.write,
+                read_only_hint=not spec.write,
+                destructive_hint=False,
+                idempotent_hint=not spec.write,
                 # Only the live calendar read reaches outside this app's data.
-                openWorldHint=spec.name == "get_upcoming_events",
+                open_world_hint=spec.name == "get_upcoming_events",
             ),
             structured_output=True,
         )
@@ -185,10 +214,10 @@ class MCPEndpoint:
     def __init__(self) -> None:
         self.server = build_server()
         self.session_manager = StreamableHTTPSessionManager(
-            app=self.server._mcp_server,
+            app=self.server._lowlevel_server,
             json_response=True,
             stateless=True,
-            security_settings=self.server.settings.transport_security,
+            security_settings=TransportSecuritySettings(enable_dns_rebinding_protection=False),
         )
 
     def run(self):

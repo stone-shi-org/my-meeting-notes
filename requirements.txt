@@ -6,13 +6,20 @@ pydantic-settings>=2.0.0
 python-dotenv>=1.0.0
 httpx>=0.28.0
 pyyaml>=6.0
-mcp>=1.0.0,<2
-# Fernet, for encrypting integration credentials at rest. Already arrives as an
-# mcp transitive dep, but pinned here because we now import it directly.
+# MCP SDK v2 (MMN-14): the /mcp server negotiates every protocol revision from
+# 2024-11-05 through 2026-07-28, which v1 cannot speak. v2 renamed FastMCP to
+# MCPServer, made the wire types snake_case (`is_error`, not `isError`) and
+# brings its own HTTP stack (httpx2 + httpcore2, alongside -- not replacing --
+# the httpx this app and respx use). This replaces the earlier `mcp<2` pin,
+# which existed because the v1 code had not been ported yet; it has now.
+# Capped below 3 so the next major is a deliberate migration, not a surprise
+# at image build.
+mcp>=2.2,<3
+# Fernet, for encrypting integration credentials at rest. Also arrives via
+# mcp's pyjwt[crypto], but pinned here because we import it directly.
 cryptography>=42.0.0
-# SSE client for consuming the LLM proxy's streamed chat completions. Already
-# arrives as an mcp transitive dep (its SSE transport), but pinned here because
-# app/services/llm.py now imports it directly for the chat streaming endpoint.
+# SSE client for consuming the LLM proxy's streamed chat completions. Pinned
+# because app/services/llm.py imports it directly (mcp v2 no longer pulls it in).
 httpx-sse>=0.4.0
 # iCalendar parsing and recurrence expansion for CalDAV. icalendar alone does not
 # expand RRULEs -- upstream calls it out of scope -- and hand-rolling EXDATE,

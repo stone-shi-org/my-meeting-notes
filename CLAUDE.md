@@ -506,6 +506,32 @@ Integrations) shows the endpoint, the tools, the on/off switch and the caller's 
 bearer and gets plain JSON, so there is no `Mcp-Session-Id` to keep sticky behind a proxy and no
 SSE stream for one to buffer. Every tool is request/response, so nothing is lost.
 
+**Every protocol revision, negotiated by the SDK — which is why this needs `mcp` 2.x.** /mcp speaks
+2024-11-05, 2025-03-26, 2025-06-18, 2025-11-25 and 2026-07-28. 2026-07-28 is a different wire, not
+a new number: no `initialize` handshake, the version and client capabilities in every request's
+`params._meta` (mirrored into `MCP-Protocol-Version` / `Mcp-Method` / `Mcp-Name` headers),
+`server/discover` instead of a handshake, `resultType` on results. v1 of the SDK cannot speak it, and
+appending the string to v1's `SUPPORTED_PROTOCOL_VERSIONS` (a brief workaround on main, now removed)
+made `initialize` echo "2026-07-28" while still speaking the 2025 wire — a claim, not support.
+The v2 session manager routes on the `MCP-Protocol-Version` header: absent or a handshake revision →
+the legacy stateless path, where `initialize` agrees to any of the four (an unknown offer gets
+2025-11-25 back, per the handshake rules); anything else → the per-request path, which refuses an
+unsupported version with `-32022` and `data.supported`, and a header/envelope disagreement with
+`-32020`. `server/discover` lists only `2026-07-28` — the versions usable *on that wire*; older
+clients negotiate through `initialize` instead. The app re-implements none of this.
+`server.SUPPORTED_PROTOCOL_VERSIONS` is read from `mcp_types.version` so it can never advertise a
+revision the installed transport does not speak; Settings and the tests read it from there.
+
+**mcp 2.x moved things.** `FastMCP` is `mcp.server.mcpserver.MCPServer`; there is no
+`get_context()`, so the tool wrapper declares a `Context`-typed `mcp_context` parameter (injected,
+kept out of the schema) and reads `request_context.request`; token scope is a `ServerMiddleware`
+(`ScopeMiddleware`), which sees both eras before params validation. Wire types are snake_case in
+Python — **`CallToolResult.is_error`, not `isError`** — and `mcpclient.call_tool` used to read only
+`isError`, which under v2 silently turns every calendar/email tool failure into an empty result
+("no events"). `mcpclient.is_tool_error` checks both, and a test uses the SDK's real result type
+rather than the fake. The SDK brings its own HTTP stack (`httpx2`/`httpcore2`) alongside, not
+instead of, the `httpx` the app and respx use.
+
 **Two raw `Route`s, not `app.mount`, and before the SPA catch-all.** Mounting the SDK's Starlette
 app at `/mcp` gives `/mcp/mcp`, and a mount 307-redirects bare `/mcp` to `/mcp/` — a redirect
 several clients do not follow on POST. Registered after `_mount_spa` it would be answered with
@@ -516,11 +542,6 @@ several clients do not follow on POST. Registered after `_mount_spa` it would be
 the LAN address or the reverse proxy. `server.py` passes `TransportSecuritySettings` explicitly with
 it off; the bearer token is the gate, and a rebinding page in someone's browser cannot attach it.
 A test sends `Host: 192.168.1.20:4020`.
-
-**Modern protocol negotiation (`2026-07-28`).** MCP SDK 1.x only listed protocol versions up to
-`2025-11-25` in `SUPPORTED_PROTOCOL_VERSIONS`, causing it to reject modern clients sending
-`mcp-protocol-version: 2026-07-28` with a 400 Bad Request. `server.py` appends `2026-07-28` so
-modern clients connect and negotiate cleanly.
 
 **The session manager's `run()` may be entered once per instance**, so `create_app()` builds a fresh
 `MCPEndpoint` every time (the suite builds an app per test) and `lifespan` enters it around `yield`.

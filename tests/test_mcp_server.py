@@ -175,7 +175,13 @@ def test_initialize_and_list(client, alice_token):
     assert "get_meeting_transcript" in tool_names(client, alice_token)
 
 
-def test_initialize_and_call_with_modern_protocol_version_2026_07_28(client, alice_token):
+def test_a_2026_07_28_header_on_a_handshake_style_request_is_refused_with_a_reason(client, alice_token):
+    """2026-07-28 has no `initialize`: a request declaring that version must
+    carry the per-request `_meta` envelope. The earlier mcp-1.x workaround
+    (appending the string to the SDK's version list) answered this with a
+    2025-era handshake that merely echoed "2026-07-28" -- claiming a protocol
+    it did not speak. Now it is a clear JSON-RPC refusal naming what is missing;
+    a real 2026-07-28 client is covered by the `modern(...)` tests below."""
     resp = rpc(
         client,
         alice_token,
@@ -183,27 +189,10 @@ def test_initialize_and_call_with_modern_protocol_version_2026_07_28(client, ali
         {"protocolVersion": "2026-07-28", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
         headers={"mcp-protocol-version": "2026-07-28"},
     )
-    assert resp.status_code == 200, resp.text
-    info = resp.json()["result"]
-    assert info["protocolVersion"] == "2026-07-28"
-    assert info["serverInfo"]["name"] == "my-meeting-notes"
-
-    # Direct tool listing with modern protocol version header
-    list_resp = rpc(client, alice_token, "tools/list", headers={"mcp-protocol-version": "2026-07-28"})
-    assert list_resp.status_code == 200, list_resp.text
-    names = {t["name"] for t in list_resp.json()["result"]["tools"]}
-    assert "search" in names
-
-    # Direct tool call with modern protocol version header
-    call_resp = rpc(
-        client,
-        alice_token,
-        "tools/call",
-        {"name": "list_meetings", "arguments": {}},
-        headers={"mcp-protocol-version": "2026-07-28"},
-    )
-    assert call_resp.status_code == 200, call_resp.text
-    assert call_resp.json()["result"]["structuredContent"]["total"] == 0
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["code"] == -32602
+    assert "io.modelcontextprotocol/protocolVersion" in error["message"]
 
 
 def test_trailing_slash_and_a_lan_host_header_both_work(client, alice_token):
@@ -272,6 +261,160 @@ def test_switching_the_server_off_is_a_404(client, admin_client, alice_token):
 def test_the_spa_catch_all_does_not_shadow_mcp(client):
     resp = client.get("/mcp")
     assert resp.status_code == 401  # ours, not index.html / spa_not_built
+
+
+# --------------------------------------------------------------------------- #
+# Protocol versions and negotiation
+# --------------------------------------------------------------------------- #
+
+MODERN = "2026-07-28"
+HANDSHAKE_VERSIONS = ["2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"]
+
+
+def modern(client, token, method, params=None, *, version=MODERN, name=None, headers=None):
+    """A 2026-07-28 request: no handshake, the version in both the
+    `MCP-Protocol-Version` header and the per-request `_meta` envelope, and the
+    method (and tool name) mirrored into `Mcp-Method` / `Mcp-Name`."""
+    hdrs = {"Accept": ACCEPT, "MCP-Protocol-Version": version, "Mcp-Method": method}
+    if token is not None:
+        hdrs["Authorization"] = f"Bearer {token}"
+    if name is not None:
+        hdrs["Mcp-Name"] = name
+    hdrs.update(headers or {})
+    body_params = dict(params or {})
+    body_params["_meta"] = {
+        "io.modelcontextprotocol/protocolVersion": version,
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "test", "version": "1"},
+    }
+    return client.post(
+        "/mcp", json={"jsonrpc": "2.0", "id": 7, "method": method, "params": body_params}, headers=hdrs
+    )
+
+
+def modern_call(client, token, tool, **arguments):
+    resp = modern(client, token, "tools/call", {"name": tool, "arguments": arguments}, name=tool)
+    assert resp.status_code == 200, resp.text
+    return resp.json()["result"]
+
+
+def test_the_server_reports_every_revision_it_speaks():
+    from app.mcp_server.server import SUPPORTED_PROTOCOL_VERSIONS
+
+    assert SUPPORTED_PROTOCOL_VERSIONS == (*HANDSHAKE_VERSIONS, MODERN)
+
+
+@pytest.mark.parametrize("version", HANDSHAKE_VERSIONS)
+def test_initialize_agrees_to_every_handshake_revision(client, alice_token, version):
+    resp = rpc(
+        client,
+        alice_token,
+        "initialize",
+        {"protocolVersion": version, "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["result"]["protocolVersion"] == version
+
+
+def test_initialize_counter_offers_the_newest_handshake_revision_for_an_unknown_one(client, alice_token):
+    """Per the handshake rules: a version the server does not know is answered
+    with one it does, and the client decides whether it can live with that."""
+    resp = rpc(
+        client,
+        alice_token,
+        "initialize",
+        {"protocolVersion": "2099-01-01", "capabilities": {}, "clientInfo": {"name": "t", "version": "1"}},
+    )
+    assert resp.json()["result"]["protocolVersion"] == "2025-11-25"
+
+
+@pytest.mark.parametrize("version", HANDSHAKE_VERSIONS)
+def test_a_negotiated_older_revision_keeps_working_after_the_handshake(client, alice_token, version):
+    resp = rpc(client, alice_token, "tools/list", headers={"MCP-Protocol-Version": version})
+    assert resp.status_code == 200, resp.text
+    assert "search" in {t["name"] for t in resp.json()["result"]["tools"]}
+
+
+def test_modern_discover_advertises_the_per_request_revision(client, alice_token):
+    resp = modern(client, alice_token, "server/discover")
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["result"]
+    assert result["supportedVersions"] == [MODERN]
+    assert "tools" in result["capabilities"]
+    assert result["instructions"].startswith("My Meeting Notes")
+    assert result["_meta"]["io.modelcontextprotocol/serverInfo"]["name"] == "my-meeting-notes"
+
+
+def test_modern_tools_list_and_call_without_a_handshake(client, alice_token, world):
+    resp = modern(client, alice_token, "tools/list")
+    assert resp.status_code == 200, resp.text
+    result = resp.json()["result"]
+    assert result["resultType"] == "complete"
+    assert "get_meeting_transcript" in {t["name"] for t in result["tools"]}
+
+    out = modern_call(client, alice_token, "list_meetings", since=ago(7)[:10])
+    assert not out["isError"]
+    assert [m["title"] for m in out["structuredContent"]["meetings"]] == ["Candidate debrief", "Weekly standup"]
+
+    transcript = modern_call(client, alice_token, "get_meeting_transcript", meeting_id=world["standup"], format="text")
+    assert "Priya: Morning." in transcript["structuredContent"]["text"]
+
+
+def test_modern_tool_errors_and_isolation(client, other_user_client, world):
+    bob = make_token(other_user_client)
+    out = modern_call(client, bob, "get_meeting", meeting_id=world["standup"])
+    assert out["isError"] is True
+    assert "[not_found]" in out["content"][0]["text"]
+
+
+def test_modern_scope_hides_and_refuses_write_tools(client, user_client, alice_token, world):
+    names = {t["name"] for t in modern(client, alice_token, "tools/list").json()["result"]["tools"]}
+    assert not (names & WRITE_TOOLS)
+    refused = modern_call(client, alice_token, "create_note", thread_id=world["atlas"], body="x")
+    assert refused["isError"] is True and "Unknown tool" in refused["content"][0]["text"]
+
+    rw = make_token(user_client, scope="read_write")
+    names = {t["name"] for t in modern(client, rw, "tools/list").json()["result"]["tools"]}
+    assert WRITE_TOOLS <= names
+    note = modern_call(client, rw, "create_note", thread_id=world["atlas"], body="Via 2026-07-28.", title="Modern")
+    assert note["structuredContent"]["source"] == "mcp"
+
+
+def test_an_unsupported_modern_revision_is_refused_with_the_supported_list(client, alice_token):
+    resp = modern(client, alice_token, "tools/list", version="2027-01-01")
+    assert resp.status_code == 400
+    error = resp.json()["error"]
+    assert error["code"] == -32022
+    assert error["data"] == {"supported": [MODERN], "requested": "2027-01-01"}
+
+
+def test_modern_header_and_envelope_must_agree(client, alice_token):
+    mismatch = modern(client, alice_token, "tools/list", headers={"Mcp-Method": "tools/call"})
+    assert mismatch.status_code == 400 and mismatch.json()["error"]["code"] == -32020
+
+    no_envelope = client.post(
+        "/mcp",
+        json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
+        headers={
+            "Authorization": f"Bearer {alice_token}",
+            "Accept": ACCEPT,
+            "MCP-Protocol-Version": MODERN,
+            "Mcp-Method": "tools/list",
+        },
+    )
+    assert no_envelope.status_code == 400 and no_envelope.json()["error"]["code"] == -32602
+
+
+def test_modern_requests_still_need_a_token_and_a_lan_host_is_fine(client, alice_token):
+    assert modern(client, None, "server/discover").status_code == 401
+    assert modern(client, "mmn_bogus", "tools/list").status_code == 401
+    lan = modern(client, alice_token, "tools/list", headers={"Host": "192.168.1.20:4020"})
+    assert lan.status_code == 200, lan.text
+
+
+def test_the_settings_listing_reports_the_versions_newest_first(user_client):
+    listed = user_client.get("/api/tokens").json()
+    assert listed["protocol_versions"] == [MODERN, *reversed(HANDSHAKE_VERSIONS)]
 
 
 # --------------------------------------------------------------------------- #

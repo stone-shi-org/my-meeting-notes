@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from app.config import effective
 from app.deps import CurrentUser, active_user, get_db
 from app.logging_config import get_logger
+from app.mcp_server.server import SUPPORTED_PROTOCOL_VERSIONS
 from app.mcp_server.tools import TOOL_SPECS
 from app.services import api_tokens as tokens_svc
 
@@ -40,6 +41,8 @@ def list_tokens(
     return {
         "mcp_enabled": bool(effective(conn, "mcp_enabled")),
         "endpoint_path": "/mcp",
+        # Newest first, as the Settings page lists them.
+        "protocol_versions": list(reversed(SUPPORTED_PROTOCOL_VERSIONS)),
         "tools": [
             {"name": spec.name, "title": spec.title, "write": spec.write}
             for spec in TOOL_SPECS

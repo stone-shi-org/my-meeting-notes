@@ -82,6 +82,17 @@ def parse_tool_result(result: Any) -> list[dict]:
     return out
 
 
+def is_tool_error(result: Any) -> bool:
+    """Whether a ``tools/call`` result is a tool-level failure.
+
+    mcp 2.x types are snake_case (``is_error``); 1.x was ``isError``. Reading
+    only the old spelling silently turns every tool error into an empty result
+    -- a failed calendar search would look like "no events" -- so both are
+    checked.
+    """
+    return bool(getattr(result, "is_error", None) or getattr(result, "isError", None))
+
+
 class MCPClient:
     def __init__(self, config: MCPServerConfig):
         self.config = config
@@ -216,7 +227,7 @@ class MCPClient:
         async def run():
             async with self._session() as session:
                 result = await session.call_tool(name, arguments)
-                if getattr(result, "isError", False):
+                if is_tool_error(result):
                     text = ""
                     for block in getattr(result, "content", None) or []:
                         text += getattr(block, "text", "") or ""

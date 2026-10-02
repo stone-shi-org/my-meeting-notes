@@ -200,6 +200,10 @@ their own token and only ever sees their own data.
 
    Claude Desktop goes through `mcp-remote` (the JSON is on the same page).
 
+Any MCP protocol revision from 2024-11-05 to 2026-07-28 works: newer clients use 2026-07-28's
+per-request wire, older ones negotiate their own version with the usual `initialize` handshake.
+Settings → MCP server lists the supported versions.
+
 Tokens work with `/mcp` only, never the rest of the API. Revoke one from the same page. An admin can
 switch the whole server off (it then answers 404) without revoking anyone's tokens. In development,
 Vite does not proxy `/mcp` — connect clients to the backend on `:4020` directly.

@@ -373,6 +373,26 @@ export function McpServerPanel() {
           <CodeBlock label="Endpoint (streamable HTTP)" text={url} />
         </div>
 
+        {data.protocol_versions.length > 0 ? (
+          <div className="mt-3">
+            <p className="text-xs font-medium text-fg-muted">MCP protocol versions</p>
+            <ul aria-label="Supported MCP protocol versions" className="mt-1.5 flex flex-wrap gap-1.5">
+              {data.protocol_versions.map((v, i) => (
+                <li key={v}>
+                  <Badge variant={i === 0 ? 'primary' : 'neutral'} className="font-mono">
+                    {v}
+                    {i === 0 ? ' (latest)' : ''}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+            <p className="mt-1.5 text-xs text-fg-subtle">
+              Negotiated automatically: newer clients use the latest revision, older ones fall back to
+              the version they ask for.
+            </p>
+          </div>
+        ) : null}
+
         <details className="mt-4 text-sm">
           <summary className="cursor-pointer text-fg-muted hover:text-fg">
             {data.tools.length} tools available
