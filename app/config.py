@@ -383,7 +383,7 @@ class Settings(BaseSettings):
     embedding_base_url: str = "https://llm.internal.example/v1"
     embedding_api_key: str = ""
     embedding_model: str = "lmstudio/text-embedding-qwen3-embedding-0.6b"
-    embedding_timeout_sec: int = 20
+    embedding_timeout_sec: int = 120
     embedding_min_score: float = 0.3
 
     # --- search (MMN-15) -----------------------------------------------------
