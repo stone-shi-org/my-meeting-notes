@@ -54,7 +54,7 @@ def test_empty_db_value_falls_back_rather_than_disabling(conn):
     "key,stored,expected",
     [
         ("llm_timeout_sec", "120", 120),
-        ("llm_temperature", "0.7", 0.7),
+        ("embedding_min_score", "0.7", 0.7),
         ("llm_ssl_verify", "false", False),
         ("llm_ssl_verify", "TRUE", True),
         ("match_max_candidates", "5", 5),

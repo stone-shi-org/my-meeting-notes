@@ -78,7 +78,7 @@ def build_payload(
     system: str,
     user: str,
     *,
-    temperature: float = 0.2,
+    temperature: float | None = None,
     max_tokens: int | None = None,
 ) -> dict:
     payload = {
@@ -87,11 +87,12 @@ def build_payload(
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "temperature": temperature,
         # Both hardcoded, not caller-supplied: see the module docstring.
         "stream": False,
         "include_reasoning": False,
     }
+    if temperature is not None:
+        payload["temperature"] = temperature
     if max_tokens:
         payload["max_tokens"] = max_tokens
     return payload
@@ -99,7 +100,7 @@ def build_payload(
 
 class LLMConfig:
     def __init__(self, base_url: str, api_key: str, model: str, ssl_verify: bool,
-                 timeout: int, temperature: float):
+                 timeout: int, temperature: float | None = None):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model = model
@@ -115,7 +116,6 @@ class LLMConfig:
             model=model_override or effective(conn, "llm_model"),
             ssl_verify=effective(conn, "llm_ssl_verify"),
             timeout=effective(conn, "llm_timeout_sec"),
-            temperature=effective(conn, "llm_temperature"),
         )
 
     @property
@@ -515,7 +515,6 @@ def test_connection(config: LLMConfig) -> dict:
                 config.model,
                 "Reply with exactly one word.",
                 f"Reply with the single word: ok (ref {nonce})",
-                temperature=0,
                 max_tokens=512,
             ),
         )

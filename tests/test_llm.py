@@ -22,7 +22,7 @@ def config(**kw) -> llm_svc.LLMConfig:
         model=kw.get("model", "some/model"),
         ssl_verify=kw.get("ssl_verify", True),
         timeout=kw.get("timeout", 30),
-        temperature=kw.get("temperature", 0.2),
+        temperature=kw.get("temperature"),
     )
 
 
@@ -58,6 +58,10 @@ class TestPayload:
     def test_max_tokens_is_omitted_unless_asked_for(self):
         assert "max_tokens" not in llm_svc.build_payload("m", "s", "u")
         assert llm_svc.build_payload("m", "s", "u", max_tokens=500)["max_tokens"] == 500
+
+    def test_temperature_is_omitted_unless_asked_for(self):
+        assert "temperature" not in llm_svc.build_payload("m", "s", "u")
+        assert llm_svc.build_payload("m", "s", "u", temperature=0.7)["temperature"] == 0.7
 
     @respx.mock
     def test_the_flags_survive_into_the_wire_request(self):

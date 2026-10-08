@@ -234,10 +234,11 @@ async def _produce(
         payload = {
             "model": config.model,
             "messages": messages,
-            "temperature": config.temperature,
             "stream": True,
             "include_reasoning": False,
         }
+        if config.temperature is not None:
+            payload["temperature"] = config.temperature
 
         content = ""
         usage: dict = {}

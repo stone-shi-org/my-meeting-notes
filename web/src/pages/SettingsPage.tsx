@@ -758,7 +758,6 @@ export function LlmSettingsPage() {
             hint: 'Use the fully-qualified id from the suggestions (e.g. deepseek/deepseek-v4-flash) -- a bare "deepseek-v4-flash" is listed but not routable on some gateways.',
           },
           { key: 'llm_timeout_sec', label: 'Timeout (seconds)', type: 'number' },
-          { key: 'llm_temperature', label: 'Temperature', type: 'number' },
         ]}
       />
       <SettingsForm

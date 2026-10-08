@@ -789,10 +789,11 @@ async def _produce(
             payload = {
                 "model": config.model,
                 "messages": messages,
-                "temperature": config.temperature,
                 "stream": True,
                 "include_reasoning": False,
             }
+            if config.temperature is not None:
+                payload["temperature"] = config.temperature
             content, usage = await _run_hop(config, payload, queue)
             match = TOOL_RE.match(content.strip())
             if not match:

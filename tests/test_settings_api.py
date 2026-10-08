@@ -202,14 +202,14 @@ def test_types_survive_the_round_trip(admin_client):
         json={
             "values": {
                 "llm_timeout_sec": 120,
-                "llm_temperature": 0.7,
+                "embedding_min_score": 0.7,
                 "llm_ssl_verify": False,
             }
         },
     )
     body = admin_client.get("/api/settings").json()["settings"]
     assert body["llm_timeout_sec"]["value"] == 120
-    assert body["llm_temperature"]["value"] == 0.7
+    assert body["embedding_min_score"]["value"] == 0.7
     assert body["llm_ssl_verify"]["value"] is False
 
 

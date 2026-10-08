@@ -77,7 +77,6 @@ RUNTIME_KEYS: dict[str, tuple[str, bool]] = {
     "llm_chat_models": ("json", False),
     "llm_ssl_verify": ("bool", False),
     "llm_timeout_sec": ("int", False),
-    "llm_temperature": ("float", False),
     "web_search_base_url": ("str", False),
     "web_search_api_key": ("str", True),
     "web_search_timeout_sec": ("int", False),
@@ -354,7 +353,6 @@ class Settings(BaseSettings):
         return v
     llm_ssl_verify: bool = True
     llm_timeout_sec: int = 600
-    llm_temperature: float = 0.2
     summary_prompt_name: str = "summary_prompt"
     summary_max_input_tokens: int = 24000
 

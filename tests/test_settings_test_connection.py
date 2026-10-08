@@ -53,7 +53,6 @@ class TestLLMTestConnection:
             model=kw.get("model", "test/model"),
             ssl_verify=True,
             timeout=30,
-            temperature=0.2,
         )
 
     @respx.mock
@@ -78,6 +77,7 @@ class TestLLMTestConnection:
         body = json.loads(route.calls[0].request.content)
         assert body["stream"] is False
         assert body["include_reasoning"] is False
+        assert "temperature" not in body
         # Generous on purpose. A reasoning model's trace is charged against
         # this before any visible content and varies run to run (measured
         # 26-83 tokens for this prompt), so a tight ceiling fails
