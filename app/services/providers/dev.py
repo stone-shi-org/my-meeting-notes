@@ -146,13 +146,24 @@ class DevProvider(BaseProvider):
 
     provider_id = PROVIDER_ID
 
+    def __init__(
+        self,
+        ref: IntegrationRef,
+        config: dict,
+        credentials: dict,
+        *,
+        now: datetime | None = None,
+    ) -> None:
+        super().__init__(ref, config, credentials)
+        self._now = now
+
     # ---------------------------------------------------------------- email
 
     async def search_emails(
         self, *, keywords: list[str], start: datetime, end: datetime
     ) -> list[EmailCandidate]:
         rows = await asyncio.to_thread(self._fetch, "dev_emails")
-        now = datetime.now(timezone.utc)
+        now = self._now or datetime.now(timezone.utc)
 
         out: list[EmailCandidate] = []
         for row in rows:
@@ -229,7 +240,7 @@ class DevProvider(BaseProvider):
         self, *, query: str | None, start: datetime, end: datetime
     ) -> list[EventCandidate]:
         rows = await asyncio.to_thread(self._fetch, "dev_events")
-        now = datetime.now(timezone.utc)
+        now = self._now or datetime.now(timezone.utc)
         # The calendar side is handed one pre-joined string rather than a list.
         keywords = [k for k in (query or "").split() if k]
 

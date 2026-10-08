@@ -109,8 +109,8 @@ describe('BestOfTwoAnswers', () => {
     await user.click(screen.getByRole('button', { name: 'Close Model A answer' }));
 
     expect(api.del).not.toHaveBeenCalled();
-    expect(vi.mocked(streamChat).mock.calls[0][3].aborted).toBe(true);
-    expect(vi.mocked(streamChat).mock.calls[1][3].aborted).toBe(false);
+    expect(vi.mocked(streamChat).mock.calls[0]?.[3]?.aborted).toBe(true);
+    expect(vi.mocked(streamChat).mock.calls[1]?.[3]?.aborted).toBe(false);
     expect(onChoose).toHaveBeenCalledWith('b');
   });
 

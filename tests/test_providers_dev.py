@@ -68,6 +68,7 @@ def provider() -> dev.DevProvider:
         ),
         {},
         {},
+        now=NOW,
     )
 
 
