@@ -2,12 +2,14 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Minimize2, Send, Sparkles, Square, Trash2 } from 'lucide-react';
 import { useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { BestOfTwoAnswers, type BestOfTwoOutcome } from '@/components/chat/BestOfTwoAnswers';
+import { ChatModelPicker } from '@/components/chat/ChatModelPicker';
 import { ChatPanelResizeHandle } from '@/components/chat/ChatPanelResizeHandle';
 import { FollowUpChips } from '@/components/chat/FollowUpChips';
 import { MessageBubble, ThinkingBubble } from '@/components/chat/MessageBubble';
 import { Button } from '@/components/ui/Button';
 import { ConfirmDialog } from '@/components/ui/ConfirmDialog';
-import { Select, Textarea } from '@/components/ui/primitives';
+import { Textarea } from '@/components/ui/primitives';
 import { useAutoResizeTextarea } from '@/hooks/useAutoResizeTextarea';
 import { useChatDraft } from '@/hooks/useChatDraft';
 import { useChatModel } from '@/hooks/useChatModel';
@@ -49,6 +51,10 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const chatModel = useChatModel();
+  // Best of 2: the prompt currently shown as two side-by-side answers, if any.
+  // `key` remounts the comparison for each send.
+  const [compare, setCompare] = useState<{ message: string; models: [string, string]; key: number } | null>(null);
+  const [compareBusy, setCompareBusy] = useState(false);
   const chatWidth = useChatPanelWidth();
   // Saved answers are filed on the meeting, which puts them on its thread's
   // timeline with the meeting recorded alongside.
@@ -83,7 +89,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     if (pinned) {
       bottomRef.current?.scrollIntoView({ block: 'end' });
     }
-  }, [messages.length, streamingText, expanded, followUps, pinned]);
+  }, [messages.length, streamingText, expanded, followUps, compare, pinned]);
 
   // Abandoning the read on unmount/collapse doesn't stop the answer being
   // generated and saved server-side -- it just stops watching it arrive.
@@ -114,22 +120,24 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
   // same as unmounting does above; the server keeps generating and persisting
   // the answer regardless of whether anyone's still listening.
   useEffect(() => {
-    if (streamingText === null) return;
+    if (streamingText === null && !compareBusy) return;
     function handleKeyDown(e: KeyboardEvent) {
       if (e.key === 'Escape') cancelStream();
     }
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [streamingText]);
+  }, [streamingText, compareBusy]);
 
   function cancelStream() {
     abortRef.current?.abort();
+    setCompare(null);
+    setCompareBusy(false);
     setStreamingText(null);
   }
 
   async function submit(overrideMessage?: string) {
     const message = (overrideMessage ?? draft).trim();
-    if (!message || streamingText !== null) return;
+    if (!message || streamingText !== null || compare) return;
     setDraft('');
     setStreamError(null);
     setFollowUps([]);
@@ -148,6 +156,11 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
       ...(prev ?? []),
       optimisticUser,
     ]);
+    const pair = chatModel.pair;
+    if (pair) {
+      setCompare({ message, models: pair, key: Date.now() });
+      return;
+    }
     setStreamingText('');
 
     const controller = new AbortController();
@@ -184,6 +197,19 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
     }
   }
 
+  // The user closed one of the two answers and the other has finished: it joins
+  // the conversation like any single-model reply, and the panel goes back to normal.
+  function settleCompare(outcome: BestOfTwoOutcome<MeetingChatMessage>) {
+    if (outcome.message) {
+      const kept = outcome.message;
+      queryClient.setQueryData<MeetingChatMessage[]>(['meeting-chat', meetingId], (prev) => [...(prev ?? []), kept]);
+    }
+    if (outcome.error) setStreamError(outcome.error);
+    setFollowUps(outcome.suggestions);
+    setCompare(null);
+    setCompareBusy(false);
+  }
+
   function minimize() {
     setExpanded(false);
     textareaRef.current?.blur();
@@ -209,6 +235,8 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
           : // bottom-18 clears the PlayerBar (~3.5rem) plus a small gap --
             // bottom-4 would sit the pill right on top of its right-hand controls.
             'bottom-18 right-4 w-64 rounded-full border shadow-lg motion-safe:animate-glow sm:w-80',
+        // Two answers side by side need more than the single-answer minimum.
+        expanded && compare && 'sm:min-w-[44rem]',
       )}
       style={expanded ? ({ '--chat-panel-width': `${chatWidth.width}px` } as React.CSSProperties) : undefined}
     >
@@ -222,7 +250,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
               <button
                 type="button"
                 onClick={() => setConfirmClearOpen(true)}
-                disabled={streamingText !== null || clear.isPending}
+                disabled={streamingText !== null || compare !== null || clear.isPending}
                 aria-label="Clear conversation"
                 title="Clear conversation"
                 className="rounded p-1 text-fg-faint hover:bg-surface-2 hover:text-danger-ink disabled:opacity-50"
@@ -241,20 +269,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
             </button>
           </div>
 
-          {chatModel.options.length > 1 && (
-            <Select
-              aria-label="Chat model"
-              className="mt-2 h-7 text-xs"
-              value={chatModel.selected ?? ''}
-              onChange={(e) => chatModel.setModel(e.target.value)}
-            >
-              {chatModel.options.map((opt) => (
-                <option key={opt.id} value={opt.id}>
-                  {opt.name}
-                </option>
-              ))}
-            </Select>
-          )}
+          <ChatModelPicker chatModel={chatModel} disabled={compare !== null} />
         </div>
       )}
 
@@ -268,7 +283,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
             <p className="text-sm text-fg-subtle">Loading conversation…</p>
           )}
 
-          {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && (
+          {!messagesQuery.isLoading && messages.length === 0 && streamingText === null && !compare && (
             <>
               <p className="text-sm text-fg-subtle">
                 Ask about this meeting's transcript — what was said, who said it, exact
@@ -322,6 +337,21 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
                 <MessageBubble role="assistant" content={streamingText} isStreaming />
               )}
             </div>
+          )}
+
+          {compare && (
+            <BestOfTwoAnswers<MeetingChatMessage>
+              key={compare.key}
+              path={`/meetings/${meetingId}/chat`}
+              message={compare.message}
+              models={compare.models}
+              modelName={(id) => chatModel.options.find((o) => o.id === id)?.name ?? id}
+              discardPath={(id) => `/meetings/${meetingId}/chat/messages/${id}`}
+              bubbleProps={{ scope: noteScope, question: compare.message }}
+              onChoose={chatModel.setModel}
+              onSettled={settleCompare}
+              onBusyChange={setCompareBusy}
+            />
           )}
 
           <div ref={bottomRef} />
@@ -384,7 +414,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
             )}
           />
           {expanded ? (
-            streamingText !== null ? (
+            streamingText !== null || compareBusy ? (
               <Button
                 size="icon"
                 variant="secondary"
@@ -399,7 +429,7 @@ export function TranscriptChatPanel({ meetingId }: { meetingId: string }) {
                 size="icon"
                 variant="primary"
                 aria-label="Send"
-                disabled={!draft.trim()}
+                disabled={!draft.trim() || compare !== null}
                 onClick={() => void submit()}
               >
                 <Send />

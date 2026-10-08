@@ -30,7 +30,7 @@ app/
                  calendar settings_api system notes search api_tokens
   services/      audio diarize llm prompts summarize transcript matching upcoming pipeline
                  threads users integrations secretstore mcpclient followups notes
-                 search search_index search_embed api_tokens
+                 search search_index search_embed api_tokens chat_compare
   mcp_server/    tools.py (one plain function per tool) · auth.py · server.py (/mcp wiring)
   services/providers/   base registry loader tokens oauth query · google mcp   <- one file per backend
   jobs/          queue.py (asyncio pool) · registry.py (stages + weights)
@@ -150,6 +150,29 @@ on the thread page) always runs regardless, same manual-action-always-wins rule 
 (`note_title_prompt.md`) run through `to_thread`; if it errors or comes back empty the note is filed
 under `derive_title` — its own first line, markdown stripped — with `title_model` NULL to record that
 nothing generated it. The body is the part worth keeping.
+
+## Best of 2 (chat)
+
+A "Best of 2" checkbox next to the model selector in all three chat panels (home, thread, meeting).
+With it on, a second selector appears and one send goes to both models; the answers render side by
+side (`BestOfTwoAnswers.tsx`), each with a close X. Closing one returns the panel to single-model mode
+with the *surviving* model selected.
+
+**There is no compare endpoint: it is two ordinary chat requests**, one per model, so each persists
+its own question and answer. Closing a side that had already finished calls
+`DELETE .../chat/messages/{id}` (`services/chat_compare.discard_reply`), which removes that assistant
+row and the user row directly before it; a side still streaming is just aborted, and an aborted
+request is never persisted. That "the row directly before" rule is sound only because `_produce`
+inserts the pair in one synchronous block with no `await` between them. Only an *assistant* row can be
+discarded, so the route can never delete a user's own words.
+
+**Settling waits for the stream to close, not for `done`.** Follow-up chips arrive after `done`;
+handing the answer back on `done` would unmount the component and abandon them.
+
+The toggle and second model are per-panel `useState`, not remembered: it doubles the cost of every
+send. Known limit: thread chat's `attach_*` tools run in *both* requests (attach is an idempotent
+upsert), so the closed model may have attached something the kept one did not. Navigating away or
+pressing Stop mid-compare leaves any side that had already finished saved as a normal pair.
 
 ## Groups
 

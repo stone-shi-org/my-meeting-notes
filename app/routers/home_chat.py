@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.config import get_settings
 from app.deps import CurrentUser, active_user, get_db
 from app.logging_config import get_logger
+from app.services import chat_compare as chat_compare_svc
 from app.services import home_chat as home_chat_svc
 from app.services import llm as llm_svc
 
@@ -38,6 +39,19 @@ def clear_home_chat_messages(
     conn: sqlite3.Connection = Depends(get_db),
 ) -> dict:
     removed = home_chat_svc.clear_messages(conn, user.id)
+    return {"ok": True, "removed": removed}
+
+
+@router.delete("/chat/messages/{message_id}")
+def discard_chat_reply(
+    message_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Best of 2: drop the answer the user closed, plus the question it answered."""
+    removed = chat_compare_svc.discard_reply(
+        conn, "home_chat_messages", "owner_id = ?", (user.id,), message_id
+    )
     return {"ok": True, "removed": removed}
 
 

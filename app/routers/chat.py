@@ -12,6 +12,7 @@ from app.config import get_settings
 from app.deps import CurrentUser, active_user, assert_can_access, get_db
 from app.logging_config import get_logger
 from app.services import chat as chat_svc
+from app.services import chat_compare as chat_compare_svc
 from app.services import llm as llm_svc
 from app.services import threads as threads_svc
 
@@ -49,6 +50,21 @@ def clear_chat_messages(
 ) -> dict:
     _authorised_thread(conn, thread_id, user)
     removed = chat_svc.clear_messages(conn, thread_id)
+    return {"ok": True, "removed": removed}
+
+
+@router.delete("/{thread_id}/chat/messages/{message_id}")
+def discard_chat_reply(
+    thread_id: int,
+    message_id: int,
+    user: CurrentUser = Depends(active_user),
+    conn: sqlite3.Connection = Depends(get_db),
+) -> dict:
+    """Best of 2: drop the answer the user closed, plus the question it answered."""
+    _authorised_thread(conn, thread_id, user)
+    removed = chat_compare_svc.discard_reply(
+        conn, "chat_messages", "thread_id = ?", (thread_id,), message_id
+    )
     return {"ok": True, "removed": removed}
 
 
