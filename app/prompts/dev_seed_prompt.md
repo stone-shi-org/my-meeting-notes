@@ -2,7 +2,6 @@
 name: dev_seed_prompt
 version: 1
 description: Invent plausible email and calendar traffic around a thread, for testing the matcher.
-temperature: 0.7
 required_placeholders: [thread_title, meetings, count]
 ---
 

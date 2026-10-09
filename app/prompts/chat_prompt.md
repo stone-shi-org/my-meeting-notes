@@ -2,7 +2,6 @@
 name: chat_prompt
 version: 3
 description: Answer questions about a thread using its meetings, calendar events, emails and notes.
-temperature: 0.2
 required_placeholders: [thread_digest]
 ---
 

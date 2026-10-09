@@ -2,7 +2,6 @@
 name: email_summary_prompt
 version: 1
 description: One-line summary of a single email body, for display and for AI context.
-temperature: 0.1
 required_placeholders: [email_body]
 ---
 

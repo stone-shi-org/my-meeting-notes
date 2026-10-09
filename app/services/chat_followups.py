@@ -39,8 +39,6 @@ def generate_sync(
             config = llm_svc.LLMConfig.from_db(conn, model_override=model)
 
         prompt = prompts_svc.load("chat_followups_prompt")
-        if prompt.temperature is not None:
-            config.temperature = prompt.temperature
 
         system, user = prompt.render({"question": question, "answer": answer})
         parsed, _, _ = llm_svc.chat_json(config, system, user)

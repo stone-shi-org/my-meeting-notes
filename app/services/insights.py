@@ -62,8 +62,6 @@ def analyze(
     # `prompt` column, not a file on disk -- see insight_types_svc's module
     # docstring for why that table exists at all.
     prompt = prompts_svc.load_override(meeting_type, type_row["prompt"])
-    if prompt.temperature is not None:
-        config.temperature = prompt.temperature
 
     # Keep the tail: the most recent lines are what a new question, topic
     # shift or action item is judged against, and the previous_* lists

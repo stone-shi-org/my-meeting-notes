@@ -2,7 +2,6 @@
 name: match_rank_prompt
 version: 2
 description: Rank calendar events and emails by how well they match a meeting.
-temperature: 0.1
 required_placeholders: [payload]
 ---
 

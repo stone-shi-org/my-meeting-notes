@@ -2,7 +2,6 @@
 name: meeting_chat_prompt
 version: 2
 description: Answer questions about a single meeting using its transcript and attached context.
-temperature: 0.2
 required_placeholders: [meeting_digest]
 ---
 

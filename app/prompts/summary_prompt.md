@@ -2,7 +2,6 @@
 name: summary_prompt
 version: 1
 description: Meeting summary and action-item extraction from a diarized transcript.
-temperature: 0.2
 required_placeholders: [transcript]
 ---
 

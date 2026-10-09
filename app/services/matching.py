@@ -646,8 +646,6 @@ def rank_sync(db_path, context: dict, gathered: dict, model: str | None = None) 
         }
 
     prompt = prompts_svc.load("match_rank_prompt")
-    if prompt.temperature is not None:
-        config.temperature = prompt.temperature
 
     payload = build_rank_payload(context, events, emails)
     system, user = prompt.render(

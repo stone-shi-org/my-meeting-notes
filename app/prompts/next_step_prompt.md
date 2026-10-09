@@ -2,7 +2,6 @@
 name: next_step_prompt
 version: 4
 description: Suggest the single most useful next step for a thread.
-temperature: 0.2
 required_placeholders: [payload]
 ---
 

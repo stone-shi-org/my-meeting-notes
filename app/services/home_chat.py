@@ -371,8 +371,6 @@ async def _generate_reply(
 
     prompt = prompts_svc.load("home_chat_prompt")
     system, _ = prompt.render({"home_digest": digest})
-    if prompt.temperature is not None:
-        config.temperature = prompt.temperature
 
     messages: list[dict] = [
         {"role": "system", "content": system},

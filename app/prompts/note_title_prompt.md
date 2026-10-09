@@ -2,7 +2,6 @@
 name: note_title_prompt
 version: 1
 description: Name a note saved out of an AI chat reply.
-temperature: 0.1
 required_placeholders: [note_body]
 ---
 

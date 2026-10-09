@@ -335,8 +335,6 @@ def summarise_sync(
             config = llm_svc.LLMConfig.from_db(conn, model_override=model)
 
         prompt = prompts_svc.load("email_summary_prompt")
-        if prompt.temperature is not None:
-            config.temperature = prompt.temperature
 
         system, user = prompt.render(
             {

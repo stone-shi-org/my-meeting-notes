@@ -2,7 +2,6 @@
 name: chat_followups_prompt
 version: 1
 description: Suggest follow-up questions after an AI chat answer.
-temperature: 0.4
 required_placeholders: [question, answer]
 ---
 

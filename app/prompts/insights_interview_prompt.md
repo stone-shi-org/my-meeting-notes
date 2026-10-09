@@ -1,8 +1,7 @@
 ---
 name: insights_interview_prompt
-version: 5
+version: 6
 description: Live interview tracker -- questions worth prepping, topics, and follow-up commitments.
-temperature: 0.3
 required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
 ---
 

@@ -200,8 +200,6 @@ def generate_sync(db_path, thread_id: int, model: str | None = None) -> dict:
         fingerprint = threads_svc.compute_next_step_fingerprint(conn, thread_id)
 
     prompt = prompts_svc.load("next_step_prompt")
-    if prompt.temperature is not None:
-        config.temperature = prompt.temperature
 
     system, user = prompt.render(
         {"payload": json.dumps(payload, ensure_ascii=False, indent=2)}

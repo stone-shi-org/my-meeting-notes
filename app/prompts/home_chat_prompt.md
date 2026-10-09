@@ -2,7 +2,6 @@
 name: home_chat_prompt
 version: 1
 description: Answer questions across every thread on the home screen.
-temperature: 0.2
 required_placeholders: [home_digest]
 ---
 

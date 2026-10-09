@@ -767,8 +767,6 @@ async def _produce(
 
         prompt = prompts_svc.load("chat_prompt")
         system, _ = prompt.render({"thread_digest": digest})
-        if prompt.temperature is not None:
-            config.temperature = prompt.temperature
 
         messages: list[dict] = [
             {"role": "system", "content": system},

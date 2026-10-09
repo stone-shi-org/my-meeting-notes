@@ -178,7 +178,6 @@ def generate_summary_sync(
     model: str | None = None,
     prompt_name: str | None = None,
     prompt_override: str | None = None,
-    temperature: float | None = None,
     created_by: int | None = None,
 ) -> int:
     """Produce one new summary version. Blocking; call via asyncio.to_thread."""
@@ -199,11 +198,6 @@ def generate_summary_sync(
     else:
         prompt = prompts_svc.load(chosen_prompt_name)
         prompt_version = prompt.version
-
-    if temperature is not None:
-        config.temperature = temperature
-    elif prompt.temperature is not None:
-        config.temperature = prompt.temperature
 
     segments = transcript["segments"]
     full_text = _render_segments(segments)
@@ -281,7 +275,7 @@ def generate_summary_sync(
             VALUES (?, ?, 1, 'ok', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                meeting_id, version, config.model, config.base_url, config.temperature,
+                meeting_id, version, config.model, config.base_url, None,
                 prompt.name, prompt_version, prompt.sha256, prompt.body,
                 diarization["id"], fingerprint,
                 result.tldr, result.summary_md, result.title_suggestion,

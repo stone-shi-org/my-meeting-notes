@@ -1,8 +1,7 @@
 ---
 name: insights_general_prompt
-version: 6
+version: 7
 description: Live meeting tracker -- topics, open questions and action items.
-temperature: 0.2
 required_placeholders: [transcript, previous_topics, previous_questions, previous_action_items]
 ---
 

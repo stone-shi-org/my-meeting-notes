@@ -2352,7 +2352,6 @@ function InsightTypeCard({ type }: { type: InsightTypeDetail }) {
 const NEW_TYPE_PROMPT_STUB = [
   '---',
   'name: custom_insight_type',
-  'temperature: 0.2',
   '---',
   '',
   '## SYSTEM',

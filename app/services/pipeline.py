@@ -687,7 +687,6 @@ async def run_summarize(ctx: JobContext) -> dict:
         model=ctx.payload.get("model"),
         prompt_name=ctx.payload.get("prompt_name"),
         prompt_override=ctx.payload.get("prompt_override"),
-        temperature=ctx.payload.get("temperature"),
         created_by=ctx.payload.get("user_id"),
     )
 

@@ -331,8 +331,6 @@ async def _produce_generate(
             config = llm_svc.LLMConfig.from_db(conn, model_override=model)
 
         prompt = prompts_svc.load("dev_seed_prompt")
-        if prompt.temperature is not None:
-            config.temperature = prompt.temperature
 
         meetings_text = "\n".join(
             f"- id={m['id']} | {m['meeting_at']} | {m['title']}"

@@ -24,7 +24,6 @@ class RegenerateRequest(BaseModel):
     model: str | None = None
     prompt_name: str | None = None
     prompt_override: str | None = Field(default=None, max_length=100_000)
-    temperature: float | None = Field(default=None, ge=0.0, le=2.0)
 
 
 class ActionItemUpdate(BaseModel):
@@ -157,7 +156,6 @@ async def regenerate_summary(
             "model": payload.model,
             "prompt_name": payload.prompt_name,
             "prompt_override": payload.prompt_override,
-            "temperature": payload.temperature,
             "user_id": user.id,
         },
     )
