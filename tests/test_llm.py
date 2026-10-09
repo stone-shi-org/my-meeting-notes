@@ -59,20 +59,21 @@ class TestPayload:
         assert "max_tokens" not in llm_svc.build_payload("m", "s", "u")
         assert llm_svc.build_payload("m", "s", "u", max_tokens=500)["max_tokens"] == 500
 
-    def test_temperature_is_omitted_unless_asked_for(self):
+    def test_temperature_is_never_sent_in_payload(self):
         assert "temperature" not in llm_svc.build_payload("m", "s", "u")
-        assert llm_svc.build_payload("m", "s", "u", temperature=0.7)["temperature"] == 0.7
+        assert "temperature" not in llm_svc.build_payload("m", "s", "u", temperature=0.7)
 
     @respx.mock
     def test_the_flags_survive_into_the_wire_request(self):
         route = respx.post(URL).mock(
             return_value=httpx.Response(200, json=completion('{"ok": true}'))
         )
-        llm_svc.chat_json(config(), "sys", "usr")
+        llm_svc.chat_json(config(temperature=0.7), "sys", "usr")
 
         body = json.loads(route.calls[0].request.content)
         assert body["stream"] is False
         assert body["include_reasoning"] is False
+        assert "temperature" not in body
 
     @respx.mock
     def test_bearer_header_is_sent(self):
@@ -89,6 +90,15 @@ class TestPayload:
         )
         llm_svc.chat_json(config(api_key=""), "s", "u")
         assert "authorization" not in route.calls[0].request.headers
+
+    @respx.mock
+    def test_temperature_is_stripped_if_caller_provides_it_in_payload(self):
+        route = respx.post(URL).mock(
+            return_value=httpx.Response(200, json=completion('{"ok": true}'))
+        )
+        llm_svc.chat(config(), {"model": "m", "messages": [], "temperature": 0.5})
+        body = json.loads(route.calls[0].request.content)
+        assert "temperature" not in body
 
 
 # --------------------------------------------------------------------------- #

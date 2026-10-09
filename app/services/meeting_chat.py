@@ -237,8 +237,6 @@ async def _produce(
             "stream": True,
             "include_reasoning": False,
         }
-        if config.temperature is not None:
-            payload["temperature"] = config.temperature
 
         content = ""
         usage: dict = {}

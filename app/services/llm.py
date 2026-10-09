@@ -91,8 +91,6 @@ def build_payload(
         "stream": False,
         "include_reasoning": False,
     }
-    if temperature is not None:
-        payload["temperature"] = temperature
     if max_tokens:
         payload["max_tokens"] = max_tokens
     return payload
@@ -304,6 +302,7 @@ def resolve_chat_model(conn, requested: str | None) -> str | None:
 
 def chat(config: LLMConfig, payload: dict) -> tuple[str, dict]:
     """Blocking POST. Returns ``(content, usage)``."""
+    payload.pop("temperature", None)
     url = f"{config.base_url}/chat/completions"
     try:
         response = httpx.post(
@@ -383,6 +382,7 @@ async def achat_stream(
     so usage is reported through the `usage_out` out-param instead.
     """
     url = f"{config.base_url}/chat/completions"
+    payload.pop("temperature", None)
     saw_content = False
     saw_reasoning = False
 
@@ -447,8 +447,7 @@ def chat_json(
 ) -> tuple[dict, dict, str]:
     """Chat and parse a JSON object. Returns ``(parsed, usage, raw_content)``."""
     payload = build_payload(
-        config.model, system, user,
-        temperature=config.temperature, max_tokens=max_tokens,
+        config.model, system, user, max_tokens=max_tokens,
     )
 
     started = time.monotonic()

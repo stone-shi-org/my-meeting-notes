@@ -277,8 +277,6 @@ async def _stream_llm_json(config: llm_svc.LLMConfig, system: str, user: str,
         "stream": True,
         "include_reasoning": False,
     }
-    if config.temperature is not None:
-        payload["temperature"] = config.temperature
 
     async def _once() -> str:
         raw = ""

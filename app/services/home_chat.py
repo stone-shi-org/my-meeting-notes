@@ -393,8 +393,6 @@ async def _generate_reply(
             "stream": True,
             "include_reasoning": False,
         }
-        if config.temperature is not None:
-            payload["temperature"] = config.temperature
         content, usage = await _run_hop(config, payload, on_token)
         match = TOOL_RE.match(content.strip())
         if not match:

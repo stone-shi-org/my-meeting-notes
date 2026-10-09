@@ -375,6 +375,8 @@ class TestMatchJob:
         assert job["result"]["events"] == 2
         assert job["result"]["emails"] == 2
         assert job["result"]["suggested"] == 2
+        llm_request = json.loads(mock_llm.calls[-1].request.content)
+        assert "temperature" not in llm_request
 
     def test_latest_returns_ranked_candidates(self, user_client, meeting, mock_llm):
         run_match(user_client, meeting["id"])
