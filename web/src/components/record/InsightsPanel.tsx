@@ -26,13 +26,7 @@ import { api } from '@/lib/api';
 import { cn } from '@/lib/cn';
 import type { InsightType, Paginated, SettingEntry, Thread } from '@/types/api';
 
-// Only the most recent entries are worth surfacing live -- a long recording
-// would otherwise grow each section unbounded. The full list still round-
-// trips as previous_topics/previous_questions/previous_action_items (see
-// useInsights), so capping the *display* here never affects what the model
-// carries forward, or what "Add to notes" saves (that reads the full lists,
-// not this capped view).
-const MAX_VISIBLE = 5;
+const AUTO_SCROLL_KEY = 'mmn.insightsAutoScroll';
 
 /** How long the "Saved to ..." confirmation stays up -- same duration
  * MessageBubble's chat "Add to note" flash uses. */
@@ -92,21 +86,33 @@ function FoldCard({
 /**
  * Heading + fixed-height scrollable list -- the same overflow-y-auto recipe
  * LiveTranscriptPanel.tsx and TranscriptPage.tsx use for their own panels,
- * sized down for a sub-section rather than the whole card. `count` is the
- * full (un-capped) list length, shown next to the heading so "showing the
- * last 5 of 12" is visible even though only 5 render.
+ * sized down for a sub-section rather than the whole card. When `autoScroll`
+ * is on, the list pins to the bottom whenever `scrollTrigger` updates (or
+ * when `autoScroll` is toggled back on).
  */
 function InsightSection({
   title,
   count,
   emptyText,
+  autoScroll,
+  scrollTrigger,
   children,
 }: {
   title: string;
   count: number;
   emptyText: string;
+  autoScroll: boolean;
+  scrollTrigger: unknown;
   children: React.ReactNode;
 }) {
+  const listRef = useRef<HTMLUListElement>(null);
+
+  useEffect(() => {
+    const list = listRef.current;
+    if (!autoScroll || !list) return;
+    list.scrollTop = list.scrollHeight;
+  }, [autoScroll, scrollTrigger]);
+
   return (
     <div>
       <h3 className="flex items-baseline gap-1.5 text-xs font-semibold uppercase tracking-wide text-fg-subtle">
@@ -116,7 +122,9 @@ function InsightSection({
       {count === 0 ? (
         <p className="mt-1.5 text-sm text-fg-faint">{emptyText}</p>
       ) : (
-        <ul className="mt-1.5 max-h-56 space-y-2 overflow-y-auto pr-1">{children}</ul>
+        <ul ref={listRef} className="mt-1.5 max-h-56 space-y-2 overflow-y-auto pr-1">
+          {children}
+        </ul>
       )}
     </div>
   );
@@ -451,6 +459,7 @@ export function InsightsPanel({
   sessionKey?: number;
 }) {
   const [meetingType, setMeetingType] = useState<string>('');
+  const [autoScroll, setAutoScroll] = useState(() => localStorage.getItem(AUTO_SCROLL_KEY) !== '0');
   // Manual fold overrides, keyed by topic.title / question.question -- both
   // persist unchanged across polls (the prompts guarantee it), so a key
   // survives long enough for "the user folded this" to still mean something
@@ -460,6 +469,10 @@ export function InsightsPanel({
   const [foldOverrides, setFoldOverrides] = useState<Map<string, boolean>>(new Map());
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState<string | null>(null);
+
+  useEffect(() => {
+    localStorage.setItem(AUTO_SCROLL_KEY, autoScroll ? '1' : '0');
+  }, [autoScroll]);
 
   const types = useQuery({
     queryKey: ['insight-types'],
@@ -534,16 +547,14 @@ export function InsightsPanel({
   // the last-appended question -- everything else starts folded so a long
   // session's list doesn't bury what just happened under everything before
   // it. A manual toggle (foldOverrides) always wins over this default.
-  const visibleTopics = useMemo(() => topics.slice(-MAX_VISIBLE), [topics]);
-  const visibleQuestions = useMemo(
+  const questionRows = useMemo(
     () =>
-      questions.slice(-MAX_VISIBLE).map((question, i, arr) => ({
+      questions.map((question, i, arr) => ({
         question,
         isNewest: i === arr.length - 1,
       })),
     [questions],
   );
-  const visibleActionItems = useMemo(() => actionItems.slice(-MAX_VISIBLE), [actionItems]);
 
   return (
     <Card className="space-y-3 p-5">
@@ -618,6 +629,16 @@ export function InsightsPanel({
         )}
       </div>
 
+      <label className="flex items-center gap-2 text-xs text-fg-muted">
+        <input
+          type="checkbox"
+          checked={autoScroll}
+          onChange={(e) => setAutoScroll(e.target.checked)}
+          className="size-3.5 rounded border-border-strong"
+        />
+        Auto-scroll
+      </label>
+
       {!settings.isLoading && !insightsConfigured && (
         <p className="text-xs text-fg-subtle">
           No Insights model is configured. Set one in Settings → LLM to turn this on.
@@ -642,8 +663,10 @@ export function InsightsPanel({
             title="Topics"
             count={topics.length}
             emptyText="Waiting to identify the first topic…"
+            autoScroll={autoScroll}
+            scrollTrigger={topics}
           >
-            {visibleTopics.map((topic, i) => {
+            {topics.map((topic, i) => {
               const key = topic.title;
               const collapsed = foldOverrides.get(key) ?? !topic.current;
               return (
@@ -674,8 +697,10 @@ export function InsightsPanel({
             title="Questions"
             count={questions.length}
             emptyText="Listening for questions worth prepping…"
+            autoScroll={autoScroll}
+            scrollTrigger={questions}
           >
-            {visibleQuestions.map(({ question, isNewest }, i) => {
+            {questionRows.map(({ question, isNewest }, i) => {
               const key = question.question;
               const collapsed = foldOverrides.get(key) ?? !isNewest;
               return (
@@ -722,8 +747,10 @@ export function InsightsPanel({
             title="Action items"
             count={actionItems.length}
             emptyText="No commitments or follow-ups spotted yet…"
+            autoScroll={autoScroll}
+            scrollTrigger={actionItems}
           >
-            {visibleActionItems.map((item, i) => (
+            {actionItems.map((item, i) => (
               <ActionItemRow key={i} item={item} />
             ))}
           </InsightSection>
