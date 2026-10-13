@@ -3,6 +3,7 @@ import {
   AppWindow,
   Circle,
   Mic,
+  MicOff,
   Monitor,
   Pause,
   Play,
@@ -131,12 +132,16 @@ function LevelMeters({
   levelRoom,
   mixing,
   active,
+  muted = false,
   activity,
 }: {
   level: number;
   levelRoom: number;
   mixing: boolean;
   active: boolean;
+  /** Whether the microphone channel is muted; only dims the mic meter, never
+   * the room meter. */
+  muted?: boolean;
   /** Live-caption pipeline state per channel, from useLiveCaption --
    * omitted entirely when live captions are off, since there is no
    * channel_worker for the dot to describe then. */
@@ -146,7 +151,7 @@ function LevelMeters({
     return (
       <div className="flex items-center gap-1.5">
         {activity && <ActivityDot state={activity.me} />}
-        <LevelMeter level={level} active={active} />
+        <LevelMeter level={level} active={active && !muted} />
       </div>
     );
   }
@@ -155,7 +160,12 @@ function LevelMeters({
       <div className="flex items-center gap-1.5">
         {activity && <ActivityDot state={activity.me} />}
         <span className="text-xs text-fg-subtle">You</span>
-        <LevelMeter level={level} active={active} label="Your microphone level" bars={12} />
+        <LevelMeter
+          level={level}
+          active={active && !muted}
+          label="Your microphone level"
+          bars={12}
+        />
       </div>
       <div className="flex items-center gap-1.5">
         {activity && <ActivityDot state={activity.room} />}
@@ -364,6 +374,15 @@ export function RecorderPanel({
             Resume
           </Button>
         )}
+        <Button
+          type="button"
+          variant={recorder.muted ? 'danger' : 'secondary'}
+          aria-pressed={recorder.muted}
+          onClick={recorder.toggleMute}
+        >
+          {recorder.muted ? <MicOff /> : <Mic />}
+          {recorder.muted ? 'Unmute' : 'Mute'}
+        </Button>
         <span className="inline-flex items-center gap-2 font-mono text-sm tabular" aria-live="off">
           <span
             className={cn(
@@ -381,12 +400,14 @@ export function RecorderPanel({
         levelRoom={recorder.levelRoom}
         mixing={recorder.mixing}
         active={recorder.phase === 'recording'}
+        muted={recorder.muted && recorder.hasMic}
         activity={captionsLive ? captionsActivity : undefined}
       />
 
       {/* Status in text, because the dot and the meter are both colour alone. */}
       <p className="sr-only" role="status">
         {recorder.phase === 'recording' ? `Recording, ${recorder.elapsed}` : `Paused at ${recorder.elapsed}`}
+        {recorder.muted ? ' (microphone muted)' : ''}
         {captionsLive &&
           (soleChannel
             ? ` — live transcript: ${ACTIVITY_LABEL[captionsActivity[soleChannel]]}`
@@ -580,6 +601,15 @@ export function RecorderPanel({
                 Resume
               </Button>
             )}
+            <Button
+              type="button"
+              variant={recorder.muted ? 'danger' : 'secondary'}
+              aria-pressed={recorder.muted}
+              onClick={recorder.toggleMute}
+            >
+              {recorder.muted ? <MicOff /> : <Mic />}
+              {recorder.muted ? 'Unmute' : 'Mute'}
+            </Button>
           </>
         )}
 
@@ -603,6 +633,7 @@ export function RecorderPanel({
               levelRoom={recorder.levelRoom}
               mixing={recorder.mixing}
               active={recorder.phase === 'recording'}
+              muted={recorder.muted && recorder.hasMic}
             />
           </>
         )}
@@ -611,9 +642,9 @@ export function RecorderPanel({
       {/* Status in text, because the dot and the meter are both colour alone. */}
       <p className="sr-only" role="status">
         {recorder.phase === 'recording'
-          ? `Recording, ${recorder.elapsed}`
+          ? `Recording, ${recorder.elapsed}${recorder.muted ? ' (microphone muted)' : ''}`
           : recorder.phase === 'paused'
-            ? `Paused at ${recorder.elapsed}`
+            ? `Paused at ${recorder.elapsed}${recorder.muted ? ' (microphone muted)' : ''}`
             : recorder.clip
               ? 'Recording finished'
               : 'Not recording'}

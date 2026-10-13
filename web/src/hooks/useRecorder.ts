@@ -125,6 +125,8 @@ export function useRecorder() {
   // panel needs it live, to decide between one meter and two while still
   // recording.
   const [mixing, setMixing] = useState(false);
+  const [muted, setMutedState] = useState(false);
+  const [hasMic, setHasMic] = useState(false);
   const [clip, setClip] = useState<Clip | null>(null);
   const [liveStreams, setLiveStreams] = useState<LiveStreams>({ room: null, me: null });
 
@@ -133,6 +135,12 @@ export function useRecorder() {
   const recorder = useRef<MediaRecorder | null>(null);
   const chunks = useRef<BlobPart[]>([]);
   const streams = useRef<MediaStream[]>([]);
+  // Only the microphone stream ("me") -- never the tab/system ("room") stream.
+  // Toggling mute disables only this stream's audio tracks so the recording
+  // and any room capture keep going uninterrupted.
+  const micStream = useRef<MediaStream | null>(null);
+  const mutedRef = useRef(false);
+  const hasMicRef = useRef(false);
   const audioCtx = useRef<AudioContext | null>(null);
   // The mic/"me" analyser when mixing, or the sole analyser otherwise.
   const analyser = useRef<AnalyserNode | null>(null);
@@ -207,6 +215,9 @@ export function useRecorder() {
       for (const track of stream.getTracks()) track.stop();
     }
     streams.current = [];
+    micStream.current = null;
+    mutedRef.current = false;
+    hasMicRef.current = false;
 
     analyser.current?.disconnect();
     analyser.current = null;
@@ -218,6 +229,8 @@ export function useRecorder() {
     setLevel(0);
     setLevelRoom(0);
     setMixing(false);
+    setMutedState(false);
+    setHasMic(false);
     // The tracks just stopped above are the same streams useLiveCaption taps;
     // clearing this is what tells it to close its socket and tear down its
     // own AudioContexts rather than tapping dead tracks.
@@ -239,7 +252,11 @@ export function useRecorder() {
   const meter = useCallback(() => {
     const node = analyser.current;
     if (!node) return;
-    setLevel((previous) => nextLevel(node, previous));
+    if (mutedRef.current && hasMicRef.current) {
+      setLevel(0);
+    } else {
+      setLevel((previous) => nextLevel(node, previous));
+    }
 
     // Only present while mixing -- see analyserRoom's doc comment. Read
     // fresh every frame rather than captured once, since it can go from
@@ -271,6 +288,23 @@ export function useRecorder() {
     teardown();
   }, [teardown]);
 
+  const setMuted = useCallback((next: boolean) => {
+    mutedRef.current = next;
+    setMutedState(next);
+    if (micStream.current) {
+      for (const track of micStream.current.getAudioTracks()) {
+        track.enabled = !next;
+      }
+    }
+    if (next && hasMicRef.current) {
+      setLevel(0);
+    }
+  }, []);
+
+  const toggleMute = useCallback(() => {
+    setMuted(!mutedRef.current);
+  }, [setMuted]);
+
   /**
    * Open one microphone segment: a fresh getUserMedia + MediaRecorder pair,
    * good until the next pause or the final Stop.
@@ -288,6 +322,9 @@ export function useRecorder() {
       const stream = await navigator.mediaDevices.getUserMedia({
         audio: audioConstraints('mic', deviceId),
       });
+      for (const track of stream.getAudioTracks()) {
+        track.enabled = !mutedRef.current;
+      }
 
       const ctx = new AudioContext();
       await ctx.resume();
@@ -309,6 +346,9 @@ export function useRecorder() {
       };
 
       streams.current = [stream];
+      micStream.current = stream;
+      hasMicRef.current = true;
+      setHasMic(true);
       audioCtx.current = ctx;
       analyser.current = node;
       // A plain mic recording never mixes, so there is never a room channel
@@ -327,6 +367,8 @@ export function useRecorder() {
     async ({ source, deviceId, withMic }: StartOptions) => {
       setError(null);
       setPhase('starting');
+      mutedRef.current = false;
+      setMutedState(false);
 
       // Belt to the panel's braces. navigator.mediaDevices is absent outside a
       // secure context, and reaching for .getUserMedia on undefined is a
@@ -400,13 +442,20 @@ export function useRecorder() {
           );
         }
 
+        let mic: MediaStream | null = null;
         if (withMic) {
-          captured.push(
-            await navigator.mediaDevices.getUserMedia({
-              audio: audioConstraints('mic', deviceId),
-            }),
-          );
+          mic = await navigator.mediaDevices.getUserMedia({
+            audio: audioConstraints('mic', deviceId),
+          });
+          for (const track of mic.getAudioTracks()) {
+            track.enabled = !mutedRef.current;
+          }
+          captured.push(mic);
         }
+
+        micStream.current = mic;
+        hasMicRef.current = mic !== null;
+        setHasMic(mic !== null);
 
         const tracks = captured.flatMap((stream) => stream.getAudioTracks());
         const mixing = tracks.length > 1;
@@ -523,6 +572,9 @@ export function useRecorder() {
         for (const stream of captured) {
           for (const track of stream.getTracks()) track.stop();
         }
+        micStream.current = null;
+        hasMicRef.current = false;
+        setHasMic(false);
         setPhase('idle');
         setError(explain(err));
       }
@@ -545,6 +597,7 @@ export function useRecorder() {
       if (raf.current !== null) cancelAnimationFrame(raf.current);
       raf.current = null;
       setLevel(0);
+      micStream.current = null;
       recorder.current.stop();
       recorder.current = null;
     } else {
@@ -612,6 +665,10 @@ export function useRecorder() {
   const discard = useCallback(() => {
     clipUrl.current = null;
     segments.current = [];
+    mutedRef.current = false;
+    hasMicRef.current = false;
+    setMutedState(false);
+    setHasMic(false);
     setClip((previous) => {
       if (previous) URL.revokeObjectURL(previous.url);
       return null;
@@ -629,12 +686,16 @@ export function useRecorder() {
     level,
     levelRoom,
     mixing,
+    muted,
+    hasMic,
     clip,
     liveStreams,
     start,
     pause,
     resume,
     resuming,
+    setMuted,
+    toggleMute,
     stop,
     discard,
     busy: phase === 'starting',

@@ -226,6 +226,11 @@ export function useLiveCaption(streams: LiveStreams, enabled: boolean, language:
       let bufferedSamples = 0;
 
       node.port.onmessage = (event: MessageEvent<Float32Array>) => {
+        if (stream.getAudioTracks().every((t) => !t.enabled)) {
+          buffered = [];
+          bufferedSamples = 0;
+          return;
+        }
         buffered.push(event.data);
         bufferedSamples += event.data.length;
         if (bufferedSamples < FLUSH_SAMPLES) return;
